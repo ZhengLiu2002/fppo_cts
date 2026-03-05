@@ -211,7 +211,7 @@ class FPPOWithExtractor:
         self.transition.privileged_observations = critic_obs
         return self.transition.actions
 
-    def process_env_step(self, obs, rewards, dones, infos, costs=None):
+    def process_env_step(self, obs, rewards, dones, infos, costs=None, cost_terms=None):
         if self.storage is None:
             return
         self.transition.rewards = rewards.clone()
@@ -290,6 +290,7 @@ class FPPOWithExtractor:
                 old_sigma_batch,
                 hid_states_batch,
                 masks_batch,
+                *_,
             ) = batch
 
             # Normalize advantages per mini-batch if requested.

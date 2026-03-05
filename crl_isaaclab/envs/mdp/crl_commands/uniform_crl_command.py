@@ -26,6 +26,7 @@ class UniformCRLCommand(CommandTerm):
         self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
         self.heading_target = torch.zeros(self.num_envs, device=self.device)
         self.is_heading_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.is_yaw_env = torch.zeros_like(self.is_heading_env)
         self.is_standing_env = torch.zeros_like(self.is_heading_env)
         self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
@@ -244,19 +245,49 @@ class UniformCRLCommand(CommandTerm):
         # -- ang vel yaw - rotation around z
         self.vel_command_b[env_ids, 2] = r.uniform_(*ang_z_range)
         # heading target
+        heading_prob = 0.0
         if self.cfg.heading_command and heading_base is not None:
             self.heading_target[env_ids] = r.uniform_(*heading_base)
             # 使用地形特定的 heading_command_prob，如果存在；否则使用配置中的值
             heading_prob = (
                 heading_command_prob if terrain_ranges is not None else self.cfg.rel_heading_envs
             )
-            self.is_heading_env[env_ids] = r.uniform_(0.0, 1.0) <= heading_prob
         # update standing envs
         # 使用地形特定的 standing_command_prob，如果存在；否则使用配置中的值
         standing_prob = (
             standing_command_prob if terrain_ranges is not None else self.cfg.rel_standing_envs
         )
         self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= standing_prob
+
+        # Sample command modes for non-standing environments:
+        # heading mode, direct yaw-rate mode, or zero-yaw mode.
+        self.is_heading_env[env_ids] = False
+        self.is_yaw_env[env_ids] = False
+        active_mask = ~self.is_standing_env[env_ids]
+        if torch.any(active_mask):
+            active_env_ids = env_ids[active_mask]
+            mode_rand = torch.rand(active_env_ids.shape[0], device=self.device)
+
+            heading_prob = float(np.clip(heading_prob, 0.0, 1.0))
+            yaw_prob = float(np.clip(yaw_command_prob, 0.0, 1.0))
+            total_prob = heading_prob + yaw_prob
+            if total_prob > 1.0:
+                # Keep relative proportion while avoiding invalid probability mass.
+                scale = 1.0 / total_prob
+                heading_prob *= scale
+                yaw_prob *= scale
+
+            heading_mask = mode_rand < heading_prob
+            yaw_mask = (~heading_mask) & (mode_rand < (heading_prob + yaw_prob))
+
+            self.is_heading_env[active_env_ids] = heading_mask
+            self.is_yaw_env[active_env_ids] = yaw_mask
+
+            # Envs that are neither heading nor yaw mode are linear-only commands.
+            no_yaw_ids = active_env_ids[~yaw_mask & ~heading_mask]
+            if no_yaw_ids.numel() > 0:
+                self.vel_command_b[no_yaw_ids, 2] = 0.0
+
         # update standing envs
         if self.cfg.small_commands_to_zero:
             self.vel_command_b[env_ids, :2] *= (
@@ -308,6 +339,11 @@ class UniformCRLCommand(CommandTerm):
                     min=self.cfg.ranges.ang_vel_z[0],
                     max=self.cfg.ranges.ang_vel_z[1],
                 )
+        # Optionally zero very small yaw-rate commands, matching lin_vel_clip behavior.
+        if self.cfg.small_commands_to_zero:
+            self.vel_command_b[:, 2] *= (
+                torch.abs(self.vel_command_b[:, 2]) > self.cfg.clips.ang_vel_clip
+            )
         # Enforce standing (i.e., zero velocity command) for standing envs
         standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
         if standing_env_ids.numel() > 0:

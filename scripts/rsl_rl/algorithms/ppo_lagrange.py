@@ -115,8 +115,11 @@ class PPOLagrange(PPO):
             old_sigma_batch,
             hid_states_batch,
             masks_batch,
-            *_,
+            *extra_batch,
         ) in generator:
+            cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
+            cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
+            cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
                     advantages_batch = (advantages_batch - advantages_batch.mean()) / (
@@ -126,6 +129,24 @@ class PPOLagrange(PPO):
                         cost_advantages_batch = (
                             cost_advantages_batch - cost_advantages_batch.mean()
                         ) / (cost_advantages_batch.std() + 1e-8)
+            cost_returns_batch = self._sanitize_tensor(
+                cost_returns_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
+            )
+            cost_advantages_batch = self._sanitize_tensor(
+                cost_advantages_batch, nan=0.0, posinf=1.0e3, neginf=-1.0e3, clamp=1.0e3
+            )
+            cost_values_batch = self._sanitize_tensor(
+                cost_values_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
+            )
+            cost_terms_ret, cost_terms_adv, cost_terms_val = self._prepare_cost_term_batches(
+                cost_returns_batch=cost_returns_batch,
+                cost_advantages_batch=cost_advantages_batch,
+                cost_term_returns_batch=cost_term_returns_batch,
+                cost_term_advantages_batch=cost_term_advantages_batch,
+                cost_term_values_batch=cost_term_values_batch,
+            )
+            aggregate_cost_returns = torch.sum(cost_terms_ret, dim=1)
+            aggregate_cost_advantages = torch.sum(cost_terms_adv, dim=1)
 
             # Actor and critic forward pass
             self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
@@ -136,6 +157,15 @@ class PPOLagrange(PPO):
             cost_value_batch = self.policy.evaluate_cost(
                 critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[2]
             )
+            cost_value_batch = self._sanitize_tensor(
+                cost_value_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
+            )
+            if cost_value_batch.ndim == 1:
+                cost_value_batch = cost_value_batch.unsqueeze(-1)
+            elif cost_value_batch.ndim > 2:
+                cost_value_batch = cost_value_batch.view(cost_value_batch.shape[0], -1)
+            pred_cost_terms = self._match_cost_heads(cost_value_batch, cost_terms_ret.shape[1])
+            old_cost_terms = self._match_cost_heads(cost_terms_val, cost_terms_ret.shape[1])
             mu_batch = self.policy.action_mean
             sigma_batch = self.policy.action_std
             entropy_batch = self.policy.entropy
@@ -172,9 +202,9 @@ class PPOLagrange(PPO):
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
-            cost_surrogate = (torch.squeeze(cost_advantages_batch) * ratio).mean()
+            cost_surrogate = (aggregate_cost_advantages * ratio).mean()
             batch_cost_return, batch_cost_violation, c_hat_batch = self._batch_cost_stats(
-                cost_returns_batch
+                aggregate_cost_returns
             )
             viol_loss = self._positive_cost_penalty(cost_surrogate, c_hat_batch)
 
@@ -189,14 +219,14 @@ class PPOLagrange(PPO):
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
             if self.use_clipped_value_loss:
-                cost_value_clipped = cost_values_batch + (
-                    cost_value_batch - cost_values_batch
+                cost_value_clipped = old_cost_terms + (
+                    pred_cost_terms - old_cost_terms
                 ).clamp(-self.clip_param, self.clip_param)
-                cost_value_losses = (cost_value_batch - cost_returns_batch).pow(2)
-                cost_value_losses_clipped = (cost_value_clipped - cost_returns_batch).pow(2)
+                cost_value_losses = (pred_cost_terms - cost_terms_ret).pow(2)
+                cost_value_losses_clipped = (cost_value_clipped - cost_terms_ret).pow(2)
                 cost_value_loss = torch.max(cost_value_losses, cost_value_losses_clipped).mean()
             else:
-                cost_value_loss = (cost_returns_batch - cost_value_batch).pow(2).mean()
+                cost_value_loss = (cost_terms_ret - pred_cost_terms).pow(2).mean()
 
             loss = (
                 surrogate_loss

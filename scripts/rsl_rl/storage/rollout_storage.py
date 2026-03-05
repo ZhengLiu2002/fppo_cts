@@ -18,6 +18,8 @@ class RolloutStorage:
             self.privileged_actions = None
             self.rewards = None
             self.cost_rewards = None
+            self.cost_term_rewards = None
+            self.cost_term_values = None
             self.dones = None
             self.values = None
             self.cost_values = None
@@ -60,6 +62,10 @@ class RolloutStorage:
             self.privileged_observations = None
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.cost_rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
+        self.cost_term_rewards = None
+        self.cost_term_values = None
+        self.cost_term_returns = None
+        self.cost_term_advantages = None
         self.actions = torch.zeros(
             num_transitions_per_env, num_envs, *actions_shape, device=self.device
         )
@@ -116,6 +122,51 @@ class RolloutStorage:
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         if transition.cost_rewards is not None:
             self.cost_rewards[self.step].copy_(transition.cost_rewards.view(-1, 1))
+        if transition.cost_term_rewards is not None:
+            cost_terms = transition.cost_term_rewards
+            if not torch.is_tensor(cost_terms):
+                cost_terms = torch.as_tensor(cost_terms, device=self.device)
+            cost_terms = cost_terms.to(self.device)
+            if cost_terms.ndim == 1:
+                cost_terms = cost_terms.unsqueeze(-1)
+            elif cost_terms.ndim > 2:
+                cost_terms = cost_terms.view(cost_terms.shape[0], -1)
+            num_cost_terms = cost_terms.shape[-1]
+            if self.cost_term_rewards is None:
+                self.cost_term_rewards = torch.zeros(
+                    self.num_transitions_per_env,
+                    self.num_envs,
+                    num_cost_terms,
+                    device=self.device,
+                )
+                self.cost_term_values = torch.zeros_like(self.cost_term_rewards)
+                self.cost_term_returns = torch.zeros_like(self.cost_term_rewards)
+                self.cost_term_advantages = torch.zeros_like(self.cost_term_rewards)
+            elif self.cost_term_rewards.shape[-1] != num_cost_terms:
+                raise ValueError(
+                    "Number of cost terms changed during rollout: "
+                    f"{self.cost_term_rewards.shape[-1]} -> {num_cost_terms}."
+                )
+            self.cost_term_rewards[self.step].copy_(cost_terms)
+            cost_term_values = transition.cost_term_values
+            if cost_term_values is None:
+                cost_term_values = transition.cost_values
+            if cost_term_values is not None:
+                if not torch.is_tensor(cost_term_values):
+                    cost_term_values = torch.as_tensor(cost_term_values, device=self.device)
+                cost_term_values = cost_term_values.to(self.device)
+                if cost_term_values.ndim == 1:
+                    cost_term_values = cost_term_values.unsqueeze(-1)
+                elif cost_term_values.ndim > 2:
+                    cost_term_values = cost_term_values.view(cost_term_values.shape[0], -1)
+                if cost_term_values.shape[-1] == 1 and num_cost_terms > 1:
+                    cost_term_values = cost_term_values.expand(-1, num_cost_terms)
+                elif cost_term_values.shape[-1] != num_cost_terms:
+                    raise ValueError(
+                        "Number of cost value heads does not match cost terms: "
+                        f"{cost_term_values.shape[-1]} vs {num_cost_terms}."
+                    )
+                self.cost_term_values[self.step].copy_(cost_term_values)
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
         # for distillation
         if self.training_type == "distillation":
@@ -190,6 +241,7 @@ class RolloutStorage:
         lam,
         normalize_advantage: bool = True,
         last_cost_values=None,
+        last_cost_term_values=None,
         cost_gamma=None,
         cost_lam=None,
         normalize_cost_advantage: bool = True,
@@ -199,15 +251,27 @@ class RolloutStorage:
         cost_gamma = gamma if cost_gamma is None else cost_gamma
         cost_lam = lam if cost_lam is None else cost_lam
         compute_cost = self.training_type == "rl" and last_cost_values is not None
+        compute_cost_terms = (
+            compute_cost
+            and self.cost_term_rewards is not None
+            and self.cost_term_values is not None
+            and self.cost_term_returns is not None
+            and last_cost_term_values is not None
+        )
+        cost_term_advantage = None
+        if compute_cost_terms:
+            cost_term_advantage = torch.zeros_like(self.cost_term_rewards[0])
 
         for step in reversed(range(self.num_transitions_per_env)):
             # if we are at the last step, bootstrap the return value
             if step == self.num_transitions_per_env - 1:
                 next_values = last_values
                 next_cost_values = last_cost_values if compute_cost else None
+                next_cost_term_values = last_cost_term_values if compute_cost_terms else None
             else:
                 next_values = self.values[step + 1]
                 next_cost_values = self.cost_values[step + 1] if compute_cost else None
+                next_cost_term_values = self.cost_term_values[step + 1] if compute_cost_terms else None
             # 1 if we are not in a terminal state, 0 otherwise
             next_is_not_terminal = 1.0 - self.dones[step].float()
             # TD error: r_t + gamma * V(s_{t+1}) - V(s_t)
@@ -229,6 +293,18 @@ class RolloutStorage:
                     cost_delta + next_is_not_terminal * cost_gamma * cost_lam * cost_advantage
                 )
                 self.cost_returns[step] = cost_advantage + self.cost_values[step]
+                if compute_cost_terms and cost_term_advantage is not None:
+                    current_cost_values = self.cost_term_values[step]
+                    cost_term_delta = (
+                        self.cost_term_rewards[step]
+                        + next_is_not_terminal * cost_gamma * next_cost_term_values
+                        - current_cost_values
+                    )
+                    cost_term_advantage = (
+                        cost_term_delta
+                        + next_is_not_terminal * cost_gamma * cost_lam * cost_term_advantage
+                    )
+                    self.cost_term_returns[step] = cost_term_advantage + current_cost_values
 
         # Compute the advantages
         self.advantages = self.returns - self.values
@@ -245,6 +321,12 @@ class RolloutStorage:
                 self.cost_advantages = (self.cost_advantages - self.cost_advantages.mean()) / (
                     self.cost_advantages.std() + 1e-8
                 )
+            if compute_cost_terms and self.cost_term_advantages is not None:
+                self.cost_term_advantages = self.cost_term_returns - self.cost_term_values
+                if normalize_cost_advantage:
+                    mean = self.cost_term_advantages.mean(dim=(0, 1), keepdim=True)
+                    std = self.cost_term_advantages.std(dim=(0, 1), keepdim=True, unbiased=False)
+                    self.cost_term_advantages = (self.cost_term_advantages - mean) / (std + 1e-8)
 
     # for distillation
     def generator(self):
@@ -283,6 +365,20 @@ class RolloutStorage:
         cost_values = self.cost_values.flatten(0, 1)
         cost_returns = self.cost_returns.flatten(0, 1)
         cost_advantages = self.cost_advantages.flatten(0, 1)
+        cost_term_rewards = (
+            self.cost_term_rewards.flatten(0, 1) if self.cost_term_rewards is not None else None
+        )
+        cost_term_values = (
+            self.cost_term_values.flatten(0, 1) if self.cost_term_values is not None else None
+        )
+        cost_term_returns = (
+            self.cost_term_returns.flatten(0, 1) if self.cost_term_returns is not None else None
+        )
+        cost_term_advantages = (
+            self.cost_term_advantages.flatten(0, 1)
+            if self.cost_term_advantages is not None
+            else None
+        )
 
         # For PPO
         old_actions_log_prob = self.actions_log_prob.flatten(0, 1)
@@ -313,6 +409,20 @@ class RolloutStorage:
                 advantages_batch = advantages[batch_idx]
                 old_mu_batch = old_mu[batch_idx]
                 old_sigma_batch = old_sigma[batch_idx]
+                cost_term_returns_batch = (
+                    cost_term_returns[batch_idx] if cost_term_returns is not None else None
+                )
+                cost_term_advantages_batch = (
+                    cost_term_advantages[batch_idx]
+                    if cost_term_advantages is not None
+                    else None
+                )
+                cost_term_rewards_batch = (
+                    cost_term_rewards[batch_idx] if cost_term_rewards is not None else None
+                )
+                cost_term_values_batch = (
+                    cost_term_values[batch_idx] if cost_term_values is not None else None
+                )
 
                 # yield the mini-batch
                 yield (
@@ -330,6 +440,10 @@ class RolloutStorage:
                     old_sigma_batch,
                     (None, None, None),
                     None,
+                    cost_term_returns_batch,
+                    cost_term_advantages_batch,
+                    cost_term_rewards_batch,
+                    cost_term_values_batch,
                 )
 
     # for reinfrocement learning with recurrent networks
@@ -355,6 +469,26 @@ class RolloutStorage:
         cost_values_traj = split_and_pad_trajectories(self.dones, self.cost_values)[0]
         cost_returns_traj = split_and_pad_trajectories(self.dones, self.cost_returns)[0]
         cost_advantages_traj = split_and_pad_trajectories(self.dones, self.cost_advantages)[0]
+        cost_term_rewards_traj = (
+            split_and_pad_trajectories(self.dones, self.cost_term_rewards)[0]
+            if self.cost_term_rewards is not None
+            else None
+        )
+        cost_term_values_traj = (
+            split_and_pad_trajectories(self.dones, self.cost_term_values)[0]
+            if self.cost_term_values is not None
+            else None
+        )
+        cost_term_returns_traj = (
+            split_and_pad_trajectories(self.dones, self.cost_term_returns)[0]
+            if self.cost_term_returns is not None
+            else None
+        )
+        cost_term_advantages_traj = (
+            split_and_pad_trajectories(self.dones, self.cost_term_advantages)[0]
+            if self.cost_term_advantages is not None
+            else None
+        )
         old_actions_log_prob_traj = split_and_pad_trajectories(self.dones, self.actions_log_prob)[0]
         advantages_traj = split_and_pad_trajectories(self.dones, self.advantages)[0]
         old_mu_traj = split_and_pad_trajectories(self.dones, self.mu)[0]
@@ -389,6 +523,26 @@ class RolloutStorage:
                 advantages_batch = advantages_traj[:, batch_idx]
                 old_mu_batch = old_mu_traj[:, batch_idx]
                 old_sigma_batch = old_sigma_traj[:, batch_idx]
+                cost_term_returns_batch = (
+                    cost_term_returns_traj[:, batch_idx]
+                    if cost_term_returns_traj is not None
+                    else None
+                )
+                cost_term_advantages_batch = (
+                    cost_term_advantages_traj[:, batch_idx]
+                    if cost_term_advantages_traj is not None
+                    else None
+                )
+                cost_term_rewards_batch = (
+                    cost_term_rewards_traj[:, batch_idx]
+                    if cost_term_rewards_traj is not None
+                    else None
+                )
+                cost_term_values_batch = (
+                    cost_term_values_traj[:, batch_idx]
+                    if cost_term_values_traj is not None
+                    else None
+                )
 
                 # hidden states: (num_layers, batch, hidden_dim)
                 hid_a = self.saved_hidden_states_a[:, batch_idx]
@@ -412,4 +566,8 @@ class RolloutStorage:
                     old_sigma_batch,
                     (hid_a, hid_c, hid_cost),
                     traj_masks[:, batch_idx],
+                    cost_term_returns_batch,
+                    cost_term_advantages_batch,
+                    cost_term_rewards_batch,
+                    cost_term_values_batch,
                 )

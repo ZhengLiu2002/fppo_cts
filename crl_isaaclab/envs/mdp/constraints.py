@@ -46,6 +46,47 @@ def _normalize_cost(cost: torch.Tensor, limit: float | None) -> torch.Tensor:
     return cost / limit_t
 
 
+def _dynamic_limit_scale(
+    env: ManagerBasedRLEnv,
+    epsilon: float | None,
+    k: float | None,
+) -> float:
+    """Compute curriculum scale phi(step) = (epsilon - 1) * exp(-k * step) + 1."""
+    if epsilon is None:
+        return 1.0
+    eps = max(float(epsilon), 1.0e-6)
+    if k is None:
+        return eps
+    k_val = max(float(k), 0.0)
+    if k_val == 0.0:
+        return eps
+    step = float(getattr(env, "common_step_counter", getattr(env, "_sim_step_counter", 0)))
+    phi = (eps - 1.0) * math.exp(-k_val * step) + 1.0
+    return max(phi, 1.0e-6)
+
+
+def _smoothstep_progress(
+    env: ManagerBasedRLEnv,
+    schedule_start_step: int | None,
+    schedule_end_step: int | None,
+) -> float:
+    """Return a smoothed [0, 1] curriculum progress from global step."""
+    if schedule_start_step is None or schedule_end_step is None:
+        return 1.0
+    start = float(schedule_start_step)
+    end = float(schedule_end_step)
+    step = float(getattr(env, "common_step_counter", getattr(env, "_sim_step_counter", 0)))
+    if end <= start:
+        return 1.0 if step >= end else 0.0
+    u = (step - start) / (end - start)
+    u = min(max(u, 0.0), 1.0)
+    return u * u * (3.0 - 2.0 * u)
+
+
+def _lerp(start: float, end: float, alpha: float) -> float:
+    return float(start) + (float(end) - float(start)) * float(alpha)
+
+
 def _command_gate(
     env: ManagerBasedRLEnv,
     command_name: str | None,
@@ -336,9 +377,17 @@ def com_frame_prob_constraint(
     height_range: tuple[float, float] = (0.2, 0.8),
     max_angle_rad: float = 0.35,
     cost_limit: float | None = None,
+    limit_relax_epsilon: float | None = None,
+    limit_relax_k: float | None = None,
     terrain_sensor_cfg: SceneEntityCfg | None = None,
     height_offset: float = 0.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    height_range_start: tuple[float, float] | None = None,
+    height_range_end: tuple[float, float] | None = None,
+    max_angle_rad_start: float | None = None,
+    max_angle_rad_end: float | None = None,
+    schedule_start_step: int | None = None,
+    schedule_end_step: int | None = None,
 ) -> torch.Tensor:
     """Constraint on base height and orientation relative to terrain."""
     asset: Articulation = env.scene[asset_cfg.name]
@@ -352,11 +401,36 @@ def com_frame_prob_constraint(
     if height_offset != 0.0:
         height = height - height_offset
 
-    min_h, max_h = height_range
+    use_physical_schedule = any(
+        value is not None
+        for value in (
+            height_range_start,
+            height_range_end,
+            max_angle_rad_start,
+            max_angle_rad_end,
+        )
+    )
+    if use_physical_schedule:
+        alpha = _smoothstep_progress(env, schedule_start_step, schedule_end_step)
+        start_range = height_range if height_range_start is None else height_range_start
+        end_range = height_range if height_range_end is None else height_range_end
+        min_h = _lerp(start_range[0], end_range[0], alpha)
+        max_h = _lerp(start_range[1], end_range[1], alpha)
+        start_ang = max_angle_rad if max_angle_rad_start is None else max_angle_rad_start
+        end_ang = max_angle_rad if max_angle_rad_end is None else max_angle_rad_end
+        max_angle = _lerp(start_ang, end_ang, alpha)
+    else:
+        min_h, max_h = height_range
+        max_angle = max_angle_rad
+
     height_violation = (height < min_h) | (height > max_h)
-    tilt = constraint_com_orientation(env, max_angle_rad=max_angle_rad, asset_cfg=asset_cfg)
+    tilt = constraint_com_orientation(env, max_angle_rad=max_angle, asset_cfg=asset_cfg)
     cost = height_violation.float() + tilt
-    return _normalize_cost(cost, cost_limit)
+    scaled_limit = cost_limit
+    if cost_limit is not None and not use_physical_schedule:
+        phi = _dynamic_limit_scale(env, epsilon=limit_relax_epsilon, k=limit_relax_k)
+        scaled_limit = float(cost_limit) * phi
+    return _normalize_cost(cost, scaled_limit)
 
 
 def gait_pattern_prob_constraint(
@@ -376,22 +450,65 @@ def gait_pattern_prob_constraint(
     min_base_speed: float | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     limit: float | None = None,
+    limit_relax_epsilon: float | None = None,
+    limit_relax_k: float | None = None,
+    gait_frequency_start: float | None = None,
+    gait_frequency_end: float | None = None,
+    stance_ratio_start: float | None = None,
+    stance_ratio_end: float | None = None,
+    phase_offset_scale_start: float | None = None,
+    phase_offset_scale_end: float | None = None,
+    phase_tolerance_start: float | None = None,
+    phase_tolerance_end: float | None = None,
+    schedule_start_step: int | None = None,
+    schedule_end_step: int | None = None,
 ) -> torch.Tensor:
     contact_sensor = env.scene.sensors[sensor_cfg.name]
     foot_ids, _ = contact_sensor.find_bodies(foot_body_names, preserve_order=True)
     if not foot_ids:
         return _zeros_like_env(env)
 
+    use_physical_schedule = any(
+        value is not None
+        for value in (
+            gait_frequency_start,
+            gait_frequency_end,
+            stance_ratio_start,
+            stance_ratio_end,
+            phase_offset_scale_start,
+            phase_offset_scale_end,
+            phase_tolerance_start,
+            phase_tolerance_end,
+        )
+    )
+    alpha = _smoothstep_progress(env, schedule_start_step, schedule_end_step)
+    freq_start = gait_frequency if gait_frequency_start is None else gait_frequency_start
+    freq_end = gait_frequency if gait_frequency_end is None else gait_frequency_end
+    gait_frequency_curr = _lerp(freq_start, freq_end, alpha)
+    stance_start = stance_ratio if stance_ratio_start is None else stance_ratio_start
+    stance_end = stance_ratio if stance_ratio_end is None else stance_ratio_end
+    stance_ratio_curr = _lerp(stance_start, stance_end, alpha)
+    stance_ratio_curr = min(max(stance_ratio_curr, 0.05), 0.95)
+    phase_scale_start = 1.0 if phase_offset_scale_start is None else phase_offset_scale_start
+    phase_scale_end = 1.0 if phase_offset_scale_end is None else phase_offset_scale_end
+    phase_offset_scale = _lerp(phase_scale_start, phase_scale_end, alpha)
+    phase_tol_start = 0.0 if phase_tolerance_start is None else phase_tolerance_start
+    phase_tol_end = 0.0 if phase_tolerance_end is None else phase_tolerance_end
+    phase_tolerance = _lerp(phase_tol_start, phase_tol_end, alpha)
+    phase_tolerance = min(max(phase_tolerance, 0.0), 0.49)
+
     dt = env.step_dt if hasattr(env, "step_dt") else 0.0
     phase_offsets = phase_offsets or [0.0] * len(foot_ids)
-    phase_offsets = phase_offsets[: len(foot_ids)]
+    # ensure phase list length matches number of feet
+    phase_offsets = (phase_offsets + [0.0] * len(foot_ids))[: len(foot_ids)]
     phase_offsets = torch.as_tensor(
         phase_offsets, device=contact_sensor.data.net_forces_w.device, dtype=torch.float32
     )
+    phase_offsets = phase_offsets * float(phase_offset_scale)
     freq = _resolve_gait_frequency(
         env,
         command_name=command_name,
-        base_frequency=gait_frequency,
+        base_frequency=gait_frequency_curr,
         min_frequency=min_frequency,
         max_frequency=max_frequency,
         max_command_speed=max_command_speed,
@@ -401,12 +518,30 @@ def gait_pattern_prob_constraint(
     )
     t = getattr(env, "_sim_step_counter", 0) * dt
     phase = (t * freq.unsqueeze(-1) + phase_offsets) % 1.0
-    stance = phase < stance_ratio
-    contact = (
-        contact_sensor.data.net_forces_w_history[..., foot_ids].norm(dim=-1).max(dim=1)[0]
-        > contact_threshold
-    )
-    cost = (stance != contact).float().mean(dim=1)
+    stance = phase < stance_ratio_curr
+
+    # NOTE: expected layout is (N, H, B, 3); keep fallback for (N, B, H, 3).
+    forces_hist = contact_sensor.data.net_forces_w_history
+    max_foot_id = max(foot_ids)
+    if forces_hist.ndim != 4:
+        return _zeros_like_env(env)
+    if forces_hist.shape[2] > max_foot_id:
+        force_mag = forces_hist[:, :, foot_ids, :].norm(dim=-1).max(dim=1)[0]
+    elif forces_hist.shape[1] > max_foot_id:
+        force_mag = forces_hist[:, foot_ids, :, :].norm(dim=-1).max(dim=2)[0]
+    else:
+        return _zeros_like_env(env)
+    contact = force_mag > contact_threshold
+
+    mismatch = stance != contact
+    if phase_tolerance > 0.0:
+        dist_to_cycle_start = torch.minimum(phase, 1.0 - phase)
+        dist_to_stance_edge = torch.abs(phase - stance_ratio_curr)
+        transition_zone = (dist_to_cycle_start <= phase_tolerance) | (
+            dist_to_stance_edge <= phase_tolerance
+        )
+        mismatch = mismatch & (~transition_zone)
+    cost = mismatch.float().mean(dim=1)
     gate = _command_gate(
         env,
         command_name=command_name,
@@ -418,7 +553,11 @@ def gait_pattern_prob_constraint(
     )
     if gate is not None:
         cost = cost * gate
-    return _normalize_cost(cost, limit)
+    scaled_limit = limit
+    if limit is not None and not use_physical_schedule:
+        phi = _dynamic_limit_scale(env, epsilon=limit_relax_epsilon, k=limit_relax_k)
+        scaled_limit = float(limit) * phi
+    return _normalize_cost(cost, scaled_limit)
 
 
 def orthogonal_velocity_constraint(
@@ -531,7 +670,12 @@ def foot_height_limit_constraint(
     if not foot_ids:
         return _zeros_like_env(env)
     foot_heights = _foot_heights_relative(env, asset, foot_ids, terrain_sensor_cfg, height_offset)
-    cost = torch.max(foot_heights, dim=1).values
+    max_height = torch.max(foot_heights, dim=1).values
+    if limit is None:
+        return max_height
+    limit_t = torch.as_tensor(limit, device=max_height.device, dtype=max_height.dtype)
+    # Only penalize overshoot above the configured maximum height.
+    cost = torch.clamp(max_height - limit_t, min=0.0)
     return _normalize_cost(cost, limit)
 
 

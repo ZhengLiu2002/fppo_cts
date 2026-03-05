@@ -208,12 +208,22 @@ class GalileoDefaults:
         render_interval = 4
 
     class curriculum:
-        # Performance-based adaptive curriculum. episodes_per_level is kept for
-        # backward compatibility but the actual upgrade/downgrade decisions are
-        # driven by survival rate + tracking error score (see curriculums.py).
-        episodes_per_level = 10
+        # Command curriculum uses a gated progression policy:
+        # warmup -> minimum interval between upgrades -> tracking quality gate.
+        # episodes_per_level is retained for backward compatibility with legacy
+        # time-based logic in curriculums.py.
+        episodes_per_level = 15
         terrain_move_up_ratio = 0.3
         terrain_move_down_ratio = 0.25
+        command_warmup_steps = 4800
+        command_min_progress_steps = 3600
+        command_terrain_gate_level = 2.0
+        command_min_active_ratio = 0.12
+        lin_tracking_error_threshold = 0.21
+        ang_tracking_error_threshold = 0.22
+        lin_eval_min_command_speed = 0.20
+        ang_eval_min_command_speed = 0.16
+        ang_min_lin_x_level = 0.50
 
     class sim:
         dt = 0.0025
@@ -318,25 +328,25 @@ class GalileoDefaults:
         max_lin_x_level: float = 1.0
         ang_z_level: float = 0.3
         max_ang_z_level: float = 1.0
-        lin_x_level_step: float = 0.02
-        ang_z_level_step: float = 0.02
+        lin_x_level_step: float = 0.01
+        ang_z_level_step: float = 0.01
         min_abs_lin_vel_x: float = 0.1
         min_abs_lin_vel_y: float = 0.0
-        heading_control_stiffness = 0.8
+        heading_control_stiffness = 1.0
 
         # 默认配置（用于 CommandsCfg 的初始化，不在地形特定配置中）
         class default:
-            heading_command_prob: float = 0.2
+            heading_command_prob: float = 0.4
             standing_command_prob: float = 0.05
-            yaw_command_prob: float = 0.0
-            lin_vel_x = (0.25, 0.5)
+            yaw_command_prob: float = 0.55
+            lin_vel_x = (0.2, 0.55)
             lin_vel_y = (-0.1, 0.1)
-            ang_vel_z = (-0.15, 0.15)
-            heading = (-math.pi / 8, math.pi / 8)
-            start_curriculum_lin_x = (0.25, 0.45)
-            start_curriculum_ang_z = (-0.1, 0.1)
-            max_curriculum_lin_x = (0.4, 0.8)
-            max_curriculum_ang_z = (-0.3, 0.3)
+            ang_vel_z = (-0.22, 0.22)
+            heading = (-math.pi / 3, math.pi / 3)
+            start_curriculum_lin_x = (0.2, 0.45)
+            start_curriculum_ang_z = (-0.12, 0.12)
+            max_curriculum_lin_x = (0.45, 1.0)
+            max_curriculum_ang_z = (-0.45, 0.45)
 
         ranges = {
             "pyramid_stairs": dict(
@@ -344,8 +354,8 @@ class GalileoDefaults:
                 lin_vel_y=(-0.2, 0.2),
                 ang_vel_z=(-0.12, 0.12),
                 heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=1.0,
-                yaw_command_prob=0.0,
+                heading_command_prob=0.6,
+                yaw_command_prob=0.35,
                 standing_command_prob=0.0,
                 start_curriculum_lin_x=(0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
@@ -357,8 +367,8 @@ class GalileoDefaults:
                 lin_vel_y=(-0.2, 0.2),
                 ang_vel_z=(-0.12, 0.12),
                 heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=1.0,
-                yaw_command_prob=0.0,
+                heading_command_prob=0.6,
+                yaw_command_prob=0.35,
                 standing_command_prob=0.0,
                 start_curriculum_lin_x=(0.12, 0.25),
                 start_curriculum_ang_z=(-0.08, 0.08),
@@ -370,8 +380,8 @@ class GalileoDefaults:
                 lin_vel_y=(-0.25, 0.25),
                 ang_vel_z=(-0.12, 0.12),
                 heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=1.0,
-                yaw_command_prob=0.0,
+                heading_command_prob=0.6,
+                yaw_command_prob=0.35,
                 standing_command_prob=0.0,
                 start_curriculum_lin_x=(0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
@@ -383,8 +393,8 @@ class GalileoDefaults:
                 lin_vel_y=(-0.25, 0.25),
                 ang_vel_z=(-0.12, 0.12),
                 heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=1.0,
-                yaw_command_prob=0.0,
+                heading_command_prob=0.6,
+                yaw_command_prob=0.35,
                 standing_command_prob=0.0,
                 start_curriculum_lin_x=(0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
@@ -396,8 +406,8 @@ class GalileoDefaults:
                 lin_vel_y=(-0.2, 0.2),
                 ang_vel_z=(-0.12, 0.12),
                 heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=1.0,
-                yaw_command_prob=0.0,
+                heading_command_prob=0.6,
+                yaw_command_prob=0.35,
                 standing_command_prob=0.0,
                 start_curriculum_lin_x=(0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
@@ -409,8 +419,8 @@ class GalileoDefaults:
                 lin_vel_y=(-0.2, 0.2),
                 ang_vel_z=(-0.12, 0.12),
                 heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=1.0,
-                yaw_command_prob=0.0,
+                heading_command_prob=0.6,
+                yaw_command_prob=0.35,
                 standing_command_prob=0.0,
                 start_curriculum_lin_x=(0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
@@ -420,20 +430,20 @@ class GalileoDefaults:
             "plane_run": dict(
                 lin_vel_x=(0.3, 1.1),
                 lin_vel_y=(-0.25, 0.25),
-                ang_vel_z=(-0.18, 0.18),
+                ang_vel_z=(-0.22, 0.22),
                 heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=1.0,
-                yaw_command_prob=0.0,
+                heading_command_prob=0.4,
+                yaw_command_prob=0.55,
                 standing_command_prob=0.0,
                 start_curriculum_lin_x=(0.2, 0.5),
-                start_curriculum_ang_z=(-0.1, 0.1),
+                start_curriculum_ang_z=(-0.12, 0.12),
                 max_curriculum_lin_x=(0.8, 1.2),
-                max_curriculum_ang_z=(-0.3, 0.3),
+                max_curriculum_ang_z=(-0.45, 0.45),
             ),
         }
 
         resampling_time_range = (6.0, 6.0)
-        clips = dict(lin_vel_clip=0.1, ang_vel_clip=0.1)
+        clips = dict(lin_vel_clip=0.1, ang_vel_clip=0.02)
 
     class priv_obs_norm:
         """Normalization ranges for privileged observations."""
@@ -573,13 +583,19 @@ class GalileoDefaults:
             "fppo": dict(
                 cost_value_loss_coef=1.0,
                 desired_kl=0.01,
+                delta_kl=0.01,
                 step_size=6.0e-4,
                 cost_gamma=None,
                 cost_lam=None,
                 delta_safe=0.03,
+                epsilon_safe=0.01,
                 backtrack_coeff=0.5,
                 max_backtracks=10,
                 projection_eps=1e-6,
+                active_set_threshold=0.05,
+                confidence_level=0.05,
+                softproj_max_iters=40,
+                softproj_tol=1e-6,
                 normalize_cost_advantage=False,
                 constraint_normalization=True,
                 constraint_norm_beta=0.9,
@@ -619,16 +635,20 @@ class GalileoDefaults:
             # NP3O
             "np3o": dict(
                 cost_value_loss_coef=1.0,
-                learning_rate=5.0e-4,
-                schedule="fixed",
-                desired_kl=0.01,
+                learning_rate=2.5e-4,
+                schedule="adaptive",
+                desired_kl=0.007,
+                cost_limit=1.6,
                 cost_gamma=None,
                 cost_lam=None,
                 normalize_cost_advantage=True,
-                cost_viol_loss_coef=0.2,
-                k_value=0.05,
-                k_growth=1.0001,
-                k_max=0.5,
+                cost_viol_loss_coef=0.12,
+                k_value=0.03,
+                k_growth=1.00007,
+                k_max=0.4,
+                k_decay=0.9999,
+                k_min=0.01,
+                k_violation_threshold=0.02,
                 dagger_update_freq=20,
             ),
             # PPO（示例：如果你切到 PPO，只需要写 PPO 特有/你要覆写的字段）
@@ -651,7 +671,7 @@ class GalileoDefaults:
 
         # Teacher/Student 差异
         teacher_override = dict(
-            entropy_coef=0.006,
+            entropy_coef=0.005,
         )
         student_override = dict(
             entropy_coef=0.01,

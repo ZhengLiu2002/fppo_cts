@@ -39,7 +39,7 @@ cd /home/lz/Project/IsaacLab/fppo_ts
 可选值：
 - `fppo` / `np3o` / `ppo` / `ppo_lagrange` / `cpo` / `pcpo` / `focpo` / `distillation`（使用 `scripts/rsl_rl/algorithms/` 里的实现）
 
-示例：
+示例：fppo
 ```bash
 # Teacher
 LOG_RUN_NAME=fppo python scripts/rsl_rl/train.py \
@@ -81,7 +81,34 @@ LOG_RUN_NAME=ppo_lagrange python scripts/rsl_rl/train.py \
   --algo ppo_lagrange --num_envs 4096 --max_iterations 50000 --run_name student --headless \
   --logger wandb --log_project_name galileo_ppo_lagrange
 ```
+示例：pcpo
+```bash
+# Teacher
+LOG_RUN_NAME=pcpo python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CRL-Teacher-v0 \
+  --algo pcpo --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
+  --logger wandb --log_project_name galileo_pcpo
 
+# Student
+LOG_RUN_NAME=pcpo python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CRL-Student-v0 \
+  --algo pcpo --num_envs 4096 --max_iterations 50000 --run_name student --headless \
+  --logger wandb --log_project_name galileo_pcpo
+```
+示例：ppo
+```bash
+# Teacher
+LOG_RUN_NAME=ppo python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CRL-Teacher-v0 \
+  --algo ppo --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
+  --logger wandb --log_project_name galileo_ppo
+
+# Student
+LOG_RUN_NAME=ppo python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CRL-Student-v0 \
+  --algo ppo --num_envs 4096 --max_iterations 50000 --run_name student --headless \
+  --logger wandb --log_project_name galileo_ppo
+```
 ***如果多次用同一个 LOG_RUN_NAME，日志和 checkpoint 会写到同一个目录，可能覆盖或混在一起。***
 
 ### 多卡分布式（4 卡示例）

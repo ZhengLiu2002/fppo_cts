@@ -42,6 +42,7 @@ class CRLRslRlActorCfg(CRLRslRlBaseCfg):
 @configclass
 class CRLRslRlPpoActorCriticCfg(RslRlPpoActorCriticCfg):
     class_name: str = "ActorCriticRMA"
+    num_cost_heads: int = 1
     num_prop: int = MISSING
     num_scan: int = 0
     num_priv_explicit: int = 0
@@ -77,6 +78,13 @@ class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     backtrack_coeff: float = 0.5
     max_backtracks: int = 10
     projection_eps: float = 1e-8
+    epsilon_safe: float = 0.0
+    delta_kl: float | None = None
+    active_set_threshold: float = 0.05
+    confidence_level: float = 0.05
+    softproj_max_iters: int = 40
+    softproj_tol: float = 1e-6
+    constraint_limits: list[float] | None = None
     use_clipped_surrogate: bool = True
     normalize_cost_advantage: bool = False
     constraint_normalization: bool = True

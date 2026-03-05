@@ -180,6 +180,7 @@ class ActorCriticRMA(nn.Module):
         actor_hidden_dims=[256, 256, 256],
         critic_hidden_dims=[256, 256, 256],
         cost_critic_hidden_dims=None,
+        num_cost_heads: int = 1,
         activation="elu",
         init_noise_std=1.0,
         noise_std_type: str = "scalar",
@@ -264,13 +265,16 @@ class ActorCriticRMA(nn.Module):
         self.critic = nn.Sequential(*critic_layers)
 
         # Cost critic (decoupled from reward critic)
+        self.num_cost_heads = max(int(num_cost_heads), 1)
         cost_critic_hidden_dims = cost_critic_hidden_dims or critic_hidden_dims
         cost_critic_layers = []
         cost_critic_layers.append(nn.Linear(mlp_input_dim_c, cost_critic_hidden_dims[0]))
         cost_critic_layers.append(activation)
         for layer_index in range(len(cost_critic_hidden_dims)):
             if layer_index == len(cost_critic_hidden_dims) - 1:
-                cost_critic_layers.append(nn.Linear(cost_critic_hidden_dims[layer_index], 1))
+                cost_critic_layers.append(
+                    nn.Linear(cost_critic_hidden_dims[layer_index], self.num_cost_heads)
+                )
             else:
                 cost_critic_layers.append(
                     nn.Linear(
@@ -286,6 +290,9 @@ class ActorCriticRMA(nn.Module):
         print(f"Cost Critic MLP: {self.cost_critic}")
 
         self.noise_std_type = noise_std_type
+        # Keep exploration recoverable: avoid hard min clamp on std that can zero out gradients.
+        self._std_floor = float(kwargs.get("std_floor", 2.0e-3))
+        self._std_ceiling = float(kwargs.get("std_ceiling", 2.0))
         if self.noise_std_type == "scalar":
             self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         elif self.noise_std_type == "log":
@@ -330,7 +337,6 @@ class ActorCriticRMA(nn.Module):
         # sanitize mean to prevent NaN/Inf blowing up Normal
         mean = torch.nan_to_num(mean, nan=0.0, posinf=1.0e6, neginf=-1.0e6)
         if self.noise_std_type == "scalar":
-            # Softplus keeps std positive while preserving gradient flow.
             std = mean * 0.0 + F.softplus(self.std)
         elif self.noise_std_type == "log":
             std = torch.exp(self.log_std).expand_as(mean)
@@ -338,9 +344,9 @@ class ActorCriticRMA(nn.Module):
             raise ValueError(
                 f"Unknown standard deviation type: {self.noise_std_type}. Should be 'scalar' or 'log'"
             )
-        # sanitize std to avoid NaN/Inf/negative values
-        std = torch.nan_to_num(std, nan=1.0e-6, posinf=1.0, neginf=1.0e-6)
-        std = torch.clamp(std, min=1.0e-6)
+        # Avoid dead-zone at lower bound: add a floor instead of hard min clamp.
+        std = torch.nan_to_num(std, nan=1.0, posinf=self._std_ceiling, neginf=1.0)
+        std = torch.clamp(std, max=self._std_ceiling) + self._std_floor
         self.distribution = Normal(mean, std)
 
     def act(self, observations, hist_encoding=False, **kwargs):

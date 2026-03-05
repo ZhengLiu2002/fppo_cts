@@ -153,7 +153,7 @@ class PPOWithExtractor(PPO):
 
         return self.transition.actions
 
-    def process_env_step(self, obs, rewards, dones, extras, costs=None):
+    def process_env_step(self, obs, rewards, dones, extras, costs=None, cost_terms=None):
         """收集环境一步数据，计算 RND、处理超时。"""
         obs_td = TensorDict({"obs": obs}, batch_size=[obs.shape[0]], device=self.device)
         # Update the normalizers
@@ -277,6 +277,19 @@ class PPOWithExtractor(PPO):
                     obs_batch = obs_batch.get("obs")
                 else:
                     critic_obs_batch = obs_batch
+            elif len(batch) >= 14:
+                obs_batch = batch[0]
+                critic_obs_batch = batch[1]
+                actions_batch = batch[2]
+                target_values_batch = batch[3]
+                advantages_batch = batch[4]
+                returns_batch = batch[5]
+                old_actions_log_prob_batch = batch[9]
+                old_mu_batch = batch[10]
+                old_sigma_batch = batch[11]
+                hid_states_batch = batch[12]
+                masks_batch = batch[13]
+                rnd_state_batch = None
             else:
                 (
                     obs_batch,
@@ -579,6 +592,19 @@ class PPOWithExtractor(PPO):
                 if isinstance(obs_batch, TensorDict):
                     obs_batch = obs_batch.get("obs")
                 critic_obs_batch = obs_batch
+            elif len(batch) >= 14:
+                obs_batch = batch[0]
+                critic_obs_batch = batch[1]
+                actions_batch = batch[2]
+                target_values_batch = batch[3]
+                advantages_batch = batch[4]
+                returns_batch = batch[5]
+                old_actions_log_prob_batch = batch[9]
+                old_mu_batch = batch[10]
+                old_sigma_batch = batch[11]
+                hid_states_batch = batch[12]
+                masks_batch = batch[13]
+                rnd_state_batch = None
             else:
                 (
                     obs_batch,

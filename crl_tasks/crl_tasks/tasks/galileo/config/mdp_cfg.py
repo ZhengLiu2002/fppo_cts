@@ -40,7 +40,7 @@ LEG_JOINT_CFG = SceneEntityCfg(
 )
 
 FOOT_BODY_NAMES = [".*_foot"]
-THIGH_BODY_NAMES = [".*_thigh"]
+BASE_BODY_NAMES = ["base_link"]
 
 
 @configclass
@@ -241,7 +241,8 @@ class TeacherCostsCfg:
     prob_joint_pos = CostTerm(
         func=mdp_constraints.joint_pos_prob_constraint,
         weight=1.0,
-        params={"margin": -0.05, "limit": 1.0, "asset_cfg": LEG_JOINT_CFG},
+        # Keep slight strictness, but avoid over-triggering during gait transitions.
+        params={"margin": -0.03, "limit": 1.0, "asset_cfg": LEG_JOINT_CFG},
     )
     prob_joint_vel = CostTerm(
         func=mdp_constraints.joint_vel_prob_constraint,
@@ -255,86 +256,114 @@ class TeacherCostsCfg:
     )
     prob_body_contact = CostTerm(
         func=mdp_constraints.body_contact_prob_constraint,
-        weight=0.0,
+        weight=0.10,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,
-            "threshold": 1.0,
+            # Use a practical threshold to avoid counting tiny contact-noise spikes.
+            "threshold": 10.0,
             "limit": 1.0,
         },
     )
     prob_com_frame = CostTerm(
         func=mdp_constraints.com_frame_prob_constraint,
-        weight=0.0,
+        weight=0.35,
         params={
-            "height_range": (0.2, 0.6),
-            "max_angle_rad": 1.0,
-            "cost_limit": 5.0,
-            "terrain_sensor_cfg": SceneEntityCfg("height_scanner"),
+            # Keep base height/orientation as hard-ish feasibility constraints at convergence.
+            "height_range": (0.4, 0.43),
+            "max_angle_rad": 0.60,
+            "cost_limit": 1.0,
+            # Start from a tolerant physical region (not ground-hugging), then tighten.
+            "height_range_start": (0.18, 0.56),
+            "height_range_end": (0.39, 0.43),
+            "max_angle_rad_start": 0.85,
+            "max_angle_rad_end": 0.60,
+            "schedule_start_step": GalileoDefaults.curriculum.command_warmup_steps,
+            "schedule_end_step": (
+                GalileoDefaults.curriculum.command_warmup_steps
+                + 6 * GalileoDefaults.curriculum.command_min_progress_steps
+            ),
+            # Flat-terrain training: use world-frame height to avoid height-map bias.
+            "terrain_sensor_cfg": None,
             "height_offset": 0.0,
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
     prob_gait_pattern = CostTerm(
         func=mdp_constraints.gait_pattern_prob_constraint,
-        weight=0.0,
+        weight=0.35,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,
             "gait_frequency": 1.5,
             "phase_offsets": [0.0, 0.5, 0.5, 0.0],
             "stance_ratio": 0.5,
-            "contact_threshold": 1.0,
+            "contact_threshold": 5.0,
             "command_name": "base_velocity",
             "min_frequency": None,
             "max_frequency": None,
             "max_command_speed": None,
             "frequency_scale": 0.0,
-            "min_command_speed": None,
+            "min_command_speed": 0.10,
             "min_base_speed": None,
             "asset_cfg": SceneEntityCfg("robot"),
-            "limit": 5.0,
+            "limit": 1.0,
+            # Start from a tolerant gait consistency target and tighten over time.
+            "gait_frequency_start": 1.0,
+            "gait_frequency_end": 1.5,
+            "stance_ratio_start": 0.62,
+            "stance_ratio_end": 0.5,
+            "phase_offset_scale_start": 0.60,
+            "phase_offset_scale_end": 1.0,
+            "phase_tolerance_start": 0.18,
+            "phase_tolerance_end": 0.05,
+            "schedule_start_step": GalileoDefaults.curriculum.command_warmup_steps,
+            "schedule_end_step": (
+                GalileoDefaults.curriculum.command_warmup_steps
+                + 6 * GalileoDefaults.curriculum.command_min_progress_steps
+            ),
         },
     )
     orthogonal_velocity = CostTerm(
         func=mdp_constraints.orthogonal_velocity_constraint,
-        weight=0.0,
+        weight=0.10,
         params={"asset_cfg": SceneEntityCfg("robot"), "limit": 3.0},
     )
     contact_velocity = CostTerm(
         func=mdp_constraints.contact_velocity_constraint,
-        weight=0.0,
+        weight=0.10,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,
-            "contact_threshold": 1.0,
+            "contact_threshold": 5.0,
             "limit": 0.8,
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
     foot_clearance = CostTerm(
         func=mdp_constraints.foot_clearance_constraint,
-        weight=0.0,
+        weight=0.15,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,
-            "min_height": None,
+            # Replace reward shaping with a minimum-swing-clearance constraint.
+            "min_height": 0.05,
             "height_offset": 0.0,
-            "contact_threshold": 1.0,
+            "contact_threshold": 5.0,
             "gait_frequency": 1.5,
             "phase_offsets": [0.0, 0.5, 0.5, 0.0],
             "stance_ratio": 0.5,
             "terrain_sensor_cfg": SceneEntityCfg("height_scanner"),
-            "limit": 0.08,
+            "limit": 0.05,
             "asset_cfg": SceneEntityCfg("robot"),
             "command_name": "base_velocity",
-            "min_command_speed": None,
+            "min_command_speed": 0.10,
             "min_base_speed": None,
         },
     )
     foot_height_limit = CostTerm(
         func=mdp_constraints.foot_height_limit_constraint,
-        weight=0.0,
+        weight=0.10,
         params={
             "foot_body_names": FOOT_BODY_NAMES,
             "height_offset": 0.0,
@@ -345,7 +374,7 @@ class TeacherCostsCfg:
     )
     symmetric = CostTerm(
         func=mdp_constraints.symmetric_constraint,
-        weight=0.0,
+        weight=0.30,
         params={
             "joint_pair_indices": [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11)],
             "action_pair_indices": [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11)],
@@ -359,11 +388,11 @@ class TeacherCostsCfg:
     )
     base_contact_force = CostTerm(
         func=mdp_constraints.base_contact_force_constraint,
-        weight=0.0,
+        weight=0.05,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "body_names": THIGH_BODY_NAMES,
-            "threshold": 1.0,
+            "body_names": BASE_BODY_NAMES,
+            "threshold": 10.0,
             "limit": 1.0,
         },
     )
@@ -386,7 +415,7 @@ class StudentCostsCfg:
     prob_joint_torque = CostTerm(
         func=mdp_constraints.joint_torque_prob_constraint,
         weight=1.0,
-        params={"limit": 120.0, "cost_limit": 1.0, "asset_cfg": LEG_JOINT_CFG},
+        params={"limit": 80.0, "cost_limit": 1.0, "asset_cfg": LEG_JOINT_CFG},
     )
 
 
@@ -413,7 +442,7 @@ class StudentRewardsCfg:
         params={
             "command_name": "base_velocity",
             "std": 0.2,
-            "min_command_speed": 0.0,
+            "min_command_speed": 0.05,
         },
     )
     flat_orientation_l2 = RewTerm(
@@ -475,11 +504,11 @@ class StudentRewardsCfg:
     )
     feet_air_time = RewTerm(
         func=rewards.feet_air_time,
-        weight=0.6,
+        weight=0.3,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.35,
+            "threshold": 0.18,
         },
     )
     feet_slide = RewTerm(
@@ -488,19 +517,37 @@ class StudentRewardsCfg:
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "asset_cfg": SceneEntityCfg("robot"),
+            "contact_threshold": 5.0,
         },
     )
     load_sharing = RewTerm(
         func=rewards.load_sharing,
         weight=0.0,
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+            "min_contacts": 2,
+        },
+    )
+    gait_contact_symmetry = RewTerm(
+        func=rewards.gait_contact_symmetry,
+        weight=0.2,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces"),
+            "left_foot_names": ["FL_foot", "RL_foot"],
+            "right_foot_names": ["FR_foot", "RR_foot"],
+            "command_name": "base_velocity",
+            "min_command_speed": 0.05,
+            "contact_threshold": 5.0,
+            "ema_decay": 0.98,
+            "symmetry_sigma": 0.25,
+        },
     )
     undesired_contacts = RewTerm(
         func=rewards.undesired_contacts,
         weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_thigh"),
-            "threshold": 1.0,
+            "threshold": 10.0,
         },
     )
 
@@ -520,108 +567,145 @@ class TeacherRewardsCfg:
     )
     track_ang_vel_z_exp = RewTerm(
         func=rewards.track_ang_vel_z_exp,
-        weight=2.5,
+        weight=3.5,
         params={
             "command_name": "base_velocity",
-            "std": 0.25,
-            "min_command_speed": 0.05,
+            "std": 0.22,
+            "min_command_speed": 0.08,
         },
     )
     flat_orientation_l2 = RewTerm(
         func=rewards.flat_orientation_l2, 
-        weight=-0.5,
+        weight=0.0,  # old: -0.0
     )
     base_height_l2_fix = RewTerm(
         func=rewards.base_height_l2_fix,
-        weight=-10.0,
+        weight=0.0,  # old: -0.0
         params={
             "target_height": 0.426,
-            "sensor_cfg": SceneEntityCfg("height_scanner"),
+            # Flat-terrain training: avoid coupling to sparse ray-hit outliers.
+            "sensor_cfg": None,
             "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
         },
     )
     joint_torques_l2 = RewTerm(
         func=rewards.joint_torque_l2,
-        weight=-6.0e-07,
+        weight=0.0,  # old: -6.0e-7
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     joint_vel_l2 = RewTerm(
-        func=rewards.joint_vel_l2, weight=-5.0e-6
+        func=rewards.joint_vel_l2, weight=0.0  # old: -5.0e-6
     )
     joint_power_distribution = RewTerm(
         func=rewards.joint_power_distribution,
-        weight=-1.0e-6,
+        weight=0.0,  # old: -1.0e-6
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_joint")},
     )
     joint_acc_l2 = RewTerm(
-        func=rewards.joint_acc_l2, weight=-3.0e-9
+        func=rewards.joint_acc_l2, 
+        weight=0.0,  # old: -3.0e-9
     )
     dof_error_l2 = RewTerm(
-        func=rewards.dof_error_l2, weight=-5.0e-3,
+        func=rewards.dof_error_l2, 
+        weight=0.0,  # old: -5.0e-3
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     hip_pos_l2 = RewTerm(
         func=rewards.hip_pos_l2,
-        weight=-5.0e-3,
+        weight=0.0,  # old: -5.0e-3
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint")},
     )
     action_rate_l2 = RewTerm(
         func=rewards.action_rate_l2,
-        weight=-2.0e-5
+        weight=-3.0e-5
     )
     action_smoothness_l2 = RewTerm(
         func=rewards.action_smoothness_l2, 
-        weight=-1.0e-4
+        weight=-2.0e-4
     )
     lin_vel_z_l2 = RewTerm(
         func=rewards.lin_vel_z_l2, 
-        weight=-0.1
+        weight=0.0  # old: -0.1
     )
     ang_vel_xy_l2 = RewTerm(
         func=rewards.ang_vel_xy_l2, 
-        weight=-0.01
+        weight=0.0  # old: -0.01
     )
     feet_air_time = RewTerm(
         func=rewards.feet_air_time,
-        weight=1.5,
+        weight=0.0,  # old: 1.0
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.15,
+            "threshold": 0.10,
         },
     )
     feet_slide = RewTerm(
         func=rewards.feet_slide,
-        weight=-0.01,
+        weight=0.0,  # old: -0.01
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
+            "contact_threshold": 5.0,
         },
     )
     load_sharing = RewTerm(
         func=rewards.load_sharing,
-        weight=1.0,
+        weight=0.0,  # old: 0.0
         params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
+    )
+    gait_contact_symmetry = RewTerm(
+        func=rewards.gait_contact_symmetry,
+        weight=0.0,  # old: 0.0
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces"),
+            "left_foot_names": ["FL_foot", "RL_foot"],
+            "right_foot_names": ["FR_foot", "RR_foot"],
+            "command_name": "base_velocity",
+            "min_command_speed": 0.05,
+            "contact_threshold": 5.0,
+            "ema_decay": 0.98,
+            "symmetry_sigma": 0.25,
+        },
+    )
+    fore_hind_contact_balance = RewTerm(
+        func=rewards.gait_contact_symmetry,
+        weight=0.0,  # old: 0.0
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces"),
+            "left_foot_names": ["FL_foot", "FR_foot"],
+            "right_foot_names": ["RL_foot", "RR_foot"],
+            "command_name": "base_velocity",
+            "min_command_speed": 0.1,
+            "contact_threshold": 5.0,
+            "ema_decay": 0.98,
+            "symmetry_sigma": 0.3,
+        },
     )
     undesired_contacts = RewTerm(
         func=rewards.undesired_contacts,
-        weight=-2.0,
+        weight=0.0,  # old: -2.0
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces", body_names=[".*_thigh", ".*_calf"]
             ),
-            "threshold": 1.0,
+            "threshold": 10.0,
         },
     )
     foot_clearance = RewTerm(
         func=rewards.foot_clearance,
-        weight=0.5,
+        weight=0.0,  # old: 0.0
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "target_height": 0.06,
+            "target_height": 0.05,
         },
+    )
+    joint_pos_limits = RewTerm(
+        func=rewards.joint_pos_limits,
+        weight=0.0,  # old: -0.0
+        params={"asset_cfg": LEG_JOINT_CFG},
     )
 
 
@@ -643,7 +727,7 @@ class TerminationsCfg:
         func=terminations.body_contact,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names="base_link"),
-            "threshold": 1.0,
+            "threshold": 10.0,
         },
     )
 
@@ -814,12 +898,25 @@ class CurriculumCfg:
         func=curriculums.lin_vel_x_command_threshold,
         params={
             "episodes_per_level": GalileoDefaults.curriculum.episodes_per_level,
+            "warmup_steps": GalileoDefaults.curriculum.command_warmup_steps,
+            "min_progress_steps": GalileoDefaults.curriculum.command_min_progress_steps,
+            "terrain_level_threshold": GalileoDefaults.curriculum.command_terrain_gate_level,
+            "error_threshold": GalileoDefaults.curriculum.lin_tracking_error_threshold,
+            "min_command_speed": GalileoDefaults.curriculum.lin_eval_min_command_speed,
+            "min_active_ratio": GalileoDefaults.curriculum.command_min_active_ratio,
         },
     )
     ang_vel_z_command_threshold = CurrTerm(
         func=curriculums.ang_vel_z_command_threshold,
         params={
             "episodes_per_level": GalileoDefaults.curriculum.episodes_per_level,
+            "warmup_steps": GalileoDefaults.curriculum.command_warmup_steps,
+            "min_progress_steps": GalileoDefaults.curriculum.command_min_progress_steps,
+            "terrain_level_threshold": GalileoDefaults.curriculum.command_terrain_gate_level,
+            "error_threshold": GalileoDefaults.curriculum.ang_tracking_error_threshold,
+            "min_command_speed": GalileoDefaults.curriculum.ang_eval_min_command_speed,
+            "min_active_ratio": GalileoDefaults.curriculum.command_min_active_ratio,
+            "min_lin_x_level": GalileoDefaults.curriculum.ang_min_lin_x_level,
         },
     )
 

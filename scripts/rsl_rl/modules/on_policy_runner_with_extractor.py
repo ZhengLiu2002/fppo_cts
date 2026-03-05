@@ -95,6 +95,16 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         num_hist = int(policy_cfg.get("num_hist", 0) or 0)
         return num_prop + num_scan + num_priv_explicit + num_priv_latent + num_prop * num_hist
 
+    @staticmethod
+    def _infer_num_cost_terms(env: VecEnv) -> int | None:
+        cost_manager = getattr(env.unwrapped, "cost_manager", None)
+        if cost_manager is None:
+            return None
+        term_names = getattr(cost_manager, "active_terms", None)
+        if isinstance(term_names, (list, tuple)) and len(term_names) > 0:
+            return int(len(term_names))
+        return None
+
     def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device="cpu"):
         self.cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
@@ -141,6 +151,19 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             num_privileged_obs = extras["observations"][self.privileged_obs_type].shape[1]
         else:
             num_privileged_obs = num_obs
+        # Multi-constraint fairness baseline: for RL algorithms, set the number
+        # of cost-value heads to the number of active cost terms unless user
+        # explicitly overrides it.
+        if self.training_type == "rl":
+            inferred_heads = self._infer_num_cost_terms(self.env)
+            if inferred_heads is None:
+                limits = self.alg_cfg_full.get("constraint_limits", None)
+                if isinstance(limits, (list, tuple)) and len(limits) > 0:
+                    inferred_heads = len(limits)
+            if inferred_heads is not None and inferred_heads > 0:
+                configured_heads = self.policy_cfg.get("num_cost_heads", None)
+                if configured_heads is None or int(configured_heads) <= 1:
+                    self.policy_cfg["num_cost_heads"] = int(inferred_heads)
         expected_obs = self._expected_obs_dim(self.policy_cfg)
         if expected_obs is not None and num_obs != expected_obs:
             raise ValueError(
@@ -367,11 +390,13 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                     )
 
                     # process the step
-                    costs = self._extract_costs(infos, rewards)
+                    costs, cost_terms = self._extract_costs(infos, rewards)
                     if costs is not None:
                         costs = torch.nan_to_num(costs, nan=0.0, posinf=1.0e3, neginf=-1.0e3)
                         costs = torch.clamp(costs, min=-1.0e3, max=1.0e3)
-                    self.alg.process_env_step(obs, rewards, dones, infos, costs=costs)
+                    self.alg.process_env_step(
+                        obs, rewards, dones, infos, costs=costs, cost_terms=cost_terms
+                    )
 
                     # Extract intrinsic rewards (only for logging)
                     intrinsic_rewards = (
@@ -475,7 +500,62 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
 
     def load(self, path: str, load_optimizer: bool = True):
         loaded_dict = torch.load(path, weights_only=False)
-        resumed_training = self.alg.policy.load_state_dict(loaded_dict["model_state_dict"])
+        model_state = loaded_dict["model_state_dict"]
+        try:
+            resumed_training = self.alg.policy.load_state_dict(model_state)
+        except RuntimeError as exc:
+            # Backward compatibility: older checkpoints may use single-head cost critics,
+            # while current configs can infer multi-head critics from active constraints.
+            if "cost_critic" not in str(exc):
+                raise
+            policy_state = self.alg.policy.state_dict()
+            patched = False
+            for key, src_tensor in list(model_state.items()):
+                if not (key.startswith("cost_critic.") and key.endswith(".weight")):
+                    continue
+                if key not in policy_state:
+                    continue
+                tgt_tensor = policy_state[key]
+                if src_tensor.ndim != 2 or tgt_tensor.ndim != 2:
+                    continue
+                if src_tensor.shape[1] != tgt_tensor.shape[1]:
+                    continue
+                if src_tensor.shape[0] == tgt_tensor.shape[0]:
+                    continue
+
+                bias_key = key.replace(".weight", ".bias")
+                if bias_key not in model_state or bias_key not in policy_state:
+                    continue
+                src_bias = model_state[bias_key]
+                tgt_bias = policy_state[bias_key]
+                if src_bias.ndim != 1 or tgt_bias.ndim != 1:
+                    continue
+
+                # 1->N: replicate the single head. Otherwise copy overlapping heads.
+                if src_tensor.shape[0] == 1:
+                    new_weight = src_tensor.expand(tgt_tensor.shape[0], -1).clone()
+                else:
+                    new_weight = tgt_tensor.clone()
+                    rows = min(src_tensor.shape[0], tgt_tensor.shape[0])
+                    new_weight[:rows, :] = src_tensor[:rows, :]
+                if src_bias.shape[0] == 1:
+                    new_bias = src_bias.expand(tgt_bias.shape[0]).clone()
+                else:
+                    new_bias = tgt_bias.clone()
+                    rows = min(src_bias.shape[0], tgt_bias.shape[0])
+                    new_bias[:rows] = src_bias[:rows]
+
+                model_state[key] = new_weight
+                model_state[bias_key] = new_bias
+                patched = True
+
+            if not patched:
+                raise
+            print(
+                "[WARN] Checkpoint cost_critic head count mismatched current config; "
+                "auto-adapted output layer weights for compatibility."
+            )
+            resumed_training = self.alg.policy.load_state_dict(model_state)
         if getattr(self.alg, "rnd", None):
             self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
         if self.empirical_normalization:
@@ -660,27 +740,32 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             )
         return policy
 
-    def _extract_costs(self, infos: dict, rewards: torch.Tensor) -> torch.Tensor:
+    def _extract_costs(self, infos: dict, rewards: torch.Tensor) -> tuple[torch.Tensor, dict | None]:
         cost = infos.get("cost") if isinstance(infos, dict) else None
         if cost is None:
-            return torch.zeros_like(rewards)
+            return torch.zeros_like(rewards), None
+        cost_terms_payload = None
         if isinstance(cost, dict):
             if not cost:
-                return torch.zeros_like(rewards)
+                return torch.zeros_like(rewards), None
+            raw_terms: dict[str, torch.Tensor] = {}
+            for key, value in cost.items():
+                if not torch.is_tensor(value):
+                    value = torch.as_tensor(value, device=self.device)
+                value = value.to(self.device)
+                if value.ndim > 1 and value.shape[-1] > 1:
+                    value = value.sum(dim=-1)
+                elif value.ndim > 1 and value.shape[-1] == 1:
+                    value = value.squeeze(-1)
+                raw_terms[str(key)] = torch.clamp(value, min=0.0)
             if self._constraint_normalizer is not None:
-                cost, _ = self._constraint_normalizer.aggregate(cost)
+                term_dict = self._constraint_normalizer.normalize(raw_terms)
             else:
-                cost_values = []
-                for value in cost.values():
-                    if not torch.is_tensor(value):
-                        value = torch.as_tensor(value, device=self.device)
-                    value = value.to(self.device)
-                    if value.ndim > 1 and value.shape[-1] > 1:
-                        value = value.sum(dim=-1)
-                    cost_values.append(torch.clamp(value, min=0.0))
-                cost = cost_values[0]
-                for value in cost_values[1:]:
-                    cost = cost + value
+                term_dict = raw_terms
+            term_names = sorted(term_dict.keys())
+            term_values = torch.stack([term_dict[name] for name in term_names], dim=-1)
+            cost = torch.sum(term_values, dim=-1)
+            cost_terms_payload = {"values": term_values, "names": term_names}
         else:
             if self._constraint_normalizer is not None:
                 cost, _ = self._constraint_normalizer.aggregate({"total": cost})
@@ -690,11 +775,13 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         cost_scale = self._get_constraint_scale()
         if cost_scale is not None and cost_scale != 1.0:
             cost = cost * cost_scale
+            if cost_terms_payload is not None:
+                cost_terms_payload["values"] = cost_terms_payload["values"] * cost_scale
         if cost.ndim > 1 and cost.shape[-1] > 1:
             cost = cost.sum(dim=-1)
         if cost.ndim == 1 and rewards.ndim > 1:
             cost = cost.unsqueeze(-1)
-        return cost
+        return cost, cost_terms_payload
 
     def _get_constraint_scale(self) -> float | None:
         if self._constraint_scale is not None:

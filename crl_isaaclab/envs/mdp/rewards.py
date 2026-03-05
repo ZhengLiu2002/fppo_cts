@@ -78,7 +78,10 @@ def feet_air_time_positive_biped(
 
 
 def feet_slide(
-    env, sensor_cfg: SceneEntityCfg, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env,
+    sensor_cfg: SceneEntityCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    contact_threshold: float = 1.0,
 ) -> torch.Tensor:
     """Penalize feet sliding.
 
@@ -87,11 +90,12 @@ def feet_slide(
     agent is penalized only when the feet are in contact with the ground.
     """
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
+    threshold = max(float(contact_threshold), 0.0)
     contacts = (
         contact_sensor.data.net_forces_w_history[:, :, sensor_cfg.body_ids, :]
         .norm(dim=-1)
         .max(dim=1)[0]
-        > 1.0
+        > threshold
     )
     asset: Articulation = env.scene[asset_cfg.name]
 
@@ -143,6 +147,82 @@ def load_sharing(
 
     reward = torch.clamp(1.0 - var_scale * var, min=0.0)
     reward = torch.where(num_contacts >= min_contacts, reward, torch.zeros_like(reward))
+    return reward
+
+
+def gait_contact_symmetry(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    left_foot_names: list[str],
+    right_foot_names: list[str],
+    contact_threshold: float = 1.0,
+    ema_decay: float = 0.98,
+    symmetry_sigma: float = 0.2,
+    command_name: str | None = None,
+    min_command_speed: float | None = None,
+    low_speed_threshold: float = 0.4,
+    eps: float = 1.0e-6,
+) -> torch.Tensor:
+    """Reward balanced left-right foot usage with EMA-smoothed contact duty factors."""
+    contact_sensor: ContactSensor | None = env.scene.sensors.get(sensor_cfg.name, None)
+    if contact_sensor is None:
+        return torch.zeros(env.scene.num_envs, device=env.device)
+
+    left_ids, _ = contact_sensor.find_bodies(left_foot_names, preserve_order=True)
+    right_ids, _ = contact_sensor.find_bodies(right_foot_names, preserve_order=True)
+    pair_count = min(len(left_ids), len(right_ids))
+    if pair_count == 0:
+        warn_name = "_warn_gait_contact_symmetry_missing_feet"
+        if not getattr(env, warn_name, False):
+            setattr(env, warn_name, True)
+            print(
+                "[WARN] gait_contact_symmetry: cannot match configured left/right foot names, "
+                "reward term will output zeros."
+            )
+        return torch.zeros(env.scene.num_envs, device=env.device)
+    left_ids = left_ids[:pair_count]
+    right_ids = right_ids[:pair_count]
+
+    force_mag = contact_sensor.data.net_forces_w_history.norm(dim=-1).max(dim=1)[0]
+    contact_mask = force_mag > contact_threshold
+    pair_contacts = torch.cat(
+        (contact_mask[:, left_ids], contact_mask[:, right_ids]), dim=1
+    ).float()
+
+    decay = min(max(float(ema_decay), 0.0), 0.9999)
+    state_name = f"_gait_contact_ema_{sensor_cfg.name}_{pair_count}"
+    ema = getattr(env, state_name, None)
+    if ema is None or ema.shape != pair_contacts.shape or ema.device != pair_contacts.device:
+        ema = pair_contacts
+    else:
+        ema = decay * ema + (1.0 - decay) * pair_contacts
+
+    episode_length_buf = getattr(env, "episode_length_buf", None)
+    if episode_length_buf is not None:
+        reset_mask = episode_length_buf <= 1
+        if torch.any(reset_mask):
+            ema[reset_mask] = pair_contacts[reset_mask]
+    setattr(env, state_name, ema)
+
+    left_ema = ema[:, :pair_count]
+    right_ema = ema[:, pair_count:]
+    pair_diff = torch.abs(left_ema - right_ema)
+    pair_norm = torch.clamp(left_ema + right_ema, min=eps)
+    symmetry_error = torch.mean(pair_diff / pair_norm, dim=1)
+
+    sigma = max(float(symmetry_sigma), eps)
+    reward = torch.exp(-symmetry_error / sigma)
+
+    if command_name is not None and hasattr(env, "command_manager"):
+        command = env.command_manager.get_command(command_name)
+        if command is not None:
+            cmd_speed = torch.norm(command[:, :2], dim=1)
+            if min_command_speed is not None:
+                reward = reward * (cmd_speed > min_command_speed).float()
+            else:
+                speed_scale = torch.clamp(cmd_speed / max(low_speed_threshold, eps), min=0.0, max=1.0)
+                reward = reward * speed_scale
+
     return reward
 
 

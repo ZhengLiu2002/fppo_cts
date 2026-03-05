@@ -49,7 +49,14 @@ class PPO:
         k_value: float = 1.0,
         k_growth: float = 1.0,
         k_max: float = 1.0,
-    ):
+        k_decay: float = 1.0,
+        k_min: float = 0.0,
+        k_violation_threshold: float = 0.02,
+        cost_ratio_clip: float | None = None,
+        log_ratio_clip: float = 6.0,
+        kl_hard_ratio: float = 4.0,
+        kl_hard_abs: float = 0.05,
+        ):
         # device-related parameters
         self.device = device
         self.is_multi_gpu = multi_gpu_cfg is not None
@@ -93,6 +100,13 @@ class PPO:
         self.k_value = float(k_value)
         self.k_growth = float(k_growth)
         self.k_max = float(k_max)
+        self.k_decay = float(k_decay)
+        self.k_min = float(k_min)
+        self.k_violation_threshold = float(k_violation_threshold)
+        self.cost_ratio_clip = float(cost_ratio_clip) if cost_ratio_clip is not None else clip_param
+        self.log_ratio_clip = float(log_ratio_clip)
+        self.kl_hard_ratio = float(kl_hard_ratio)
+        self.kl_hard_abs = float(kl_hard_abs)
         self.train_metrics: dict[str, float] = {}
 
     def init_storage(
@@ -141,7 +155,13 @@ class PPO:
         old_actions_log_prob_batch: torch.Tensor,
     ) -> torch.Tensor:
         log_ratio = actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
-        log_ratio = self._sanitize_tensor(log_ratio, nan=0.0, posinf=20.0, neginf=-20.0, clamp=20.0)
+        log_ratio = self._sanitize_tensor(
+            log_ratio,
+            nan=0.0,
+            posinf=self.log_ratio_clip,
+            neginf=-self.log_ratio_clip,
+            clamp=self.log_ratio_clip,
+        )
         return torch.exp(log_ratio)
 
     def _safe_kl(
@@ -198,8 +218,126 @@ class PPO:
         violation = c_hat.detach() if detach_violation else c_hat
         return self.cost_viol_loss_coef * self.k_value * torch.relu(cost_surrogate + violation)
 
-    def _step_constraint_scale(self):
-        self.k_value = min(self.k_max, self.k_value * self.k_growth)
+    def _step_constraint_scale(self, cost_violation: float | None = None):
+        if cost_violation is None:
+            self.k_value = min(self.k_max, self.k_value * self.k_growth)
+            return
+        if cost_violation > self.k_violation_threshold:
+            self.k_value = min(self.k_max, self.k_value * self.k_growth)
+        else:
+            self.k_value = max(self.k_min, self.k_value * self.k_decay)
+
+    def _kl_hard_limit(self) -> float:
+        if self.desired_kl is None:
+            return self.kl_hard_abs
+        return max(self.kl_hard_abs, float(self.desired_kl) * self.kl_hard_ratio)
+
+    def _split_cost_value_heads(
+        self, cost_values: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split cost-value prediction into aggregate scalar and per-constraint heads."""
+        if not torch.is_tensor(cost_values):
+            cost_values = torch.as_tensor(cost_values, device=self.device)
+        cost_values = cost_values.to(self.device)
+        if cost_values.ndim == 1:
+            cost_values = cost_values.unsqueeze(-1)
+        elif cost_values.ndim > 2:
+            cost_values = cost_values.view(cost_values.shape[0], -1)
+        cost_values = self._sanitize_tensor(
+            cost_values,
+            nan=0.0,
+            posinf=1.0e4,
+            neginf=-1.0e4,
+            clamp=1.0e4,
+        )
+        aggregate = cost_values.sum(dim=-1, keepdim=True)
+        return aggregate, cost_values
+
+    def _prepare_cost_term_batches(
+        self,
+        cost_returns_batch: torch.Tensor,
+        cost_advantages_batch: torch.Tensor,
+        cost_term_returns_batch: torch.Tensor | None,
+        cost_term_advantages_batch: torch.Tensor | None,
+        cost_term_values_batch: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Prepare per-constraint tensors for multi-head cost critic training."""
+        if cost_term_returns_batch is None or cost_term_advantages_batch is None:
+            fallback_values = (
+                cost_term_values_batch if cost_term_values_batch is not None else cost_returns_batch
+            )
+            if not torch.is_tensor(fallback_values):
+                fallback_values = torch.as_tensor(fallback_values, device=self.device)
+            fallback_values = self._sanitize_tensor(
+                fallback_values.to(self.device),
+                nan=0.0,
+                posinf=1.0e4,
+                neginf=-1.0e4,
+                clamp=1.0e4,
+            )
+            if fallback_values.ndim == 1:
+                fallback_values = fallback_values.unsqueeze(-1)
+            return (
+                cost_returns_batch.reshape(-1, 1),
+                cost_advantages_batch.reshape(-1, 1),
+                fallback_values.reshape(-1, fallback_values.shape[-1]),
+            )
+
+        if not torch.is_tensor(cost_term_returns_batch):
+            cost_term_returns_batch = torch.as_tensor(cost_term_returns_batch, device=self.device)
+        if not torch.is_tensor(cost_term_advantages_batch):
+            cost_term_advantages_batch = torch.as_tensor(
+                cost_term_advantages_batch, device=self.device
+            )
+        cost_term_returns_batch = self._sanitize_tensor(
+            cost_term_returns_batch.to(self.device),
+            nan=0.0,
+            posinf=1.0e4,
+            neginf=-1.0e4,
+            clamp=1.0e4,
+        )
+        cost_term_advantages_batch = self._sanitize_tensor(
+            cost_term_advantages_batch.to(self.device),
+            nan=0.0,
+            posinf=1.0e3,
+            neginf=-1.0e3,
+            clamp=1.0e3,
+        )
+        if cost_term_returns_batch.ndim == 1:
+            cost_term_returns_batch = cost_term_returns_batch.unsqueeze(-1)
+        if cost_term_advantages_batch.ndim == 1:
+            cost_term_advantages_batch = cost_term_advantages_batch.unsqueeze(-1)
+        if cost_term_values_batch is None:
+            cost_term_values_batch = cost_term_returns_batch
+        if not torch.is_tensor(cost_term_values_batch):
+            cost_term_values_batch = torch.as_tensor(cost_term_values_batch, device=self.device)
+        cost_term_values_batch = self._sanitize_tensor(
+            cost_term_values_batch.to(self.device),
+            nan=0.0,
+            posinf=1.0e4,
+            neginf=-1.0e4,
+            clamp=1.0e4,
+        )
+        if cost_term_values_batch.ndim == 1:
+            cost_term_values_batch = cost_term_values_batch.unsqueeze(-1)
+        return (
+            cost_term_returns_batch.reshape(-1, cost_term_returns_batch.shape[-1]),
+            cost_term_advantages_batch.reshape(-1, cost_term_advantages_batch.shape[-1]),
+            cost_term_values_batch.reshape(-1, cost_term_values_batch.shape[-1]),
+        )
+
+    @staticmethod
+    def _match_cost_heads(cost_values: torch.Tensor, target_heads: int) -> torch.Tensor:
+        if cost_values.ndim == 1:
+            cost_values = cost_values.unsqueeze(-1)
+        if cost_values.shape[-1] == target_heads:
+            return cost_values
+        if cost_values.shape[-1] == 1 and target_heads > 1:
+            return cost_values.expand(-1, target_heads)
+        if cost_values.shape[-1] > target_heads:
+            return cost_values[:, :target_heads]
+        pad = cost_values[:, -1:].expand(-1, target_heads - cost_values.shape[-1])
+        return torch.cat([cost_values, pad], dim=-1)
 
     def act(self, obs, critic_obs, hist_encoding=False):
         if self.policy.is_recurrent:
@@ -207,7 +345,10 @@ class PPO:
         # compute the actions and values
         self.transition.actions = self.policy.act(obs, hist_encoding).detach()
         self.transition.values = self.policy.evaluate(critic_obs).detach()
-        self.transition.cost_values = self.policy.evaluate_cost(critic_obs).detach()
+        cost_value_pred = self.policy.evaluate_cost(critic_obs).detach()
+        self.transition.cost_values, self.transition.cost_term_values = self._split_cost_value_heads(
+            cost_value_pred
+        )
         self.transition.actions_log_prob = self.policy.get_actions_log_prob(
             self.transition.actions
         ).detach()
@@ -218,13 +359,39 @@ class PPO:
         self.transition.privileged_observations = critic_obs
         return self.transition.actions
 
-    def process_env_step(self, obs, rewards, dones, infos, costs=None):
+    def process_env_step(self, obs, rewards, dones, infos, costs=None, cost_terms=None):
         # Record the rewards and dones
         # Note: we clone here because later on we bootstrap the rewards based on timeouts
         self.transition.rewards = rewards.clone()
         if costs is None:
             costs = torch.zeros_like(rewards)
         self.transition.cost_rewards = costs.clone()
+        self.transition.cost_term_rewards = None
+        if cost_terms is not None:
+            cost_term_values = cost_terms.get("values", None) if isinstance(cost_terms, dict) else cost_terms
+            if cost_term_values is not None:
+                if not torch.is_tensor(cost_term_values):
+                    cost_term_values = torch.as_tensor(cost_term_values, device=self.device)
+                cost_term_values = cost_term_values.to(self.device)
+                if cost_term_values.ndim == 1:
+                    cost_term_values = cost_term_values.unsqueeze(-1)
+                elif cost_term_values.ndim > 2:
+                    cost_term_values = cost_term_values.view(cost_term_values.shape[0], -1)
+                self.transition.cost_term_rewards = cost_term_values.clone()
+                if self.transition.cost_values is not None and self.transition.cost_term_values is not None:
+                    pred_terms = self.transition.cost_term_values
+                    target_heads = cost_term_values.shape[-1]
+                    if pred_terms.shape[-1] > target_heads:
+                        pred_terms = pred_terms[:, :target_heads]
+                    elif pred_terms.shape[-1] < target_heads:
+                        if pred_terms.shape[-1] == 1:
+                            pred_terms = pred_terms.expand(-1, target_heads)
+                        else:
+                            pad = pred_terms[:, -1:].expand(-1, target_heads - pred_terms.shape[-1])
+                            pred_terms = torch.cat([pred_terms, pad], dim=-1)
+                    self.transition.cost_term_values = pred_terms.clone()
+        if self.transition.cost_term_values is None and self.transition.cost_values is not None:
+            self.transition.cost_term_values = self.transition.cost_values.clone()
         self.transition.dones = dones
 
         # Bootstrapping on time outs
@@ -239,6 +406,21 @@ class PPO:
             self.transition.cost_rewards = self._sanitize_tensor(
                 self.transition.cost_rewards, nan=0.0, posinf=1.0e3, neginf=0.0, clamp=1.0e3
             )
+            if self.transition.cost_term_rewards is not None:
+                term_values = self.transition.cost_term_values
+                if term_values is None:
+                    term_values = self.transition.cost_values
+                bootstrap = self.cost_gamma * term_values * time_outs
+                self.transition.cost_term_rewards += bootstrap.expand_as(
+                    self.transition.cost_term_rewards
+                )
+                self.transition.cost_term_rewards = self._sanitize_tensor(
+                    self.transition.cost_term_rewards,
+                    nan=0.0,
+                    posinf=1.0e3,
+                    neginf=0.0,
+                    clamp=1.0e3,
+                )
 
         # record the transition
         self.storage.add_transitions(self.transition)
@@ -248,13 +430,15 @@ class PPO:
     def compute_returns(self, last_critic_obs):
         # compute value for the last step
         last_values = self.policy.evaluate(last_critic_obs).detach()
-        last_cost_values = self.policy.evaluate_cost(last_critic_obs).detach()
+        last_cost_pred = self.policy.evaluate_cost(last_critic_obs).detach()
+        last_cost_values, last_cost_term_values = self._split_cost_value_heads(last_cost_pred)
         self.storage.compute_returns(
             last_values,
             self.gamma,
             self.lam,
             normalize_advantage=not self.normalize_advantage_per_mini_batch,
             last_cost_values=last_cost_values,
+            last_cost_term_values=last_cost_term_values,
             cost_gamma=self.cost_gamma,
             cost_lam=self.cost_lam,
             normalize_cost_advantage=self.normalize_cost_advantage
@@ -269,6 +453,8 @@ class PPO:
         mean_viol_loss = 0.0
         mean_cost_return = 0.0
         mean_cost_violation = 0.0
+        mean_kl = 0.0
+        skipped_updates = 0
 
         # generator for mini batches
         if self.policy.is_recurrent:
@@ -296,7 +482,11 @@ class PPO:
             old_sigma_batch,
             hid_states_batch,
             masks_batch,
+            *extra_batch,
         ) in generator:
+            cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
+            cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
+            cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
 
             # check if we should normalize advantages per mini batch
             if self.normalize_advantage_per_mini_batch:
@@ -327,6 +517,15 @@ class PPO:
             cost_values_batch = self._sanitize_tensor(
                 cost_values_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
             )
+            cost_terms_ret, cost_terms_adv, cost_terms_val = self._prepare_cost_term_batches(
+                cost_returns_batch=cost_returns_batch,
+                cost_advantages_batch=cost_advantages_batch,
+                cost_term_returns_batch=cost_term_returns_batch,
+                cost_term_advantages_batch=cost_term_advantages_batch,
+                cost_term_values_batch=cost_term_values_batch,
+            )
+            aggregate_cost_returns = torch.sum(cost_terms_ret, dim=1)
+            aggregate_cost_advantages = torch.sum(cost_terms_adv, dim=1)
 
             # Recompute actions log prob and entropy for current batch of transitions
             # Note: we need to do this because we updated the policy with the new parameters
@@ -340,41 +539,64 @@ class PPO:
             cost_value_batch = self.policy.evaluate_cost(
                 critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[2]
             )
+            cost_value_batch = self._sanitize_tensor(
+                cost_value_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
+            )
+            if cost_value_batch.ndim == 1:
+                cost_value_batch = cost_value_batch.unsqueeze(-1)
+            elif cost_value_batch.ndim > 2:
+                cost_value_batch = cost_value_batch.view(cost_value_batch.shape[0], -1)
+            pred_cost_terms = self._match_cost_heads(cost_value_batch, cost_terms_ret.shape[1])
+            old_cost_terms = self._match_cost_heads(cost_terms_val, cost_terms_ret.shape[1])
             # -- entropy
             mu_batch = self.policy.action_mean
             sigma_batch = self.policy.action_std
             entropy_batch = self.policy.entropy
+            batch_cost_return, batch_cost_violation, c_hat = self._batch_cost_stats(
+                aggregate_cost_returns
+            )
+
+            with torch.inference_mode():
+                kl = self._safe_kl(mu_batch, sigma_batch, old_mu_batch, old_sigma_batch)
+                kl_mean = self._all_reduce_mean(torch.mean(kl))
 
             # KL
             if self.desired_kl is not None and self.schedule == "adaptive":
-                with torch.inference_mode():
-                    kl = self._safe_kl(mu_batch, sigma_batch, old_mu_batch, old_sigma_batch)
-                    kl_mean = torch.mean(kl)
+                # Update the learning rate
+                # Perform this adaptation only on the main process
+                # TODO: Is this needed? If KL-divergence is the "same" across all GPUs,
+                #       then the learning rate should be the same across all GPUs.
+                if self.gpu_global_rank == 0:
+                    if kl_mean > self.desired_kl * 2.0:
+                        self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                    elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
+                        self.learning_rate = min(1e-2, self.learning_rate * 1.5)
 
-                    # Reduce the KL divergence across all GPUs
-                    if self.is_multi_gpu:
-                        torch.distributed.all_reduce(kl_mean, op=torch.distributed.ReduceOp.SUM)
-                        kl_mean /= self.gpu_world_size
+                # Update the learning rate for all GPUs
+                if self.is_multi_gpu:
+                    lr_tensor = torch.tensor(self.learning_rate, device=self.device)
+                    torch.distributed.broadcast(lr_tensor, src=0)
+                    self.learning_rate = lr_tensor.item()
 
-                    # Update the learning rate
-                    # Perform this adaptation only on the main process
-                    # TODO: Is this needed? If KL-divergence is the "same" across all GPUs,
-                    #       then the learning rate should be the same across all GPUs.
-                    if self.gpu_global_rank == 0:
-                        if kl_mean > self.desired_kl * 2.0:
-                            self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                        elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                            self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+                # Update the learning rate for all parameter groups
+                for param_group in self.optimizer.param_groups:
+                    param_group["lr"] = self.learning_rate
 
-                    # Update the learning rate for all GPUs
-                    if self.is_multi_gpu:
-                        lr_tensor = torch.tensor(self.learning_rate, device=self.device)
-                        torch.distributed.broadcast(lr_tensor, src=0)
-                        self.learning_rate = lr_tensor.item()
-
-                    # Update the learning rate for all parameter groups
-                    for param_group in self.optimizer.param_groups:
-                        param_group["lr"] = self.learning_rate
+            # Hard KL gate: skip catastrophic mini-batches to avoid one-step collapse.
+            if torch.isfinite(kl_mean) and kl_mean.item() > self._kl_hard_limit():
+                if self.gpu_global_rank == 0:
+                    self.learning_rate = max(1e-5, self.learning_rate / 2.0)
+                if self.is_multi_gpu:
+                    lr_tensor = torch.tensor(self.learning_rate, device=self.device)
+                    torch.distributed.broadcast(lr_tensor, src=0)
+                    self.learning_rate = lr_tensor.item()
+                for param_group in self.optimizer.param_groups:
+                    param_group["lr"] = self.learning_rate
+                mean_kl += kl_mean.item()
+                mean_cost_return += batch_cost_return.item()
+                mean_cost_violation += batch_cost_violation.item()
+                skipped_updates += 1
+                continue
 
             # Surrogate loss
             ratio = self._safe_ratio(actions_log_prob_batch, old_actions_log_prob_batch)
@@ -383,10 +605,12 @@ class PPO:
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
-            cost_surrogate = (torch.squeeze(cost_advantages_batch) * ratio).mean()
-            batch_cost_return, batch_cost_violation, c_hat = self._batch_cost_stats(
-                cost_returns_batch
+            ratio_cost = torch.clamp(
+                ratio,
+                1.0 - self.cost_ratio_clip,
+                1.0 + self.cost_ratio_clip,
             )
+            cost_surrogate = (aggregate_cost_advantages * ratio_cost).mean()
             viol_loss = self._positive_cost_penalty(cost_surrogate, c_hat)
             surrogate_loss = self._sanitize_tensor(
                 surrogate_loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6
@@ -407,14 +631,14 @@ class PPO:
 
             # Cost value function loss
             if self.use_clipped_value_loss:
-                cost_value_clipped = cost_values_batch + (
-                    cost_value_batch - cost_values_batch
+                cost_value_clipped = old_cost_terms + (
+                    pred_cost_terms - old_cost_terms
                 ).clamp(-self.clip_param, self.clip_param)
-                cost_value_losses = (cost_value_batch - cost_returns_batch).pow(2)
-                cost_value_losses_clipped = (cost_value_clipped - cost_returns_batch).pow(2)
+                cost_value_losses = (pred_cost_terms - cost_terms_ret).pow(2)
+                cost_value_losses_clipped = (cost_value_clipped - cost_terms_ret).pow(2)
                 cost_value_loss = torch.max(cost_value_losses, cost_value_losses_clipped).mean()
             else:
-                cost_value_loss = (cost_returns_batch - cost_value_batch).pow(2).mean()
+                cost_value_loss = (cost_terms_ret - pred_cost_terms).pow(2).mean()
             cost_value_loss = self._sanitize_tensor(
                 cost_value_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
             )
@@ -443,7 +667,7 @@ class PPO:
             # -- For PPO
             nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
             self.optimizer.step()
-            self._step_constraint_scale()
+            self._step_constraint_scale(batch_cost_violation.item())
 
             # Store the losses
             mean_value_loss += value_loss.item()
@@ -453,6 +677,7 @@ class PPO:
             mean_viol_loss += viol_loss.item()
             mean_cost_return += batch_cost_return.item()
             mean_cost_violation += batch_cost_violation.item()
+            mean_kl += kl_mean.item()
 
         # -- For PPO
         num_updates = self.num_learning_epochs * self.num_mini_batches
@@ -463,6 +688,8 @@ class PPO:
         mean_viol_loss /= num_updates
         mean_cost_return /= num_updates
         mean_cost_violation /= num_updates
+        mean_kl /= num_updates
+        kl_skip_rate = skipped_updates / num_updates
         # -- Clear the storage
         self.storage.clear()
 
@@ -472,6 +699,8 @@ class PPO:
             "cost_violation_rate": mean_cost_violation,
             "viol_loss": mean_viol_loss,
             "k_value": self.k_value,
+            "kl": mean_kl,
+            "kl_skip_rate": kl_skip_rate,
         }
 
         # construct the loss dictionary

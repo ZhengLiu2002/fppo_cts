@@ -1,7 +1,5 @@
-from setuptools import setup, find_packages
+from setuptools import find_packages, setup
 
-setup(
-    name="Isaaclab_CRL",
-    version="0.1",
-    packages=find_packages(),
-)
+
+if __name__ == "__main__":
+    setup(packages=find_packages(include=["crl_isaaclab*"]))

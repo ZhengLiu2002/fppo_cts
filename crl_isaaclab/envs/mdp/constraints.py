@@ -291,11 +291,14 @@ def _foot_heights_relative(
 
 def constraint_joint_pos(
     env: ManagerBasedRLEnv,
-    margin: float = 0.3,
-    joint_pos_window: dict[str, tuple[float, float]] | None = None,
+    margin: float = 0.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Fraction of joints violating soft position limits."""
+    """Binary joint-position feasibility cost averaged over selected joints.
+
+    Each joint contributes ``0`` if its angle lies within the allowed range and
+    ``1 / n_joints`` otherwise.
+    """
     asset: Articulation = env.scene[asset_cfg.name]
     joint_ids = _get_joint_slice(asset_cfg)
     joint_pos = asset.data.joint_pos
@@ -344,62 +347,8 @@ def constraint_joint_pos(
         return _zeros_like_env(env, dtype=joint_pos.dtype)
 
     margin_t = torch.as_tensor(margin, device=joint_pos.device, dtype=joint_pos.dtype)
-    soft_lower = limits[..., 0] - margin_t
-    soft_upper = limits[..., 1] + margin_t
-    lower = soft_lower.clone()
-    upper = soft_upper.clone()
-
-    if joint_pos_window:
-        all_joint_names = getattr(asset.data, "joint_names", None)
-        if all_joint_names is None:
-            _warn_once(
-                env,
-                "_warn_missing_joint_names_for_window",
-                "joint_pos_window provided but joint names are unavailable; using soft limits only.",
-            )
-        else:
-            if isinstance(joint_ids, slice):
-                selected_joint_names = list(all_joint_names)
-            else:
-                selected_joint_names = [all_joint_names[idx] for idx in joint_ids]
-
-            has_reversed_bounds = False
-            for local_idx, joint_name in enumerate(selected_joint_names):
-                bounds = joint_pos_window.get(joint_name)
-                if bounds is None:
-                    continue
-                raw_low, raw_high = float(bounds[0]), float(bounds[1])
-                bound_low = min(raw_low, raw_high)
-                bound_high = max(raw_low, raw_high)
-                if raw_low > raw_high:
-                    has_reversed_bounds = True
-
-                bound_low_t = torch.as_tensor(
-                    bound_low, device=joint_pos.device, dtype=joint_pos.dtype
-                )
-                bound_high_t = torch.as_tensor(
-                    bound_high, device=joint_pos.device, dtype=joint_pos.dtype
-                )
-                lower[:, local_idx] = torch.maximum(lower[:, local_idx], bound_low_t)
-                upper[:, local_idx] = torch.minimum(upper[:, local_idx], bound_high_t)
-
-            if has_reversed_bounds:
-                _warn_once(
-                    env,
-                    "_warn_joint_pos_window_order",
-                    "Detected reversed [upper, lower] entries in joint_pos_window; auto-corrected.",
-                )
-
-            invalid_window = lower > upper
-            if invalid_window.any():
-                _warn_once(
-                    env,
-                    "_warn_joint_pos_window_conflict",
-                    "joint_pos_window conflicts with soft limits for some joints; falling back to soft limits on those joints.",
-                )
-                lower = torch.where(invalid_window, soft_lower, lower)
-                upper = torch.where(invalid_window, soft_upper, upper)
-
+    lower = limits[..., 0] - margin_t
+    upper = limits[..., 1] + margin_t
     violation = (joint_pos < lower) | (joint_pos > upper)
     return violation.float().mean(dim=1)
 
@@ -407,14 +356,12 @@ def constraint_joint_pos(
 def joint_pos_prob_constraint(
     env: ManagerBasedRLEnv,
     margin: float = 0.0,
-    joint_pos_window: dict[str, tuple[float, float]] | None = None,
     limit: float | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     cost = constraint_joint_pos(
         env,
         margin=margin,
-        joint_pos_window=joint_pos_window,
         asset_cfg=asset_cfg,
     )
     return _normalize_cost(cost, limit)
@@ -476,6 +423,132 @@ def body_contact_prob_constraint(
     return _normalize_cost(cost, limit)
 
 
+def _resolve_com_height(
+    env: ManagerBasedRLEnv,
+    terrain_sensor_cfg: SceneEntityCfg | None,
+    height_offset: float,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Return COM height in world frame or terrain-relative frame."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    com_pos = asset.data.root_com_pos_w
+    height = com_pos[:, 2]
+    if terrain_sensor_cfg is not None:
+        terrain_h = _terrain_height_at_points(
+            env, terrain_sensor_cfg, com_pos.unsqueeze(1)
+        ).squeeze(1)
+        height = height - terrain_h
+    if height_offset != 0.0:
+        height = height - height_offset
+    return height
+
+
+
+def _resolve_com_height_range(
+    env: ManagerBasedRLEnv,
+    height_range: tuple[float, float],
+    height_range_start: tuple[float, float] | None,
+    height_range_end: tuple[float, float] | None,
+    schedule_start_step: int | None,
+    schedule_end_step: int | None,
+) -> tuple[float, float, bool]:
+    """Resolve the scheduled COM-height bounds."""
+    use_schedule = height_range_start is not None or height_range_end is not None
+    if not use_schedule:
+        return float(height_range[0]), float(height_range[1]), False
+
+    alpha = _smoothstep_progress(env, schedule_start_step, schedule_end_step)
+    start_range = height_range if height_range_start is None else height_range_start
+    end_range = height_range if height_range_end is None else height_range_end
+    min_h = _lerp(start_range[0], end_range[0], alpha)
+    max_h = _lerp(start_range[1], end_range[1], alpha)
+    return min_h, max_h, True
+
+
+
+def _resolve_com_angle_limit(
+    env: ManagerBasedRLEnv,
+    max_angle_rad: float,
+    max_angle_rad_start: float | None,
+    max_angle_rad_end: float | None,
+    schedule_start_step: int | None,
+    schedule_end_step: int | None,
+) -> tuple[float, bool]:
+    """Resolve the scheduled COM-tilt limit."""
+    use_schedule = max_angle_rad_start is not None or max_angle_rad_end is not None
+    if not use_schedule:
+        return float(max_angle_rad), False
+
+    alpha = _smoothstep_progress(env, schedule_start_step, schedule_end_step)
+    start_ang = max_angle_rad if max_angle_rad_start is None else max_angle_rad_start
+    end_ang = max_angle_rad if max_angle_rad_end is None else max_angle_rad_end
+    return _lerp(start_ang, end_ang, alpha), True
+
+
+
+def com_height_prob_constraint(
+    env: ManagerBasedRLEnv,
+    height_range: tuple[float, float] = (0.2, 0.8),
+    cost_limit: float | None = None,
+    limit_relax_epsilon: float | None = None,
+    limit_relax_k: float | None = None,
+    terrain_sensor_cfg: SceneEntityCfg | None = None,
+    height_offset: float = 0.0,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    height_range_start: tuple[float, float] | None = None,
+    height_range_end: tuple[float, float] | None = None,
+    schedule_start_step: int | None = None,
+    schedule_end_step: int | None = None,
+) -> torch.Tensor:
+    """Constraint on base COM height, optionally with curriculum scheduling."""
+    height = _resolve_com_height(env, terrain_sensor_cfg, height_offset, asset_cfg)
+    min_h, max_h, use_schedule = _resolve_com_height_range(
+        env,
+        height_range=height_range,
+        height_range_start=height_range_start,
+        height_range_end=height_range_end,
+        schedule_start_step=schedule_start_step,
+        schedule_end_step=schedule_end_step,
+    )
+    cost = ((height < min_h) | (height > max_h)).float()
+    scaled_limit = cost_limit
+    if cost_limit is not None and not use_schedule:
+        phi = _dynamic_limit_scale(env, epsilon=limit_relax_epsilon, k=limit_relax_k)
+        scaled_limit = float(cost_limit) * phi
+    return _normalize_cost(cost, scaled_limit)
+
+
+
+def com_angle_prob_constraint(
+    env: ManagerBasedRLEnv,
+    max_angle_rad: float = 0.35,
+    cost_limit: float | None = None,
+    limit_relax_epsilon: float | None = None,
+    limit_relax_k: float | None = None,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_angle_rad_start: float | None = None,
+    max_angle_rad_end: float | None = None,
+    schedule_start_step: int | None = None,
+    schedule_end_step: int | None = None,
+) -> torch.Tensor:
+    """Constraint on base COM tilt, optionally with curriculum scheduling."""
+    max_angle, use_schedule = _resolve_com_angle_limit(
+        env,
+        max_angle_rad=max_angle_rad,
+        max_angle_rad_start=max_angle_rad_start,
+        max_angle_rad_end=max_angle_rad_end,
+        schedule_start_step=schedule_start_step,
+        schedule_end_step=schedule_end_step,
+    )
+    cost = constraint_com_orientation(env, max_angle_rad=max_angle, asset_cfg=asset_cfg)
+    scaled_limit = cost_limit
+    if cost_limit is not None and not use_schedule:
+        phi = _dynamic_limit_scale(env, epsilon=limit_relax_epsilon, k=limit_relax_k)
+        scaled_limit = float(cost_limit) * phi
+    return _normalize_cost(cost, scaled_limit)
+
+
+
 def com_frame_prob_constraint(
     env: ManagerBasedRLEnv,
     height_range: tuple[float, float] = (0.2, 0.8),
@@ -494,48 +567,31 @@ def com_frame_prob_constraint(
     schedule_end_step: int | None = None,
 ) -> torch.Tensor:
     """Constraint on base height and orientation relative to terrain."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    com_pos = asset.data.root_com_pos_w
-    height = com_pos[:, 2]
-    if terrain_sensor_cfg is not None:
-        terrain_h = _terrain_height_at_points(
-            env, terrain_sensor_cfg, com_pos.unsqueeze(1)
-        ).squeeze(1)
-        height = height - terrain_h
-    if height_offset != 0.0:
-        height = height - height_offset
-
-    use_physical_schedule = any(
-        value is not None
-        for value in (
-            height_range_start,
-            height_range_end,
-            max_angle_rad_start,
-            max_angle_rad_end,
-        )
+    height = _resolve_com_height(env, terrain_sensor_cfg, height_offset, asset_cfg)
+    min_h, max_h, height_scheduled = _resolve_com_height_range(
+        env,
+        height_range=height_range,
+        height_range_start=height_range_start,
+        height_range_end=height_range_end,
+        schedule_start_step=schedule_start_step,
+        schedule_end_step=schedule_end_step,
     )
-    if use_physical_schedule:
-        alpha = _smoothstep_progress(env, schedule_start_step, schedule_end_step)
-        start_range = height_range if height_range_start is None else height_range_start
-        end_range = height_range if height_range_end is None else height_range_end
-        min_h = _lerp(start_range[0], end_range[0], alpha)
-        max_h = _lerp(start_range[1], end_range[1], alpha)
-        start_ang = max_angle_rad if max_angle_rad_start is None else max_angle_rad_start
-        end_ang = max_angle_rad if max_angle_rad_end is None else max_angle_rad_end
-        max_angle = _lerp(start_ang, end_ang, alpha)
-    else:
-        min_h, max_h = height_range
-        max_angle = max_angle_rad
-
+    max_angle, angle_scheduled = _resolve_com_angle_limit(
+        env,
+        max_angle_rad=max_angle_rad,
+        max_angle_rad_start=max_angle_rad_start,
+        max_angle_rad_end=max_angle_rad_end,
+        schedule_start_step=schedule_start_step,
+        schedule_end_step=schedule_end_step,
+    )
     height_violation = (height < min_h) | (height > max_h)
     tilt = constraint_com_orientation(env, max_angle_rad=max_angle, asset_cfg=asset_cfg)
     cost = height_violation.float() + tilt
     scaled_limit = cost_limit
-    if cost_limit is not None and not use_physical_schedule:
+    if cost_limit is not None and not (height_scheduled or angle_scheduled):
         phi = _dynamic_limit_scale(env, epsilon=limit_relax_epsilon, k=limit_relax_k)
         scaled_limit = float(cost_limit) * phi
     return _normalize_cost(cost, scaled_limit)
-
 
 def gait_pattern_prob_constraint(
     env: ManagerBasedRLEnv,

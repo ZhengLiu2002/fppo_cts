@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.optim as optim
 
-from .omnisafe_utils import Lagrange
 from .ppo import PPO
 
 
 class PPOLagrange(PPO):
-    """PPO with an OmniSafe-style Lagrange multiplier update for CMDPs."""
+    """PPO with per-constraint Lagrange multipliers for CMDPs."""
 
     def __init__(
         self,
@@ -48,6 +48,7 @@ class PPOLagrange(PPO):
         k_decay: float = 1.0,
         k_min: float = 0.0,
         k_violation_threshold: float = 0.02,
+        constraint_limits: list[float] | tuple[float, ...] | None = None,
         multi_gpu_cfg: dict | None = None,
     ):
         super().__init__(
@@ -78,47 +79,95 @@ class PPOLagrange(PPO):
             k_decay=k_decay,
             k_min=k_min,
             k_violation_threshold=k_violation_threshold,
+            constraint_limits=constraint_limits,
             multi_gpu_cfg=multi_gpu_cfg,
         )
+        if not hasattr(optim, lagrange_optimizer):
+            raise AttributeError(f"Optimizer={lagrange_optimizer} not found in torch.optim.")
         self.lagrange_lr = float(lagrange_lr)
         self.lagrange_max = float(lagrange_max)
-        self._lagrange = Lagrange(
-            cost_limit=float(cost_limit),
-            lagrangian_multiplier_init=float(lagrangian_multiplier_init),
-            lambda_lr=float(lagrange_lr),
-            lambda_optimizer=lagrange_optimizer,
-            lagrangian_upper_bound=float(lagrange_max) if lagrange_max is not None else None,
-            device=self.device,
-        )
+        self._lagrange_optimizer_cls = getattr(optim, lagrange_optimizer)
+        self._lagrangian_multiplier_init = max(float(lagrangian_multiplier_init), 0.0)
+        self._lagrange_multiplier: torch.nn.Parameter | None = None
+        self._lagrange_optimizer: torch.optim.Optimizer | None = None
+        self._ensure_lagrange(self._initial_constraint_count())
         self.train_metrics: dict[str, float] = {}
+
+    def _initial_constraint_count(self) -> int:
+        if self.constraint_limits is None:
+            return 1
+        return max(int(self.constraint_limits.numel()), 1)
+
+    def _ensure_lagrange(self, num_constraints: int) -> None:
+        num_constraints = max(int(num_constraints), 1)
+        if self._lagrange_multiplier is not None and self._lagrange_multiplier.numel() == num_constraints:
+            return
+        init = torch.full(
+            (num_constraints,),
+            self._lagrangian_multiplier_init,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        if self._lagrange_multiplier is not None:
+            old = self._lagrange_multiplier.detach().to(device=self.device, dtype=torch.float32)
+            rows = min(old.numel(), num_constraints)
+            init[:rows] = old[:rows]
+        self._lagrange_multiplier = torch.nn.Parameter(init, requires_grad=True)
+        self._lagrange_optimizer = self._lagrange_optimizer_cls(
+            [self._lagrange_multiplier],
+            lr=self.lagrange_lr,
+        )
 
     @property
     def lagrange_multiplier(self) -> torch.Tensor:
-        return self._lagrange.lagrangian_multiplier.detach()
+        if self._lagrange_multiplier is None:
+            self._ensure_lagrange(self._initial_constraint_count())
+        return self._lagrange_multiplier.detach()
 
-    def _estimate_rollout_cost(self) -> float:
+    def _estimate_rollout_costs(self) -> torch.Tensor:
         if self.storage.cost_term_rewards is not None:
-            rollout_costs = self.storage.cost_term_rewards
-            if rollout_costs.ndim == 3:
-                rollout_costs = rollout_costs.sum(dim=-1)
-        else:
-            rollout_costs = self.storage.cost_rewards
+            rollout_costs = self._sanitize_tensor(
+                self.storage.cost_term_rewards,
+                nan=0.0,
+                posinf=1.0e4,
+                neginf=0.0,
+                clamp=1.0e4,
+            )
+            mean_costs = rollout_costs.sum(dim=0).mean(dim=0)
+            return self._all_reduce_mean(mean_costs.reshape(-1))
         rollout_costs = self._sanitize_tensor(
-            rollout_costs,
+            self.storage.cost_rewards,
             nan=0.0,
             posinf=1.0e4,
             neginf=0.0,
             clamp=1.0e4,
         )
-        return float(rollout_costs.sum(dim=0).mean().item())
+        mean_cost = rollout_costs.sum(dim=0).mean().reshape(1)
+        return self._all_reduce_mean(mean_cost)
+
+    def _update_lagrange_multiplier(self, rollout_costs: torch.Tensor) -> None:
+        rollout_costs = rollout_costs.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        self._ensure_lagrange(rollout_costs.numel())
+        d_limits = self._resolve_constraint_limits(rollout_costs.numel(), device=self.device).to(
+            dtype=rollout_costs.dtype
+        )
+        self._lagrange_optimizer.zero_grad()
+        lambda_loss = -torch.sum(self._lagrange_multiplier * (rollout_costs - d_limits.detach()))
+        lambda_loss.backward()
+        self._lagrange_optimizer.step()
+        self._lagrange_multiplier.data.clamp_(0.0, self.lagrange_max)
 
     def _combined_advantages(
         self,
         reward_advantages: torch.Tensor,
         cost_advantages: torch.Tensor,
     ) -> torch.Tensor:
-        penalty = self._lagrange.lagrangian_multiplier.detach()
-        combined = (reward_advantages - penalty * cost_advantages) / (1.0 + penalty)
+        if cost_advantages.ndim == 1:
+            cost_advantages = cost_advantages.unsqueeze(-1)
+        self._ensure_lagrange(cost_advantages.shape[1])
+        penalty = self.lagrange_multiplier.to(device=cost_advantages.device, dtype=cost_advantages.dtype)
+        weighted_cost_adv = self._constraint_weighted_advantages(cost_advantages, penalty)
+        combined = (reward_advantages - weighted_cost_adv) / (1.0 + penalty.sum())
         return self._sanitize_tensor(
             combined,
             nan=0.0,
@@ -128,8 +177,16 @@ class PPOLagrange(PPO):
         )
 
     def state_dict(self) -> dict:
+        lagrange_state = None
+        if self._lagrange_multiplier is not None:
+            lagrange_state = {
+                "lagrangian_multiplier": self._lagrange_multiplier.detach().clone(),
+                "lambda_optimizer": (
+                    self._lagrange_optimizer.state_dict() if self._lagrange_optimizer is not None else None
+                ),
+            }
         return {
-            "lagrange": self._lagrange.state_dict(),
+            "lagrange": lagrange_state,
             "learning_rate": self.learning_rate,
         }
 
@@ -138,7 +195,15 @@ class PPOLagrange(PPO):
             return
         lagrange_state = state_dict.get("lagrange")
         if lagrange_state is not None:
-            self._lagrange.load_state_dict(lagrange_state)
+            multiplier = lagrange_state.get("lagrangian_multiplier")
+            if multiplier is not None:
+                self._ensure_lagrange(int(multiplier.numel()))
+                self._lagrange_multiplier.data.copy_(
+                    multiplier.to(device=self.device, dtype=self._lagrange_multiplier.dtype)
+                )
+            optimizer_state = lagrange_state.get("lambda_optimizer")
+            if optimizer_state is not None and self._lagrange_optimizer is not None:
+                self._lagrange_optimizer.load_state_dict(optimizer_state)
         learning_rate = state_dict.get("learning_rate")
         if learning_rate is not None:
             self.learning_rate = float(learning_rate)
@@ -146,7 +211,7 @@ class PPOLagrange(PPO):
                 param_group["lr"] = self.learning_rate
 
     def update(self):  # noqa: C901
-        self._lagrange.update_lagrange_multiplier(self._estimate_rollout_cost())
+        self._update_lagrange_multiplier(self._estimate_rollout_costs())
 
         mean_value_loss = 0.0
         mean_cost_value_loss = 0.0
@@ -155,6 +220,8 @@ class PPOLagrange(PPO):
         mean_viol_loss = 0.0
         mean_cost_return = 0.0
         mean_cost_violation = 0.0
+        mean_cost_margin = 0.0
+        mean_current_max_violation = 0.0
         mean_kl = 0.0
         skipped_updates = 0
 
@@ -198,6 +265,12 @@ class PPOLagrange(PPO):
                         cost_advantages_batch = (
                             cost_advantages_batch - cost_advantages_batch.mean()
                         ) / (cost_advantages_batch.std() + 1e-8)
+                        if cost_term_advantages_batch is not None:
+                            mean = cost_term_advantages_batch.mean(dim=0, keepdim=True)
+                            std = cost_term_advantages_batch.std(dim=0, keepdim=True)
+                            cost_term_advantages_batch = (cost_term_advantages_batch - mean) / (
+                                std + 1e-8
+                            )
 
             returns_batch = self._sanitize_tensor(
                 returns_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
@@ -211,9 +284,6 @@ class PPOLagrange(PPO):
             cost_values_batch = self._sanitize_tensor(
                 cost_values_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
             )
-            cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
-            cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
-            cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
             cost_terms_ret, cost_terms_adv, cost_terms_val = self._prepare_cost_term_batches(
                 cost_returns_batch=cost_returns_batch,
                 cost_advantages_batch=cost_advantages_batch,
@@ -221,8 +291,11 @@ class PPOLagrange(PPO):
                 cost_term_advantages_batch=cost_term_advantages_batch,
                 cost_term_values_batch=cost_term_values_batch,
             )
-            aggregate_cost_returns = torch.sum(cost_terms_ret, dim=1)
-            aggregate_cost_advantages = torch.sum(cost_terms_adv, dim=1)
+            constraint_stats = self._constraint_batch_stats(cost_terms_ret)
+            batch_cost_return = constraint_stats["aggregate_cost_return"]
+            batch_cost_violation = constraint_stats["batch_cost_violation"]
+            batch_cost_margin = constraint_stats["min_cost_margin"]
+            current_max_violation = constraint_stats["max_c_hat"]
 
             self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
@@ -244,9 +317,6 @@ class PPOLagrange(PPO):
             mu_batch = self.policy.action_mean
             sigma_batch = self.policy.action_std
             entropy_batch = self.policy.entropy
-            batch_cost_return, batch_cost_violation, c_hat = self._batch_cost_stats(
-                aggregate_cost_returns
-            )
 
             with torch.inference_mode():
                 kl = self._safe_kl(mu_batch, sigma_batch, old_mu_batch, old_sigma_batch)
@@ -277,13 +347,15 @@ class PPOLagrange(PPO):
                 mean_kl += kl_mean.item()
                 mean_cost_return += batch_cost_return.item()
                 mean_cost_violation += batch_cost_violation.item()
+                mean_cost_margin += batch_cost_margin.item()
+                mean_current_max_violation += current_max_violation.item()
                 skipped_updates += 1
                 continue
 
             ratio = self._safe_ratio(actions_log_prob_batch, old_actions_log_prob_batch)
             combined_advantages = self._combined_advantages(
                 torch.squeeze(advantages_batch),
-                aggregate_cost_advantages,
+                cost_terms_adv,
             )
             surrogate = -combined_advantages * ratio
             surrogate_clipped = -combined_advantages * torch.clamp(
@@ -295,8 +367,8 @@ class PPOLagrange(PPO):
                 1.0 - self.cost_ratio_clip,
                 1.0 + self.cost_ratio_clip,
             )
-            cost_surrogate = (aggregate_cost_advantages * ratio_cost).mean()
-            viol_loss = self._positive_cost_penalty(cost_surrogate, c_hat)
+            cost_surrogates = self._constraint_surrogate_terms(cost_terms_adv, ratio_cost)
+            viol_loss = self._positive_cost_penalty_per_constraint(cost_surrogates, constraint_stats["c_hat"])
             surrogate_loss = self._sanitize_tensor(
                 surrogate_loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6
             )
@@ -337,9 +409,7 @@ class PPOLagrange(PPO):
                 + self.cost_value_loss_coef * cost_value_loss
                 - self.entropy_coef * entropy_batch.mean()
             )
-            loss = self._sanitize_tensor(
-                loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6
-            )
+            loss = self._sanitize_tensor(loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6)
             if not torch.isfinite(loss):
                 continue
 
@@ -358,6 +428,8 @@ class PPOLagrange(PPO):
             mean_viol_loss += viol_loss.item()
             mean_cost_return += batch_cost_return.item()
             mean_cost_violation += batch_cost_violation.item()
+            mean_cost_margin += batch_cost_margin.item()
+            mean_current_max_violation += current_max_violation.item()
             mean_kl += kl_mean.item()
 
         mean_value_loss /= num_updates
@@ -367,19 +439,23 @@ class PPOLagrange(PPO):
         mean_viol_loss /= num_updates
         mean_cost_return /= num_updates
         mean_cost_violation /= num_updates
+        mean_cost_margin /= num_updates
+        mean_current_max_violation /= num_updates
         mean_kl /= num_updates
         kl_skip_rate = skipped_updates / num_updates
 
         self.storage.clear()
         self.train_metrics = {
             "mean_cost_return": mean_cost_return,
-            "cost_limit_margin": self.cost_limit - mean_cost_return,
+            "cost_limit_margin": mean_cost_margin,
             "cost_violation_rate": mean_cost_violation,
             "viol_loss": mean_viol_loss,
             "k_value": self.k_value,
             "kl": mean_kl,
             "kl_skip_rate": kl_skip_rate,
-            "lagrange_multiplier": float(self.lagrange_multiplier.item()),
+            "lagrange_multiplier_mean": float(self.lagrange_multiplier.mean().item()),
+            "lagrange_multiplier_max": float(self.lagrange_multiplier.max().item()),
+            "current_max_violation": mean_current_max_violation,
         }
 
         return {

@@ -63,6 +63,12 @@ from scripts.rsl_rl.constraint_utils import ConstraintNormalizer
 _RUNNER_ONLY_ALG_KEYS = {
     "class_name",
     "dagger_update_freq",
+    "adaptive_constraint_curriculum",
+    "constraint_curriculum_alpha",
+    "constraint_curriculum_check_interval",
+    "constraint_curriculum_ema_decay",
+    "constraint_curriculum_names",
+    "constraint_curriculum_shrink",
     "rnd_cfg",
     "symmetry_cfg",
     "constraint_normalization",
@@ -72,6 +78,8 @@ _RUNNER_ONLY_ALG_KEYS = {
     "constraint_norm_clip",
     "constraint_proxy_delta",
     "constraint_agg_tau",
+    "constraint_limits_final",
+    "constraint_limits_start",
     "constraint_scale_by_gamma",
     "constraint_cost_scale",
 }
@@ -86,10 +94,24 @@ _KEY_CURVE_MIRROR_MAP = {
     "Cost/mean_cost_return": "Compare/Cost/mean_cost_return",
     "Cost/cost_limit_margin": "Compare/Cost/cost_limit_margin",
     "Cost/cost_violation_rate": "Compare/Cost/cost_violation_rate",
+    "Cost/accept_rate": "Compare/FPPO/accept_rate",
+    "Cost/reject_rate": "Compare/FPPO/reject_rate",
+    "Cost/step_size": "Compare/FPPO/effective_step_size",
+    "Cost/base_step_size": "Compare/FPPO/base_step_size",
+    "Cost/effective_step_ratio": "Compare/FPPO/effective_step_ratio",
+    "Cost/active_constraints": "Compare/FPPO/active_constraints",
+    "Cost/kl": "Compare/FPPO/kl",
+    "Cost/reject_kl_rate": "Compare/FPPO/reject_kl_rate",
+    "Cost/infeasible_batch_rate": "Compare/FPPO/infeasible_batch_rate",
+    "Cost/recovery_accept_rate": "Compare/FPPO/recovery_accept_rate",
+    "Cost/current_max_violation": "Compare/FPPO/current_max_violation",
+    "Cost/boundary_mode_rate": "Compare/FPPO/boundary_mode_rate",
+    "Cost/recovery_mode_rate": "Compare/FPPO/recovery_mode_rate",
     "Episode_Cost/prob_gait_pattern": "Compare/Gait/prob_gait_pattern",
     "Episode_Cost/symmetric": "Compare/Gait/symmetric",
     "Episode_Cost/contact_velocity": "Compare/Gait/contact_velocity",
-    "Episode_Cost/prob_com_frame": "Compare/Stability/prob_com_frame",
+    "Episode_Cost/prob_com_height": "Compare/Stability/prob_com_height",
+    "Episode_Cost/prob_com_angle": "Compare/Stability/prob_com_angle",
     "Episode_Cost/prob_joint_pos": "Compare/Cost/prob_joint_pos",
     "Episode_Cost/prob_joint_vel": "Compare/Cost/prob_joint_vel",
     "Episode_Cost/prob_joint_torque": "Compare/Cost/prob_joint_torque",
@@ -159,21 +181,31 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 self.alg_cfg_full, device=self.device
             )
         self._constraint_term_names = self._infer_cost_term_names(self.env)
-        named_constraint_limits = self.alg_cfg_full.get("constraint_limits", None)
-        if isinstance(named_constraint_limits, dict):
-            # Support named per-constraint limits to avoid fragile order coupling.
-            default_limit = float(self.alg_cfg_full.get("cost_limit", 0.0))
-            if self._constraint_term_names is None:
-                ordered_names = sorted(str(name) for name in named_constraint_limits.keys())
-            else:
-                ordered_names = self._constraint_term_names
-            ordered_limits = [
-                float(named_constraint_limits.get(name, default_limit)) for name in ordered_names
-            ]
-            self.alg_cfg["constraint_limits"] = ordered_limits
-            self.alg_cfg_full["constraint_limits"] = ordered_limits
-
         alg_class_name = self.alg_cfg["class_name"]
+        ordered_constraint_names = self._constraint_term_names
+        if ordered_constraint_names is None:
+            ordered_name_set: set[str] = set()
+            for key in ("constraint_limits", "constraint_limits_start", "constraint_limits_final"):
+                named_limits = self.alg_cfg_full.get(key, None)
+                if isinstance(named_limits, dict):
+                    ordered_name_set.update(str(name) for name in named_limits.keys())
+            if ordered_name_set:
+                ordered_constraint_names = sorted(ordered_name_set)
+        if ordered_constraint_names is not None:
+            default_limit = float(self.alg_cfg_full.get("cost_limit", 0.0))
+            for key in ("constraint_limits", "constraint_limits_start", "constraint_limits_final"):
+                named_limits = self.alg_cfg_full.get(key, None)
+                if not isinstance(named_limits, dict):
+                    continue
+                ordered_limits = [
+                    float(named_limits.get(name, default_limit)) for name in ordered_constraint_names
+                ]
+                self.alg_cfg[key] = ordered_limits
+                self.alg_cfg_full[key] = ordered_limits
+        if alg_class_name.lower() == "fppo" and ordered_constraint_names is not None:
+            self.alg_cfg["constraint_names"] = list(ordered_constraint_names)
+            self.alg_cfg_full["constraint_names"] = list(ordered_constraint_names)
+
         alg_spec = get_algorithm_spec(alg_class_name)
         self.training_type = alg_spec.training_type
 
@@ -519,12 +551,17 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
 
     def save(self, path: str, infos=None):
         # -- Save model
+        algorithm_state = None
+        if hasattr(self.alg, "state_dict"):
+            algorithm_state = self.alg.state_dict()
         saved_dict = {
             "model_state_dict": self.alg.policy.state_dict(),
             "optimizer_state_dict": self._serialize_optimizer(self.alg.optimizer),
             "iter": self.current_learning_iteration,
             "infos": infos,
         }
+        if algorithm_state:
+            saved_dict["algorithm_state_dict"] = algorithm_state
         # -- Save RND model if used
         if getattr(self.alg, "rnd", None):
             saved_dict["rnd_state_dict"] = self.alg.rnd.state_dict()
@@ -616,6 +653,9 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             # -- RND optimizer if used
             if getattr(self.alg, "rnd", None):
                 self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+        algorithm_state = loaded_dict.get("algorithm_state_dict")
+        if resumed_training and algorithm_state and hasattr(self.alg, "load_state_dict"):
+            self.alg.load_state_dict(algorithm_state)
         # -- load current learning iteration
         if resumed_training:
             self.current_learning_iteration = loaded_dict["iter"]

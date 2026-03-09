@@ -3,35 +3,47 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Script to play a checkpoint if an RL agent from RSL-RL."""
-
-"""Launch Isaac Sim Simulator first."""
+"""Script to evaluate a checkpoint with an RSL-RL agent."""
 
 import argparse
-import sys
-from pathlib import Path
-
-# Ensure repository root is on sys.path for `scripts.*` imports.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-_TASKS_ROOT = _REPO_ROOT / "crl_tasks"
-if _TASKS_ROOT.is_dir() and str(_TASKS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TASKS_ROOT))
-
-from isaaclab.app import AppLauncher
-from tqdm import tqdm
 from collections import deque
-import numpy as np
 import statistics
 
-# local imports
-import cli_args  # isort: skip
+try:
+    from scripts.rsl_rl.experiment_manager import (
+        apply_experiment_preset,
+        available_experiment_presets,
+        load_experiment_preset,
+    )
+    from scripts.rsl_rl.runtime import (
+        bootstrap_repo_paths,
+        build_log_root_path,
+        resolve_checkpoint_path,
+    )
+except ImportError:
+    from experiment_manager import (  # type: ignore
+        apply_experiment_preset,
+        available_experiment_presets,
+        load_experiment_preset,
+    )
+    from runtime import (  # type: ignore
+        bootstrap_repo_paths,
+        build_log_root_path,
+        resolve_checkpoint_path,
+    )
+
+bootstrap_repo_paths(__file__)
+
+from isaaclab.app import AppLauncher
+import numpy as np
+from tqdm import tqdm
+
+from scripts.rsl_rl import cli_args
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
+parser = argparse.ArgumentParser(description="Evaluate an RSL-RL policy.")
 parser.add_argument(
-    "--video", action="store_true", default=False, help="Record videos during training."
+    "--video", action="store_true", default=False, help="Record videos during evaluation."
 )
 parser.add_argument(
     "--video_length", type=int, default=500, help="Length of the recorded video (in steps)."
@@ -57,6 +69,18 @@ cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+if args_cli.list_exp:
+    available_presets = available_experiment_presets()
+    if available_presets:
+        print("Available experiment presets:")
+        for entry in available_presets:
+            description = f" - {entry['description']}" if entry["description"] else ""
+            print(f"  {entry['name']}{description}")
+    else:
+        print("[INFO] No experiment presets found under `experiments/`.")
+    raise SystemExit(0)
+
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -64,8 +88,6 @@ if args_cli.video:
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
-
-"""Rest everything follows."""
 
 import gymnasium as gym
 import os
@@ -75,22 +97,20 @@ import torch
 from scripts.rsl_rl.modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
-from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 from crl_tasks.tasks.galileo.config.agents.rsl_rl_cfg import CRLRslRlOnPolicyRunnerCfg
 
 from scripts.rsl_rl.vecenv_wrapper import CRLRslRlVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
-from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
+from isaaclab_tasks.utils import parse_env_cfg
 
 
 def main():
-    """Play with RSL-RL agent."""
+    """Evaluate a trained RSL-RL agent."""
     # parse configuration
-    if args_cli.task.find("Eval") == -1:
-        print(f"[INFO] task argument must have 'Eval'")
+    if "Eval" not in args_cli.task:
+        print("[INFO] The task name must include 'Eval'.")
         return
     if args_cli.num_envs != 256:
         args_cli.num_envs = 256
@@ -102,24 +122,33 @@ def main():
         use_fabric=not args_cli.disable_fabric,
     )
     agent_cfg: CRLRslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    experiment_preset = load_experiment_preset(selection=args_cli.exp, file_path=args_cli.exp_file)
+    if experiment_preset is not None:
+        apply_experiment_preset(env_cfg=env_cfg, agent_cfg=agent_cfg, preset=experiment_preset)
+        agent_cfg = cli_args.reapply_rsl_rl_cli_overrides(agent_cfg, args_cli)
+        env_cfg.scene.num_envs = args_cli.num_envs
+        if args_cli.device is not None:
+            env_cfg.sim.device = args_cli.device
+        print(
+            f"[INFO] Applied experiment preset: {experiment_preset.name} ({experiment_preset.path})"
+        )
 
     # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
+    log_root_path = build_log_root_path(agent_cfg.experiment_name)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
-    if args_cli.use_pretrained_checkpoint:
-        resume_path = get_published_pretrained_checkpoint("rsl_rl", args_cli.task)
-        if not resume_path:
-            print(
-                "[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task."
-            )
-            return
-    elif args_cli.checkpoint:
-        resume_path = retrieve_file_path(args_cli.checkpoint)
-    else:
-        resume_path = get_checkpoint_path(
-            log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint
+    resume_path = resolve_checkpoint_path(
+        task_name=args_cli.task,
+        log_root_path=log_root_path,
+        load_run=agent_cfg.load_run,
+        load_checkpoint=agent_cfg.load_checkpoint,
+        checkpoint=args_cli.checkpoint,
+        use_pretrained_checkpoint=args_cli.use_pretrained_checkpoint,
+    )
+    if not resume_path:
+        print(
+            "[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task."
         )
+        return
 
     log_dir = os.path.dirname(resume_path)
 
@@ -138,7 +167,7 @@ def main():
             "video_length": args_cli.video_length,
             "disable_logger": True,
         }
-        print("[INFO] Recording videos during training.")
+        print("[INFO] Recording videos during evaluation.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 
@@ -203,8 +232,8 @@ def main():
     len_mean = statistics.mean(lenbuffer)
     len_std = statistics.stdev(lenbuffer)
 
-    print("Mean reward: {:.2f}$\pm${:.2f}".format(rew_mean, rew_std))
-    print("Mean episode length: {:.2f}$\pm${:.2f}".format(len_mean, len_std))
+    print("Mean reward: {:.2f}$\\pm${:.2f}".format(rew_mean, rew_std))
+    print("Mean episode length: {:.2f}$\\pm${:.2f}".format(len_mean, len_std))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,20 @@
+{
+  "extends": "galileo/base",
+  "meta": {
+    "description": "Fast smoke test for verifying config wiring before long training.",
+    "tags": [
+      "smoke",
+      "debug",
+      "fppo"
+    ]
+  },
+  "env": {
+    "scene": {
+      "num_envs": 512
+    }
+  },
+  "agent": {
+    "max_iterations": 1000,
+    "save_interval": 50
+  }
+}

@@ -56,8 +56,10 @@ def build_obs_cfg(role: RunnerRole) -> tuple[dict[str, int], dict[str, int]]:
 def build_policy_cfg(role: RunnerRole) -> CRLRslRlPpoActorCriticCfg:
     """Build policy config from shared defaults and observation layout."""
     actor_obs, critic_obs = build_obs_cfg(role)
+    algo_key = getattr(GalileoDefaults.algorithm, "name", "fppo")
+    init_noise_std = 0.5 if algo_key == "fppo" else 1.0
     return CRLRslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
+        init_noise_std=init_noise_std,
         num_prop=actor_obs["num_prop"],
         num_scan=actor_obs["num_scan"],
         num_priv_explicit=actor_obs["num_priv_explicit"],

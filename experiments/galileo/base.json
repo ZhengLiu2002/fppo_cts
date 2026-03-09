@@ -1,0 +1,11 @@
+{
+  "meta": {
+    "description": "Galileo baseline preset. Use this as the parent for parameter-only experiments.",
+    "tags": [
+      "baseline",
+      "galileo"
+    ]
+  },
+  "env": {},
+  "agent": {}
+}

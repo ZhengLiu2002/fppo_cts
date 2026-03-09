@@ -12,7 +12,7 @@ from .ppo_lagrange import PPOLagrange
 
 
 class FOCOPS(PPOLagrange):
-    """First-order constrained policy optimization ported from OmniSafe FOCOPS."""
+    """First-order constrained policy optimization with per-constraint multipliers."""
 
     def __init__(
         self,
@@ -49,6 +49,7 @@ class FOCOPS(PPOLagrange):
         k_decay: float = 1.0,
         k_min: float = 0.0,
         k_violation_threshold: float = 0.02,
+        constraint_limits: list[float] | tuple[float, ...] | None = None,
         multi_gpu_cfg: dict | None = None,
     ):
         super().__init__(
@@ -83,13 +84,14 @@ class FOCOPS(PPOLagrange):
             k_decay=k_decay,
             k_min=k_min,
             k_violation_threshold=k_violation_threshold,
+            constraint_limits=constraint_limits,
             multi_gpu_cfg=multi_gpu_cfg,
         )
         self.focops_eta = float(focops_eta) if focops_eta is not None else None
         self.focops_lambda = max(float(focops_lambda) if focops_lambda is not None else 1.0, 1.0e-8)
 
     def update(self):  # noqa: C901
-        self._lagrange.update_lagrange_multiplier(self._estimate_rollout_cost())
+        self._update_lagrange_multiplier(self._estimate_rollout_costs())
 
         mean_value_loss = 0.0
         mean_cost_value_loss = 0.0
@@ -98,6 +100,8 @@ class FOCOPS(PPOLagrange):
         mean_viol_loss = 0.0
         mean_cost_return = 0.0
         mean_cost_violation = 0.0
+        mean_cost_margin = 0.0
+        mean_current_max_violation = 0.0
         mean_kl = 0.0
 
         if self.policy.is_recurrent:
@@ -140,6 +144,12 @@ class FOCOPS(PPOLagrange):
                         cost_advantages_batch = (
                             cost_advantages_batch - cost_advantages_batch.mean()
                         ) / (cost_advantages_batch.std() + 1e-8)
+                        if cost_term_advantages_batch is not None:
+                            mean = cost_term_advantages_batch.mean(dim=0, keepdim=True)
+                            std = cost_term_advantages_batch.std(dim=0, keepdim=True)
+                            cost_term_advantages_batch = (cost_term_advantages_batch - mean) / (
+                                std + 1e-8
+                            )
 
             returns_batch = self._sanitize_tensor(
                 returns_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
@@ -160,8 +170,11 @@ class FOCOPS(PPOLagrange):
                 cost_term_advantages_batch=cost_term_advantages_batch,
                 cost_term_values_batch=cost_term_values_batch,
             )
-            aggregate_cost_returns = torch.sum(cost_terms_ret, dim=1)
-            aggregate_cost_advantages = torch.sum(cost_terms_adv, dim=1)
+            constraint_stats = self._constraint_batch_stats(cost_terms_ret)
+            batch_cost_return = constraint_stats["aggregate_cost_return"]
+            batch_cost_violation = constraint_stats["batch_cost_violation"]
+            batch_cost_margin = constraint_stats["min_cost_margin"]
+            current_max_violation = constraint_stats["max_c_hat"]
 
             self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
@@ -180,25 +193,9 @@ class FOCOPS(PPOLagrange):
                 cost_value_batch = cost_value_batch.view(cost_value_batch.shape[0], -1)
             pred_cost_terms = self._match_cost_heads(cost_value_batch, cost_terms_ret.shape[1])
             old_cost_terms = self._match_cost_heads(cost_terms_val, cost_terms_ret.shape[1])
-            mu_batch = self._sanitize_tensor(
-                self.policy.action_mean,
-                nan=0.0,
-                posinf=1.0e4,
-                neginf=-1.0e4,
-                clamp=1.0e4,
-            )
-            sigma_batch = self._sanitize_tensor(
-                self.policy.action_std,
-                nan=1.0e-6,
-                posinf=1.0e2,
-                neginf=1.0e-6,
-                clamp=1.0e2,
-            ).clamp_min(1.0e-6)
+            mu_batch = self.policy.action_mean
+            sigma_batch = self.policy.action_std
             entropy_batch = self.policy.entropy
-            batch_cost_return, batch_cost_violation, c_hat = self._batch_cost_stats(
-                aggregate_cost_returns
-            )
-
             old_mu_batch = self._sanitize_tensor(
                 old_mu_batch,
                 nan=0.0,
@@ -235,14 +232,20 @@ class FOCOPS(PPOLagrange):
             ratio = self._safe_ratio(actions_log_prob_batch, old_actions_log_prob_batch)
             adv_combo = self._combined_advantages(
                 torch.squeeze(advantages_batch),
-                aggregate_cost_advantages,
+                cost_terms_adv,
             )
             surrogate_terms = kl - ratio * adv_combo / self.focops_lambda
             if self.focops_eta is not None:
                 surrogate_terms = surrogate_terms * (kl.detach() <= self.focops_eta).float()
             surrogate_loss = surrogate_terms.mean()
-            cost_surrogate = (aggregate_cost_advantages * ratio).mean()
-            viol_loss = self._positive_cost_penalty(cost_surrogate, c_hat)
+            cost_surrogates = self._constraint_surrogate_terms(cost_terms_adv, ratio)
+            viol_loss = self._positive_cost_penalty_per_constraint(cost_surrogates, constraint_stats["c_hat"])
+            surrogate_loss = self._sanitize_tensor(
+                surrogate_loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6
+            )
+            viol_loss = self._sanitize_tensor(
+                viol_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
+            )
 
             if self.use_clipped_value_loss:
                 value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(
@@ -253,6 +256,9 @@ class FOCOPS(PPOLagrange):
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
+            value_loss = self._sanitize_tensor(
+                value_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
+            )
 
             if self.use_clipped_value_loss:
                 cost_value_clipped = old_cost_terms + (
@@ -263,6 +269,9 @@ class FOCOPS(PPOLagrange):
                 cost_value_loss = torch.max(cost_value_losses, cost_value_losses_clipped).mean()
             else:
                 cost_value_loss = (cost_terms_ret - pred_cost_terms).pow(2).mean()
+            cost_value_loss = self._sanitize_tensor(
+                cost_value_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
+            )
 
             loss = (
                 surrogate_loss
@@ -271,6 +280,9 @@ class FOCOPS(PPOLagrange):
                 + self.cost_value_loss_coef * cost_value_loss
                 - self.entropy_coef * entropy_batch.mean()
             )
+            loss = self._sanitize_tensor(loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6)
+            if not torch.isfinite(loss):
+                continue
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -287,6 +299,8 @@ class FOCOPS(PPOLagrange):
             mean_viol_loss += viol_loss.item()
             mean_cost_return += batch_cost_return.item()
             mean_cost_violation += batch_cost_violation.item()
+            mean_cost_margin += batch_cost_margin.item()
+            mean_current_max_violation += current_max_violation.item()
             mean_kl += kl_mean.item()
 
         mean_value_loss /= num_updates
@@ -296,17 +310,21 @@ class FOCOPS(PPOLagrange):
         mean_viol_loss /= num_updates
         mean_cost_return /= num_updates
         mean_cost_violation /= num_updates
+        mean_cost_margin /= num_updates
+        mean_current_max_violation /= num_updates
         mean_kl /= num_updates
 
         self.storage.clear()
         self.train_metrics = {
             "mean_cost_return": mean_cost_return,
-            "cost_limit_margin": self.cost_limit - mean_cost_return,
+            "cost_limit_margin": mean_cost_margin,
             "cost_violation_rate": mean_cost_violation,
             "viol_loss": mean_viol_loss,
             "k_value": self.k_value,
             "kl": mean_kl,
-            "lagrange_multiplier": float(self.lagrange_multiplier.item()),
+            "lagrange_multiplier_mean": float(self.lagrange_multiplier.mean().item()),
+            "lagrange_multiplier_max": float(self.lagrange_multiplier.max().item()),
+            "current_max_violation": mean_current_max_violation,
         }
 
         return {
@@ -316,4 +334,3 @@ class FOCOPS(PPOLagrange):
             "entropy": mean_entropy,
             "viol": mean_viol_loss,
         }
-

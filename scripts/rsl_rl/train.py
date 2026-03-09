@@ -3,28 +3,50 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Script to train RL agent with RSL-RL."""
+"""Script to train RSL-RL agents in Isaac Lab."""
 
-"""Launch Isaac Sim Simulator first."""
-import os
 import argparse
+import os
 import sys
-from pathlib import Path
-import pickle
 
-# Ensure repository root is on sys.path so `scripts.*` imports work even if the
-# working directory is changed by the Isaac app launcher.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-_TASKS_ROOT = _REPO_ROOT / "crl_tasks"
-if _TASKS_ROOT.is_dir() and str(_TASKS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TASKS_ROOT))
+try:
+    from scripts.rsl_rl.experiment_manager import (
+        apply_experiment_preset,
+        available_experiment_presets,
+        load_experiment_preset,
+        write_experiment_metadata,
+    )
+    from scripts.rsl_rl.runtime import (
+        bootstrap_repo_paths,
+        build_log_root_path,
+        configure_torch_backends,
+        create_run_directory_name,
+        dump_pickle,
+        ensure_min_rsl_rl_version,
+        resolve_checkpoint_path,
+    )
+except ImportError:
+    from experiment_manager import (  # type: ignore
+        apply_experiment_preset,
+        available_experiment_presets,
+        load_experiment_preset,
+        write_experiment_metadata,
+    )
+    from runtime import (  # type: ignore
+        bootstrap_repo_paths,
+        build_log_root_path,
+        configure_torch_backends,
+        create_run_directory_name,
+        dump_pickle,
+        ensure_min_rsl_rl_version,
+        resolve_checkpoint_path,
+    )
+
+bootstrap_repo_paths(__file__)
 
 from isaaclab.app import AppLauncher
 
-# local imports
-import cli_args  # isort: skip
+from scripts.rsl_rl import cli_args
 
 
 # add argparse arguments
@@ -58,6 +80,17 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
+if args_cli.list_exp:
+    available_presets = available_experiment_presets()
+    if available_presets:
+        print("Available experiment presets:")
+        for entry in available_presets:
+            description = f" - {entry['description']}" if entry["description"] else ""
+            print(f"  {entry['name']}{description}")
+    else:
+        print("[INFO] No experiment presets found under `experiments/`.")
+    raise SystemExit(0)
+
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -65,38 +98,14 @@ if args_cli.video:
 # clear out sys.argv for Hydra
 sys.argv = [sys.argv[0]] + hydra_args
 
+ensure_min_rsl_rl_version(distributed=args_cli.distributed)
+
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-"""Check for minimum supported RSL-RL version."""
-
-import importlib.metadata as metadata
-import platform
-
-from packaging import version
-
-# for distributed training, check minimum supported rsl-rl version
-RSL_RL_VERSION = "2.3.1"
-installed_version = metadata.version("rsl-rl-lib")
-if args_cli.distributed and version.parse(installed_version) < version.parse(RSL_RL_VERSION):
-    if platform.system() == "Windows":
-        cmd = [r".\isaaclab.bat", "-p", "-m", "pip", "install", f"rsl-rl-lib=={RSL_RL_VERSION}"]
-    else:
-        cmd = ["./isaaclab.sh", "-p", "-m", "pip", "install", f"rsl-rl-lib=={RSL_RL_VERSION}"]
-    print(
-        f"Please install the correct version of RSL-RL.\nExisting version is: '{installed_version}'"
-        f" and required version is: '{RSL_RL_VERSION}'.\nTo install the correct version, run:"
-        f"\n\n\t{' '.join(cmd)}\n"
-    )
-    exit(1)
-
-"""Rest everything follows."""
-
 import gymnasium as gym
-import os
 import torch
-from datetime import datetime
 
 from scripts.rsl_rl.modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
 
@@ -114,27 +123,12 @@ from scripts.rsl_rl.vecenv_wrapper import CRLRslRlVecEnvWrapper
 
 # import isaaclab_tasks  # noqa: F401
 import crl_tasks  # noqa: F401
-from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from crl_isaaclab.envs import CRLManagerBasedRLEnv
 
 # PLACEHOLDER: Extension template (do not remove this comment)
 
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-torch.backends.cudnn.deterministic = False
-torch.backends.cudnn.benchmark = False
-
-
-def dump_pickle(filename: str, data: object):
-    """Lightweight pickle dumper to replace removed helper in isaaclab.utils.io."""
-    if not filename.endswith(".pkl"):
-        filename += ".pkl"
-    directory = os.path.dirname(filename)
-    if directory and not os.path.exists(directory):
-        os.makedirs(directory, exist_ok=True)
-    with open(filename, "wb") as f:
-        pickle.dump(data, f)
+configure_torch_backends(torch)
 
 
 @hydra_task_config(args_cli.task, "rsl_rl_cfg_entry_point")
@@ -145,7 +139,14 @@ def main(
     """Train with RSL-RL agent."""
 
     # override configurations with non-hydra CLI arguments
+    experiment_preset = load_experiment_preset(selection=args_cli.exp, file_path=args_cli.exp_file)
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
+    if experiment_preset is not None:
+        apply_experiment_preset(env_cfg=env_cfg, agent_cfg=agent_cfg, preset=experiment_preset)
+        agent_cfg = cli_args.reapply_rsl_rl_cli_overrides(agent_cfg, args_cli)
+        print(
+            f"[INFO] Applied experiment preset: {experiment_preset.name} ({experiment_preset.path})"
+        )
     env_cfg.scene.num_envs = (
         args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
     )
@@ -169,21 +170,16 @@ def main(
         agent_cfg.seed = seed
 
     # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
+    log_root_path = build_log_root_path(agent_cfg.experiment_name)
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
-    # specify directory for logging runs: allow prefix via env LOG_RUN_NAME, always append time-stamp
-    env_run = os.getenv("LOG_RUN_NAME", "").strip()
-    ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    if env_run:
-        log_dir = f"{env_run}_{ts}"
-    else:
-        log_dir = ts
-        # The Ray Tune workflow extracts experiment name using the logging line below, hence, do not change it (see PR #2346, comment-2819298849)
-        print(f"Exact experiment name requested from command line: {log_dir}")
-    if agent_cfg.run_name:
-        log_dir += f"_{agent_cfg.run_name}"
-    log_dir = os.path.join(log_root_path, log_dir)
+    run_dir_name, needs_exact_name_log = create_run_directory_name(
+        agent_cfg.run_name,
+        experiment_slug=experiment_preset.slug if experiment_preset is not None else None,
+    )
+    if needs_exact_name_log:
+        # The Ray Tune workflow extracts experiment name using the logging line below.
+        print(f"Exact experiment name requested from command line: {run_dir_name}")
+    log_dir = os.path.join(log_root_path, run_dir_name)
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
@@ -194,8 +190,12 @@ def main(
 
     # save resume path before creating a new log_dir
     if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
-        resume_path = get_checkpoint_path(
-            log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint
+        resume_path = resolve_checkpoint_path(
+            task_name=args_cli.task,
+            log_root_path=log_root_path,
+            load_run=agent_cfg.load_run,
+            load_checkpoint=agent_cfg.load_checkpoint,
+            checkpoint=args_cli.checkpoint,
         )
 
     # # wrap for video recording
@@ -228,6 +228,8 @@ def main(
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
     dump_pickle(os.path.join(log_dir, "params", "env.pkl"), env_cfg)
     dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
+    if experiment_preset is not None:
+        write_experiment_metadata(log_dir, experiment_preset, args=args_cli)
 
     # # # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)

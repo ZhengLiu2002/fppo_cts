@@ -13,12 +13,15 @@
 ```bash
 cd /home/lz/Project/IsaacLab/fppo_ts
 pip install -e .
+pip install -e ".[dev]"
 
 cd /home/lz/Project/IsaacLab/fppo_ts/crl_tasks
 pip install --no-build-isolation -e .
 # 遇到旧版本残留，可先卸载再装：
 # pip uninstall -y crl_tasks && pip install --no-build-isolation -e .
 ```
+
+根包现在会正确安装 `crl_isaaclab`，不再出现 `pip install -e .` 只装到 `tests/` 的问题。
 
 ## 可选：清理缓存
 ```bash
@@ -33,11 +36,17 @@ conda activate isaaclab
 cd /home/lz/Project/IsaacLab/fppo_ts
 ```
 
+### 实验 preset 管理
+- 参数版本建议放在 `experiments/` 下，而不是复制代码目录或频繁新建代码分支。
+- 查看可用 preset：`python scripts/rsl_rl/train.py --list-exp`
+- 训练时加载 preset：`python scripts/rsl_rl/train.py --task Isaac-Galileo-CRL-Teacher-v0 --exp galileo/fppo_smoke --run_name teacher --headless`
+- 详细工作流和 Git 教程见 `docs/EXPERIMENTS.md`
+
 ### 单机单卡
 通过 `--algo` 覆盖默认算法（默认使用配置文件内的 `class_name`，当前 Teacher/Student 默认 FPPO）。
 
 可选值：
-- `fppo` / `np3o` / `ppo` / `ppo_lagrange` / `cpo` / `pcpo` / `focpo` / `distillation`（使用 `scripts/rsl_rl/algorithms/` 里的实现）
+- `fppo` / `np3o` / `ppo` / `ppo_lagrange` / `cpo` / `pcpo` / `focops` / `distillation`（使用 `scripts/rsl_rl/algorithms/` 里的实现）
 
 示例：fppo
 ```bash
@@ -94,6 +103,34 @@ LOG_RUN_NAME=pcpo python scripts/rsl_rl/train.py \
   --task Isaac-Galileo-CRL-Student-v0 \
   --algo pcpo --num_envs 4096 --max_iterations 50000 --run_name student --headless \
   --logger wandb --log_project_name galileo_pcpo
+```
+示例： cpo
+```bash
+# Teacher
+LOG_RUN_NAME=cpo python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CRL-Teacher-v0 \
+  --algo cpo --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
+  --logger wandb --log_project_name galileo_cpo
+
+# Student
+LOG_RUN_NAME=cpo python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CRL-Student-v0 \
+  --algo cpo --num_envs 4096 --max_iterations 50000 --run_name student --headless \
+  --logger wandb --log_project_name galileo_cpo
+```
+示例： focops
+```bash
+# Teacher
+LOG_RUN_NAME=focops python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CRL-Teacher-v0 \
+  --algo focops --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
+  --logger wandb --log_project_name galileo_focops
+
+# Student
+LOG_RUN_NAME=focops python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CRL-Student-v0 \
+  --algo focops --num_envs 4096 --max_iterations 50000 --run_name student --headless \
+  --logger wandb --log_project_name galileo_focops
 ```
 示例：ppo
 ```bash
@@ -170,4 +207,17 @@ python scripts/rsl_rl/play.py \
 ```bash
 git fetch --all
 git reset --hard origin/master
+```
+
+## 开发与贡献
+- 代码风格说明：`docs/STYLE.md`
+- 目录设计说明：`docs/STRUCTURE.md`
+- 贡献流程：`CONTRIBUTING.md`
+
+推荐在提交前执行：
+
+```bash
+python -m unittest tests.test_runtime_utils -v
+python -m black scripts/rsl_rl/runtime.py scripts/rsl_rl/train.py scripts/rsl_rl/play.py \
+  scripts/rsl_rl/evaluation.py scripts/rsl_rl/demo.py list_envs.py tests/test_runtime_utils.py
 ```

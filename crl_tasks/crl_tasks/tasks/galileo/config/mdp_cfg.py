@@ -52,30 +52,7 @@ LEG_JOINT_CFG = SceneEntityCfg("robot", joint_names=LEG_JOINT_NAMES, preserve_or
 FOOT_BODY_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
 BASE_BODY_NAMES = ["base_link"]
 
-# Joint-position envelope aligned to the target diagonal gait.
-# The "core" windows encode the minimum practical gait motion, and then we
-# add a small extra margin (5 deg) to avoid over-constraining transitions.
-GAIT_JOINT_POS_WINDOW_MARGIN_RAD = 5.0 * (3.141592653589793 / 180.0)
-_GAIT_CORE_JOINT_POS_WINDOW_RAD = {
-    # Hip sign is mirrored between left and right legs.
-    "FL_hip_joint": (-0.20, 0.20),
-    "FR_hip_joint": (-0.20, 0.20),
-    "RL_hip_joint": (-0.20, 0.20),
-    "RR_hip_joint": (-0.20, 0.20),
-    # Thigh/calf keep the same flexion direction across all four legs.
-    "FL_thigh_joint": (0.30, 1.20),
-    "FR_thigh_joint": (0.30, 1.20),
-    "RL_thigh_joint": (0.30, 1.20),
-    "RR_thigh_joint": (0.30, 1.20),
-    "FL_calf_joint": (-2.00, -1.00),
-    "FR_calf_joint": (-2.00, -1.00),
-    "RL_calf_joint": (-2.00, -1.00),
-    "RR_calf_joint": (-2.00, -1.00),
-}
-GAIT_JOINT_POS_WINDOW_RAD = {
-    joint_name: (bounds[0] - GAIT_JOINT_POS_WINDOW_MARGIN_RAD, bounds[1] + GAIT_JOINT_POS_WINDOW_MARGIN_RAD)
-    for joint_name, bounds in _GAIT_CORE_JOINT_POS_WINDOW_RAD.items()
-}
+# Joint-position feasibility cost uses the articulation soft limits directly.
 
 
 @configclass
@@ -214,10 +191,8 @@ class TeacherCostsCfg:
     prob_joint_pos = CostTerm(
         func=mdp_constraints.joint_pos_prob_constraint,
         weight=1.0,
-        # Use a gait-aligned joint envelope (+5 deg margin) to support contact-phase consistency.
         params={
             "margin": 0.0,
-            "joint_pos_window": GAIT_JOINT_POS_WINDOW_RAD,
             "limit": 1.0,
             "asset_cfg": LEG_JOINT_CFG,
         },
@@ -253,27 +228,42 @@ class TeacherCostsCfg:
             "limit": 1.0,
         },
     )
-    prob_com_frame = CostTerm(
-        func=mdp_constraints.com_frame_prob_constraint,
+    prob_com_height = CostTerm(
+        func=mdp_constraints.com_height_prob_constraint,
         weight=0.45,
         params={
-            # Keep base height/orientation as hard-ish feasibility constraints at convergence.
+            # Keep COM height inside a narrow physically stable band at convergence.
             "height_range": (0.41, 0.44),
-            "max_angle_rad": 0.55,
             "cost_limit": 1.0,
-            # Start from a tolerant physical region (not ground-hugging), then tighten.
+            # Start from a tolerant but still locomotion-relevant height envelope.
             "height_range_start": (0.22, 0.56),
             "height_range_end": (0.41, 0.44),
-            "max_angle_rad_start": 0.85,
-            "max_angle_rad_end": 0.55,
             "schedule_start_step": GalileoDefaults.curriculum.command_warmup_steps,
             "schedule_end_step": (
                 GalileoDefaults.curriculum.command_warmup_steps
-                + 6 * GalileoDefaults.curriculum.command_min_progress_steps
+                + 10 * GalileoDefaults.curriculum.command_min_progress_steps
             ),
             # Flat-terrain training: use world-frame height to avoid height-map bias.
             "terrain_sensor_cfg": None,
             "height_offset": 0.0,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
+    prob_com_angle = CostTerm(
+        func=mdp_constraints.com_angle_prob_constraint,
+        weight=0.45,
+        params={
+            # Keep base tilt as a separate feasibility constraint for clearer diagnostics.
+            "max_angle_rad": 0.60,
+            "cost_limit": 1.0,
+            # Start permissive, then tighten to the final stance-quality target.
+            "max_angle_rad_start": 0.85,
+            "max_angle_rad_end": 0.60,
+            "schedule_start_step": GalileoDefaults.curriculum.command_warmup_steps,
+            "schedule_end_step": (
+                GalileoDefaults.curriculum.command_warmup_steps
+                + 10 * GalileoDefaults.curriculum.command_min_progress_steps
+            ),
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
@@ -305,11 +295,11 @@ class TeacherCostsCfg:
             "phase_offset_scale_start": 0.60,
             "phase_offset_scale_end": 1.0,
             "phase_tolerance_start": 0.18,
-            "phase_tolerance_end": 0.02,
+            "phase_tolerance_end": 0.04,
             "schedule_start_step": GalileoDefaults.curriculum.command_warmup_steps,
             "schedule_end_step": (
                 GalileoDefaults.curriculum.command_warmup_steps
-                + 6 * GalileoDefaults.curriculum.command_min_progress_steps
+                + 10 * GalileoDefaults.curriculum.command_min_progress_steps
             ),
         },
     )
@@ -402,7 +392,6 @@ class StudentCostsCfg:
         weight=1.0,
         params={
             "margin": 0.0,
-            "joint_pos_window": GAIT_JOINT_POS_WINDOW_RAD,
             "limit": 1.0,
             "asset_cfg": LEG_JOINT_CFG,
         },

@@ -1,0 +1,23 @@
+{
+  "extends": "galileo/base",
+  "meta": {
+    "description": "Example terrain-ablation preset with harder initial terrain sampling.",
+    "tags": [
+      "terrain",
+      "ablation"
+    ]
+  },
+  "env": {
+    "scene": {
+      "terrain": {
+        "terrain_generator": {
+          "difficulty_range": [
+            0.4,
+            1.0
+          ],
+          "curriculum": false
+        }
+      }
+    }
+  }
+}

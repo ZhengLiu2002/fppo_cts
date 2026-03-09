@@ -230,6 +230,11 @@ class GalileoDefaults:
 
     class env:
         num_envs = 4096
+        teacher_num_envs = 4096
+        student_num_envs = 1024
+        teacher_play_num_envs = 32
+        student_eval_num_envs = 128
+        student_play_num_envs = 16
 
     class obs:
         """Actor/Critic 观测维度与布局（训练配置从这里读取）。"""
@@ -539,7 +544,7 @@ class GalileoDefaults:
         - 若你希望“严格模式”，可以在应用时对未知字段做过滤/报错（后续可加）。
         """
 
-        # 与 CLI `--algo` 对齐：{"fppo","np3o","ppo","ppo_lagrange","cpo","pcpo","focpo","distillation"}
+        # 与 CLI `--algo` 对齐：{"fppo","np3o","ppo","ppo_lagrange","cpo","pcpo","focops","distillation"}
         name: str = "fppo"
 
         # CLI/代码中的 class_name 映射（最终写入 agent_cfg.algorithm.class_name）
@@ -550,7 +555,7 @@ class GalileoDefaults:
             "ppo_lagrange": "PPOLagrange",
             "cpo": "CPO",
             "pcpo": "PCPO",
-            "focpo": "FOCPO",
+            "focops": "FOCOPS",
             "distillation": "Distillation",
         }
 
@@ -577,14 +582,34 @@ class GalileoDefaults:
             k_max=1.0,
         )
 
+        shared_constraint_limits = dict(
+            base_contact_force=0.02,
+            contact_velocity=0.025,
+            foot_clearance=0.08,
+            foot_height_limit=0.04,
+            orthogonal_velocity=0.20,
+            prob_body_contact=0.03,
+            prob_com_angle=0.02,
+            prob_com_height=0.18,
+            prob_gait_pattern=0.05,
+            prob_joint_pos=0.15,
+            prob_joint_torque=0.04,
+            prob_joint_vel=0.08,
+            symmetric=0.10,
+        )
+        shared_constraint_limits_start = {
+            name: float(limit * 2.0) for name, limit in shared_constraint_limits.items()
+        }
+
         # 各算法差异化字段（只写需要的即可）
         per_algo = {
             # FPPO（更激进参数：更大步长、更松约束、更少回溯）
             "fppo": dict(
                 cost_value_loss_coef=1.0,
-                desired_kl=0.01,
+                num_learning_epochs=4,
+                desired_kl=0.006,
                 delta_kl=0.01,
-                step_size=6.0e-4,
+                step_size=4.0e-4,
                 cost_gamma=None,
                 cost_lam=None,
                 delta_safe=0.03,
@@ -592,12 +617,25 @@ class GalileoDefaults:
                 backtrack_coeff=0.5,
                 max_backtracks=10,
                 projection_eps=1e-6,
-                active_set_threshold=0.05,
-                confidence_level=0.05,
+                active_set_threshold=0.2,
                 softproj_max_iters=40,
                 softproj_tol=1e-6,
+                constraint_limits=dict(shared_constraint_limits),
+                constraint_limits_start=dict(shared_constraint_limits_start),
+                constraint_limits_final=dict(shared_constraint_limits),
+                adaptive_constraint_curriculum=True,
+                constraint_curriculum_names=[
+                    "prob_joint_pos",
+                    "prob_com_height",
+                    "prob_com_angle",
+                    "prob_gait_pattern",
+                ],
+                constraint_curriculum_ema_decay=0.95,
+                constraint_curriculum_check_interval=40,
+                constraint_curriculum_alpha=0.7,
+                constraint_curriculum_shrink=0.985,
                 normalize_cost_advantage=False,
-                constraint_normalization=True,
+                constraint_normalization=False,
                 constraint_norm_beta=0.9,
                 constraint_norm_min_scale=1e-3,
                 constraint_norm_max_scale=10.0,
@@ -609,19 +647,19 @@ class GalileoDefaults:
                 preconditioner_beta=0.999,
                 preconditioner_eps=1e-8,
                 feasible_first=True,
-                feasible_first_coef=0.5,
+                feasible_first_coef=0.75,
                 feasible_cost_margin=5e-4,
                 infeasible_improve_ratio=0.005,
                 infeasible_improve_abs=5e-4,
                 min_step_size=1e-7,
                 relax_cost_margin=0.2,
                 step_size_adaptive=True,
-                step_size_up=1.03,
-                step_size_down=0.7,
-                step_size_min=5.0e-5,
-                step_size_max=2.0e-3,
+                step_size_up=1.01,
+                step_size_down=0.85,
+                step_size_min=1.0e-4,
+                step_size_max=8.0e-4,
                 target_accept_rate=0.7,
-                step_size_cost_margin=0.2,
+                step_size_cost_margin=0.01,
                 cost_viol_loss_coef=0.05,
                 k_value=0.1,
                 k_growth=1.00005,
@@ -634,6 +672,7 @@ class GalileoDefaults:
             ),
             # NP3O
             "np3o": dict(
+                constraint_limits=dict(shared_constraint_limits),
                 cost_value_loss_coef=1.0,
                 learning_rate=2.5e-4,
                 schedule="adaptive",
@@ -652,20 +691,60 @@ class GalileoDefaults:
                 dagger_update_freq=20,
             ),
             # PPO（示例：如果你切到 PPO，只需要写 PPO 特有/你要覆写的字段）
-            "ppo": dict(),
+            "ppo": dict(
+                constraint_limits=dict(shared_constraint_limits),
+            ),
             # PPO-Lagrange：拉格朗日乘子惩罚约束
             "ppo_lagrange": dict(
+                constraint_limits=dict(shared_constraint_limits),
                 cost_value_loss_coef=1.0,
                 cost_gamma=None,
                 cost_lam=None,
                 normalize_cost_advantage=False,
+                lagrangian_multiplier_init=0.0,
                 lagrange_lr=1.0e-2,
+                lagrange_optimizer="Adam",
                 lagrange_max=100.0,
             ),
-            # 其他算法暂时留空：后续按需在这里补字段即可
-            "cpo": dict(),
-            "pcpo": dict(),
-            "focpo": dict(),
+            "cpo": dict(
+                constraint_limits=dict(shared_constraint_limits),
+                cost_value_loss_coef=1.0,
+                cost_gamma=None,
+                cost_lam=None,
+                normalize_cost_advantage=False,
+                desired_kl=0.01,
+                backtrack_coeff=0.8,
+                max_backtracks=20,
+                cg_iters=10,
+                cg_damping=1.0e-2,
+                fvp_sample_freq=1,
+            ),
+            "pcpo": dict(
+                constraint_limits=dict(shared_constraint_limits),
+                cost_value_loss_coef=1.0,
+                cost_gamma=None,
+                cost_lam=None,
+                normalize_cost_advantage=False,
+                desired_kl=0.01,
+                backtrack_coeff=0.8,
+                max_backtracks=20,
+                cg_iters=10,
+                cg_damping=1.0e-2,
+                fvp_sample_freq=1,
+            ),
+            "focops": dict(
+                constraint_limits=dict(shared_constraint_limits),
+                cost_value_loss_coef=1.0,
+                cost_gamma=None,
+                cost_lam=None,
+                normalize_cost_advantage=False,
+                lagrangian_multiplier_init=0.0,
+                lagrange_lr=1.0e-2,
+                lagrange_optimizer="Adam",
+                lagrange_max=100.0,
+                focops_eta=0.02,
+                focops_lambda=1.0,
+            ),
             "distillation": dict(),
         }
 

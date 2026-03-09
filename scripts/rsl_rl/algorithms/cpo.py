@@ -57,6 +57,7 @@ class CPO(PPO):
         cg_iters: int = 10,
         cg_damping: float = 1e-2,
         fvp_sample_freq: int = 1,
+        constraint_limits: list[float] | tuple[float, ...] | None = None,
         multi_gpu_cfg: dict | None = None,
     ):
         super().__init__(
@@ -84,6 +85,7 @@ class CPO(PPO):
             k_value=k_value,
             k_growth=k_growth,
             k_max=k_max,
+            constraint_limits=constraint_limits,
             multi_gpu_cfg=multi_gpu_cfg,
         )
         self.step_size = float(step_size)
@@ -216,6 +218,11 @@ class CPO(PPO):
             raise NotImplementedError("CPO/PCPO currently support feed-forward policies only.")
         return next(self.storage.mini_batch_generator(1, 1))
 
+    def _select_active_constraint_index(self, c_hat: torch.Tensor) -> int:
+        if c_hat.numel() == 0:
+            return 0
+        return int(torch.argmax(c_hat).item())
+
     def _prepare_actor_batch(self) -> dict[str, torch.Tensor]:
         (
             obs_batch,
@@ -244,9 +251,15 @@ class CPO(PPO):
             cost_term_advantages_batch=cost_term_advantages_batch,
             cost_term_values_batch=extra_batch[3] if len(extra_batch) > 3 else None,
         )
-        aggregate_cost_returns = torch.sum(cost_terms_ret, dim=1)
-        aggregate_cost_advantages = torch.sum(cost_terms_adv, dim=1)
-        batch_cost_return, batch_cost_violation, c_hat = self._batch_cost_stats(aggregate_cost_returns)
+        constraint_stats = self._constraint_batch_stats(cost_terms_ret)
+        active_idx = self._select_active_constraint_index(constraint_stats["c_hat"])
+        active_cost_adv = self._sanitize_tensor(
+            cost_terms_adv[:, active_idx],
+            nan=0.0,
+            posinf=1.0e3,
+            neginf=-1.0e3,
+            clamp=1.0e3,
+        )
 
         reward_advantages = self._sanitize_tensor(
             torch.squeeze(advantages_batch),
@@ -275,11 +288,17 @@ class CPO(PPO):
             "actions": actions_batch,
             "old_logp": old_actions_log_prob_batch,
             "reward_adv": reward_advantages,
-            "cost_adv": aggregate_cost_advantages,
+            "cost_adv": active_cost_adv,
+            "cost_adv_all": cost_terms_adv,
             "old_dist": torch.distributions.Normal(old_mu_batch, old_sigma_batch),
-            "cost_return": batch_cost_return,
-            "cost_violation": batch_cost_violation,
-            "c_hat": c_hat,
+            "cost_return": constraint_stats["aggregate_cost_return"],
+            "cost_violation": constraint_stats["batch_cost_violation"],
+            "cost_limit_margin": constraint_stats["min_cost_margin"],
+            "current_max_violation": constraint_stats["max_c_hat"],
+            "c_hat": constraint_stats["c_hat"][active_idx],
+            "active_constraint_index": torch.tensor(active_idx, device=self.device),
+            "active_cost_return": constraint_stats["j_cost"][active_idx],
+            "active_cost_limit": constraint_stats["d_limits"][active_idx],
         }
 
     def _cpo_search_step(
@@ -539,8 +558,12 @@ class CPO(PPO):
             "cost_surrogate": float(cost_loss.item()),
             "entropy": float(entropy),
             "mean_cost_return": float(actor_batch["cost_return"].item()),
-            "cost_limit_margin": float(self.cost_limit - actor_batch["cost_return"].item()),
+            "cost_limit_margin": float(actor_batch["cost_limit_margin"].item()),
             "cost_violation_rate": float(actor_batch["cost_violation"].item()),
+            "current_max_violation": float(actor_batch["current_max_violation"].item()),
+            "active_constraint_index": float(actor_batch["active_constraint_index"].item()),
+            "active_cost_return": float(actor_batch["active_cost_return"].item()),
+            "active_cost_limit": float(actor_batch["active_cost_limit"].item()),
             "kl": final_kl,
             "acceptance_step": float(acceptance_step),
             "alpha": float(alpha.item()),

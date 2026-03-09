@@ -13,7 +13,13 @@ All the environments are registered in the `crl_tasks` extension. They start
 with `Isaac` in their name.
 """
 
-"""Launch Isaac Sim Simulator first."""
+# Launch Isaac Sim Simulator first.
+
+from pathlib import Path
+
+from scripts.rsl_rl.runtime import bootstrap_repo_paths
+
+bootstrap_repo_paths(__file__, repo_root=Path(__file__).resolve().parent)
 
 from isaaclab.app import AppLauncher
 
@@ -22,18 +28,10 @@ app_launcher = AppLauncher(headless=True)
 simulation_app = app_launcher.app
 
 
-"""Rest everything follows."""
-
-import sys
-from pathlib import Path
+# Rest everything follows.
 
 import gymnasium as gym
 from prettytable import PrettyTable
-
-_REPO_ROOT = Path(__file__).resolve().parent
-_TASKS_ROOT = _REPO_ROOT / "crl_tasks"
-if _TASKS_ROOT.is_dir() and str(_TASKS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TASKS_ROOT))
 
 import crl_tasks  # noqa: F401
 
@@ -72,8 +70,6 @@ if __name__ == "__main__":
     try:
         # run the main function
         main()
-    except Exception as e:
-        raise e
     finally:
         # close the app
         simulation_app.close()

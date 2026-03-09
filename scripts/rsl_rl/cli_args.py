@@ -71,6 +71,24 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
     arg_group.add_argument(
         "--run_name", type=str, default=None, help="Run name suffix to the log directory."
     )
+    arg_group.add_argument(
+        "--exp",
+        type=str,
+        default=None,
+        help="Experiment preset name under `experiments/`, e.g. `galileo/fppo_smoke`.",
+    )
+    arg_group.add_argument(
+        "--exp-file",
+        type=str,
+        default=None,
+        help="Explicit experiment preset file path (`.json` or `.toml`).",
+    )
+    arg_group.add_argument(
+        "--list-exp",
+        action="store_true",
+        default=False,
+        help="List available experiment presets and exit.",
+    )
     # -- load arguments
     arg_group.add_argument(
         "--resume", action="store_true", default=False, help="Whether to resume from a checkpoint."
@@ -122,22 +140,50 @@ def parse_rsl_rl_cfg(task_name: str, args_cli: argparse.Namespace) -> RslRlOnPol
     return rslrl_cfg
 
 
-def update_rsl_rl_cfg(agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Namespace):
-    """Update configuration for RSL-RL agent based on inputs.
+def apply_rsl_rl_algo_override(
+    agent_cfg: RslRlOnPolicyRunnerCfg,
+    args_cli: argparse.Namespace,
+    *,
+    apply_profile: bool = True,
+) -> RslRlOnPolicyRunnerCfg:
+    """Apply algorithm-selection CLI overrides.
 
     Args:
         agent_cfg: The configuration for RSL-RL agent.
         args_cli: The command line arguments.
+        apply_profile: Whether to also apply task-level default hyper-parameters
+            for the selected algorithm.
 
     Returns:
-        The updated configuration for RSL-RL agent based on inputs.
+        The updated agent configuration.
     """
+
+    if hasattr(args_cli, "algo") and args_cli.algo is not None:
+        algo_name = args_cli.algo.strip().lower()
+        agent_cfg.algorithm.class_name = get_algorithm_class_name(algo_name)
+        if apply_profile:
+            _apply_algo_profile_if_available(agent_cfg, algo_name)
+
+    return agent_cfg
+
+
+def apply_rsl_rl_general_overrides(
+    agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Namespace
+) -> RslRlOnPolicyRunnerCfg:
+    """Apply non-algorithm CLI overrides.
+
+    These values should remain the strongest user-facing overrides and can be
+    re-applied after experiment presets are merged.
+    """
+
     # override the default configuration with CLI arguments
     if hasattr(args_cli, "seed") and args_cli.seed is not None:
         # randomly sample a seed if seed = -1
         if args_cli.seed == -1:
             args_cli.seed = random.randint(0, 10000)
         agent_cfg.seed = args_cli.seed
+    if args_cli.experiment_name is not None:
+        agent_cfg.experiment_name = args_cli.experiment_name
     if args_cli.resume is not None:
         agent_cfg.resume = args_cli.resume
     if args_cli.load_run is not None:
@@ -153,9 +199,34 @@ def update_rsl_rl_cfg(agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Name
         agent_cfg.wandb_project = args_cli.log_project_name
         agent_cfg.neptune_project = args_cli.log_project_name
 
-    if hasattr(args_cli, "algo") and args_cli.algo is not None:
-        algo_name = args_cli.algo.strip().lower()
-        agent_cfg.algorithm.class_name = get_algorithm_class_name(algo_name)
-        _apply_algo_profile_if_available(agent_cfg, algo_name)
+    return agent_cfg
 
+
+def reapply_rsl_rl_cli_overrides(
+    agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Namespace
+) -> RslRlOnPolicyRunnerCfg:
+    """Re-apply strong CLI overrides after an experiment preset is merged.
+
+    The algorithm class remains user-controlled, while preset-level hyper-
+    parameter tweaks are preserved.
+    """
+
+    agent_cfg = apply_rsl_rl_algo_override(agent_cfg, args_cli, apply_profile=False)
+    agent_cfg = apply_rsl_rl_general_overrides(agent_cfg, args_cli)
+    return agent_cfg
+
+
+def update_rsl_rl_cfg(agent_cfg: RslRlOnPolicyRunnerCfg, args_cli: argparse.Namespace):
+    """Update configuration for RSL-RL agent based on inputs.
+
+    Args:
+        agent_cfg: The configuration for RSL-RL agent.
+        args_cli: The command line arguments.
+
+    Returns:
+        The updated configuration for RSL-RL agent based on inputs.
+    """
+
+    agent_cfg = apply_rsl_rl_algo_override(agent_cfg, args_cli, apply_profile=True)
+    agent_cfg = apply_rsl_rl_general_overrides(agent_cfg, args_cli)
     return agent_cfg

@@ -3,23 +3,38 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Script to play a checkpoint if an RL agent from RSL-RL."""
-
-"""Launch Isaac Sim Simulator first."""
+"""Script to play a checkpoint with an RSL-RL agent."""
 
 import argparse
-import sys
 import os
 import warnings
-from pathlib import Path
 
-# Ensure repository root is on sys.path for `scripts.*` imports.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-_TASKS_ROOT = _REPO_ROOT / "crl_tasks"
-if _TASKS_ROOT.is_dir() and str(_TASKS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TASKS_ROOT))
+try:
+    from scripts.rsl_rl.experiment_manager import (
+        apply_experiment_preset,
+        available_experiment_presets,
+        load_experiment_preset,
+    )
+    from scripts.rsl_rl.runtime import (
+        bootstrap_repo_paths,
+        build_log_root_path,
+        configure_safe_play_args,
+        resolve_checkpoint_path,
+    )
+except ImportError:
+    from experiment_manager import (  # type: ignore
+        apply_experiment_preset,
+        available_experiment_presets,
+        load_experiment_preset,
+    )
+    from runtime import (  # type: ignore
+        bootstrap_repo_paths,
+        build_log_root_path,
+        configure_safe_play_args,
+        resolve_checkpoint_path,
+    )
+
+bootstrap_repo_paths(__file__)
 
 from isaaclab.app import AppLauncher
 
@@ -29,13 +44,12 @@ warnings.filterwarnings(
     category=UserWarning,
 )
 
-# local imports
-import cli_args  # isort: skip
+from scripts.rsl_rl import cli_args
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
+parser = argparse.ArgumentParser(description="Play an RSL-RL policy.")
 parser.add_argument(
-    "--video", action="store_true", default=False, help="Record videos during training."
+    "--video", action="store_true", default=False, help="Record videos during playback."
 )
 parser.add_argument(
     "--video_length", type=int, default=500, help="Length of the recorded video (in steps)."
@@ -67,48 +81,23 @@ cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+if args_cli.list_exp:
+    available_presets = available_experiment_presets()
+    if available_presets:
+        print("Available experiment presets:")
+        for entry in available_presets:
+            description = f" - {entry['description']}" if entry["description"] else ""
+            print(f"  {entry['name']}{description}")
+    else:
+        print("[INFO] No experiment presets found under `experiments/`.")
+    raise SystemExit(0)
+
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
 
-
-def _display_available() -> bool:
-    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-
-
-def _livestream_enabled() -> bool:
-    livestream_arg = getattr(args_cli, "livestream", -1)
-    if livestream_arg is not None and livestream_arg >= 0:
-        return livestream_arg > 0
-    return int(os.environ.get("LIVESTREAM", 0)) > 0
-
-
-if args_cli.force_gui:
-    # Explicitly force GUI mode, even if env vars are missing/misdetected.
-    args_cli.headless = False
-    os.environ["HEADLESS"] = "0"
-else:
-    # Guard against launching GUI experiences on machines without a display server.
-    # In this case, some UI extensions (e.g. omni.physx.ui) can crash at startup
-    # while trying to bind keyboard/window hooks.
-    if not _display_available() and not _livestream_enabled():
-        if not args_cli.headless:
-            print(
-                "[WARN] No DISPLAY/WAYLAND display server detected. "
-                "Forcing headless mode for stable play startup."
-            )
-            args_cli.headless = True
-        disable_exts = [
-            "omni.physx.ui",
-            "omni.kit.window.drop_support",
-            "omni.kit.menu.utils",
-        ]
-        existing_kit_args = getattr(args_cli, "kit_args", "") or ""
-        for ext_name in disable_exts:
-            token = f"--disable {ext_name}"
-            if token not in existing_kit_args:
-                existing_kit_args = f"{existing_kit_args} {token}".strip()
-        args_cli.kit_args = existing_kit_args
+configure_safe_play_args(args_cli)
 
 print(
     "[INFO] Play launch selection: "
@@ -123,26 +112,22 @@ print(
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-"""Rest everything follows."""
-
-import gymnasium as gym
 import time
-import torch
+import gymnasium as gym
 import numpy as np
+import torch
 
 from scripts.rsl_rl.modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
-from isaaclab.utils.assets import retrieve_file_path
 from isaaclab.utils.dict import print_dict
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
 from crl_tasks.tasks.galileo.config.agents.rsl_rl_cfg import CRLRslRlOnPolicyRunnerCfg
 
 from scripts.rsl_rl.exporter import export_inference_cfg, export_policy_as_onnx_dual_input
 from scripts.rsl_rl.vecenv_wrapper import CRLRslRlVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
-from isaaclab_tasks.utils import get_checkpoint_path, parse_env_cfg
+from isaaclab_tasks.utils import parse_env_cfg
 
 
 def _print_terrain_summary(base_env):
@@ -174,7 +159,7 @@ def _print_terrain_summary(base_env):
 
 
 def main():
-    """Play with RSL-RL agent."""
+    """Play a trained RSL-RL agent."""
     # parse configuration
     env_cfg = parse_env_cfg(
         args_cli.task,
@@ -183,24 +168,33 @@ def main():
         use_fabric=not args_cli.disable_fabric,
     )
     agent_cfg: CRLRslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
+    experiment_preset = load_experiment_preset(selection=args_cli.exp, file_path=args_cli.exp_file)
+    if experiment_preset is not None:
+        apply_experiment_preset(env_cfg=env_cfg, agent_cfg=agent_cfg, preset=experiment_preset)
+        agent_cfg = cli_args.reapply_rsl_rl_cli_overrides(agent_cfg, args_cli)
+        env_cfg.scene.num_envs = args_cli.num_envs
+        if args_cli.device is not None:
+            env_cfg.sim.device = args_cli.device
+        print(
+            f"[INFO] Applied experiment preset: {experiment_preset.name} ({experiment_preset.path})"
+        )
 
     # specify directory for logging experiments
-    log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-    log_root_path = os.path.abspath(log_root_path)
+    log_root_path = build_log_root_path(agent_cfg.experiment_name)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
-    if args_cli.use_pretrained_checkpoint:
-        resume_path = get_published_pretrained_checkpoint("rsl_rl", args_cli.task)
-        if not resume_path:
-            print(
-                "[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task."
-            )
-            return
-    elif args_cli.checkpoint:
-        resume_path = retrieve_file_path(args_cli.checkpoint)
-    else:
-        resume_path = get_checkpoint_path(
-            log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint
+    resume_path = resolve_checkpoint_path(
+        task_name=args_cli.task,
+        log_root_path=log_root_path,
+        load_run=agent_cfg.load_run,
+        load_checkpoint=agent_cfg.load_checkpoint,
+        checkpoint=args_cli.checkpoint,
+        use_pretrained_checkpoint=args_cli.use_pretrained_checkpoint,
+    )
+    if not resume_path:
+        print(
+            "[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task."
         )
+        return
 
     log_dir = os.path.dirname(resume_path)
 
@@ -213,7 +207,9 @@ def main():
             prop = getattr(type(base_env), "max_episode_length", None)
             can_set = not isinstance(prop, property) or prop.fset is not None
             if can_set:
-                new_len = int(base_env.max_episode_length * 100)  # effectively disable time-out for play
+                new_len = int(
+                    base_env.max_episode_length * 100
+                )  # effectively disable time-out for play
                 base_env.max_episode_length = new_len
                 if hasattr(base_env, "cfg") and hasattr(base_env.cfg, "episode_length_s"):
                     base_env.cfg.episode_length_s = base_env.cfg.episode_length_s * 100.0
@@ -238,7 +234,7 @@ def main():
             "video_length": args_cli.video_length,
             "disable_logger": True,
         }
-        print("[INFO] Recording videos during training.")
+        print("[INFO] Recording videos during playback.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
 

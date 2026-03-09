@@ -24,9 +24,18 @@ This guide standardizes code style across task configs and scripts.
 ## Formatting
 
 - Use `black` with the repo `pyproject.toml` settings.
+- Use shared helpers in `scripts/rsl_rl/runtime.py` for script bootstrap, log paths, and checkpoint resolution.
 - Format everything with:
 ```bash
 python -m black .
+```
+
+## Validation
+
+- Prefer adding small unit tests for utility helpers before touching simulator-heavy flows.
+- For lightweight checks introduced in this repo, run:
+```bash
+python -m unittest tests.test_runtime_utils -v
 ```
 
 ## Compatibility

@@ -1,3 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crl-isaaclab"
+version = "0.1.0"
+description = "Constrained reinforcement learning extensions and Galileo tasks for Isaac Lab."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "IsaacLab CRL Contributors" }]
+keywords = ["isaac-lab", "reinforcement-learning", "robotics", "quadruped", "constraints"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Robotics",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "black>=24.0",
+    "isort>=5.13",
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["crl_isaaclab*"]
+exclude = ["tests*", "docs*", "scripts*"]
+
 [tool.black]
 line-length = 100
 target-version = ["py310"]
@@ -8,3 +47,6 @@ line_length = 100
 
 [tool.ruff]
 line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

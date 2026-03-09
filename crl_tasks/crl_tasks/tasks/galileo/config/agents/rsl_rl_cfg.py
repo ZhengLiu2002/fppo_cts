@@ -74,6 +74,8 @@ class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     cost_gamma: float | None = None
     cost_lam: float | None = None
     cost_limit: float = 0.0
+    lagrangian_multiplier_init: float = 0.0
+    lagrange_optimizer: str = "Adam"
     delta_safe: float | None = 0.01
     backtrack_coeff: float = 0.5
     max_backtracks: int = 10
@@ -81,10 +83,17 @@ class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     epsilon_safe: float = 0.0
     delta_kl: float | None = None
     active_set_threshold: float = 0.05
-    confidence_level: float = 0.05
     softproj_max_iters: int = 40
     softproj_tol: float = 1e-6
-    constraint_limits: list[float] | None = None
+    constraint_limits: dict[str, float] | list[float] | None = None
+    constraint_limits_start: dict[str, float] | list[float] | None = None
+    constraint_limits_final: dict[str, float] | list[float] | None = None
+    adaptive_constraint_curriculum: bool = False
+    constraint_curriculum_names: list[str] | None = None
+    constraint_curriculum_ema_decay: float = 0.95
+    constraint_curriculum_check_interval: int = 20
+    constraint_curriculum_alpha: float = 0.8
+    constraint_curriculum_shrink: float = 0.97
     use_clipped_surrogate: bool = True
     normalize_cost_advantage: bool = False
     constraint_normalization: bool = True
@@ -116,6 +125,11 @@ class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     k_decay: float = 1.0
     k_min: float = 0.0
     k_violation_threshold: float = 0.02
+    focops_eta: float | None = None
+    focops_lambda: float | None = None
+    cg_iters: int = 10
+    cg_damping: float = 1e-2
+    fvp_sample_freq: int = 1
     # NP3O-style positive-part cost shaping (shared across constrained algorithms)
     cost_viol_loss_coef: float = 0.0
     k_value: float = 1.0

@@ -1,4 +1,5 @@
-"""
+"""Interactive Galileo demo with gamepad support.
+
 Code reference:
 1. https://docs.omniverse.nvidia.com/kit/docs/carbonite/167.3/api/enum_namespacecarb_1_1input_1a41f626f5bfc1020c9bd87f5726afdec1.html#namespacecarb_1_1input_1a41f626f5bfc1020c9bd87f5726afdec1
 2. https://docs.omniverse.nvidia.com/kit/docs/carbonite/167.3/api/enum_namespacecarb_1_1input_1af1c4ed7e318b3719809f13e2a48e2f2d.html#namespacecarb_1_1input_1af1c4ed7e318b3719809f13e2a48e2f2d
@@ -7,25 +8,40 @@ Code reference:
 
 import argparse
 import os
-import sys
 import weakref
-from pathlib import Path
 
-# Ensure repository root is on sys.path for `scripts.*` imports.
-_REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
-_TASKS_ROOT = _REPO_ROOT / "crl_tasks"
-if _TASKS_ROOT.is_dir() and str(_TASKS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_TASKS_ROOT))
+try:
+    from scripts.rsl_rl.experiment_manager import (
+        apply_experiment_preset,
+        available_experiment_presets,
+        load_experiment_preset,
+    )
+    from scripts.rsl_rl.runtime import (
+        bootstrap_repo_paths,
+        build_log_root_path,
+        resolve_checkpoint_path,
+    )
+except ImportError:
+    from experiment_manager import (  # type: ignore
+        apply_experiment_preset,
+        available_experiment_presets,
+        load_experiment_preset,
+    )
+    from runtime import (  # type: ignore
+        bootstrap_repo_paths,
+        build_log_root_path,
+        resolve_checkpoint_path,
+    )
 
-import cli_args  # isort: skip
+bootstrap_repo_paths(__file__)
+
 from isaaclab.app import AppLauncher
+from scripts.rsl_rl import cli_args
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
+parser = argparse.ArgumentParser(description="Run an interactive Galileo demo.")
 parser.add_argument(
-    "--video", action="store_true", default=False, help="Record videos during training."
+    "--video", action="store_true", default=False, help="Record videos during the demo."
 )
 parser.add_argument(
     "--video_length", type=int, default=500, help="Length of the recorded video (in steps)."
@@ -54,11 +70,21 @@ AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli = parser.parse_args()
 
+if args_cli.list_exp:
+    available_presets = available_experiment_presets()
+    if available_presets:
+        print("Available experiment presets:")
+        for entry in available_presets:
+            description = f" - {entry['description']}" if entry["description"] else ""
+            print(f"  {entry['name']}{description}")
+    else:
+        print("[INFO] No experiment presets found under `experiments/`.")
+    raise SystemExit(0)
+
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-"""Rest everything follows."""
 import torch
 
 import carb
@@ -70,46 +96,53 @@ from scripts.rsl_rl.modules.on_policy_runner_with_extractor import OnPolicyRunne
 
 from crl_isaaclab.envs import CRLManagerBasedRLEnv
 from isaaclab.utils.math import quat_apply
-from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
-from isaaclab.utils.assets import retrieve_file_path
-from isaaclab_tasks.utils import get_checkpoint_path
 from scripts.rsl_rl.vecenv_wrapper import CRLRslRlVecEnvWrapper
 from crl_tasks.tasks.galileo.config.agents.rsl_rl_cfg import CRLRslRlOnPolicyRunnerCfg
 from crl_tasks.tasks.galileo.config.teacher_env_cfg import GalileoTeacherCRLEnvCfg_PLAY
 from crl_tasks.tasks.galileo.config.student_env_cfg import GalileoStudentCRLEnvCfg_PLAY
 
 
-class CRLDemoGalileo:
+class GalileoDemoController:
+    """Interactive controller for Galileo teacher/student play configs."""
+
     def __init__(self):
         agent_cfg: CRLRslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
-        log_root_path = os.path.join("logs", "rsl_rl", agent_cfg.experiment_name)
-        log_root_path = os.path.abspath(log_root_path)
+        experiment_preset = load_experiment_preset(selection=args_cli.exp, file_path=args_cli.exp_file)
 
-        if args_cli.use_pretrained_checkpoint:
-            checkpoint = get_published_pretrained_checkpoint("rsl_rl", args_cli.task)
-            if not checkpoint:
-                print(
-                    "[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task."
-                )
-                return
-        elif args_cli.checkpoint:
-            checkpoint = retrieve_file_path(args_cli.checkpoint)
-        else:
-            checkpoint = get_checkpoint_path(
-                log_root_path, agent_cfg.load_run, agent_cfg.load_checkpoint
-            )
-
-        self.agent_cfg = agent_cfg
-        # create envionrment
         env_cfg = (
             GalileoTeacherCRLEnvCfg_PLAY()
             if "Teacher" in args_cli.task
             else GalileoStudentCRLEnvCfg_PLAY()
         )
+        if experiment_preset is not None:
+            apply_experiment_preset(env_cfg=env_cfg, agent_cfg=agent_cfg, preset=experiment_preset)
+            agent_cfg = cli_args.reapply_rsl_rl_cli_overrides(agent_cfg, args_cli)
+            print(
+                f"[INFO] Applied experiment preset: {experiment_preset.name} ({experiment_preset.path})"
+            )
+
+        log_root_path = build_log_root_path(agent_cfg.experiment_name)
+
+        checkpoint = resolve_checkpoint_path(
+            task_name=args_cli.task,
+            log_root_path=log_root_path,
+            load_run=agent_cfg.load_run,
+            load_checkpoint=agent_cfg.load_checkpoint,
+            checkpoint=args_cli.checkpoint,
+            use_pretrained_checkpoint=args_cli.use_pretrained_checkpoint,
+        )
+        if not checkpoint:
+            raise RuntimeError(
+                "A pretrained checkpoint is unavailable for this task and no explicit checkpoint was provided."
+            )
+
         env_cfg.scene.num_envs = args_cli.num_envs
         env_cfg.episode_length_s = 1000000
         env_cfg.curriculum = None
+        if args_cli.device is not None:
+            env_cfg.sim.device = args_cli.device
         self.env_cfg = env_cfg
+        self.agent_cfg = agent_cfg
         # wrap around environment for rsl-rl
         self.env = CRLRslRlVecEnvWrapper(CRLManagerBasedRLEnv(cfg=env_cfg))
         self.device = self.env.unwrapped.device
@@ -161,7 +194,7 @@ class CRLDemoGalileo:
         self.dead_zone = 0.01
         self.v_x_sensitivity = 0.8
         self.v_y_sensitivity = 0.8
-        self._INPUT_STICK_VALUE_MAPPING = {
+        self._input_stick_value_map = {
             # forward command
             carb.input.GamepadInput.LEFT_STICK_UP: self.env_cfg.commands.base_velocity.ranges.lin_vel_x[
                 1
@@ -186,9 +219,9 @@ class CRLDemoGalileo:
             cur_val = event.value
             if abs(cur_val) < self.dead_zone:
                 cur_val = 0
-            if event.input in self._INPUT_STICK_VALUE_MAPPING:
-                if self._selected_id:
-                    value = self._INPUT_STICK_VALUE_MAPPING[event.input.name]
+            if event.input in self._input_stick_value_map:
+                if self._selected_id is not None:
+                    value = self._input_stick_value_map[event.input]
                     self.commands[self._selected_id] = value * cur_val
             # Escape key exits out of the current selected robot view
             elif event.input == "LEFT_SHOULDER":
@@ -202,7 +235,7 @@ class CRLDemoGalileo:
                         self.viewport.set_active_camera(self.camera_path)
         # On key release, the robot stops moving
         elif event.type == carb.input.GamepadConnectionEventType.DISCONNECTED:
-            if self._selected_id:
+            if self._selected_id is not None:
                 self.commands[self._selected_id] = torch.zeros(1, 3).to(self.device)
 
     def update_selected_object(self):
@@ -214,10 +247,10 @@ class CRLDemoGalileo:
         elif len(selected_prim_paths) > 1:
             print("Multiple prims are selected. Please only select one!")
         else:
-            prim_splitted_path = selected_prim_paths[0].split("/")
+            prim_path_parts = selected_prim_paths[0].split("/")
             # a valid robot was selected, update the camera to go into third-person view
-            if len(prim_splitted_path) >= 4 and prim_splitted_path[3][0:4] == "env_":
-                self._selected_id = int(prim_splitted_path[3][4:])
+            if len(prim_path_parts) >= 4 and prim_path_parts[3][0:4] == "env_":
+                self._selected_id = int(prim_path_parts[3][4:])
                 if self._previous_selected_id != self._selected_id:
                     self.viewport.set_active_camera(self.camera_path)
                 self._update_camera()
@@ -250,9 +283,12 @@ class CRLDemoGalileo:
         camera_state.set_target_world(target, True)
 
 
+CRLDemoGalileo = GalileoDemoController
+
+
 def main():
     """Main function."""
-    demo_galileo = CRLDemoGalileo()
+    demo_galileo = GalileoDemoController()
     obs, extras = demo_galileo.env.reset()
     while simulation_app.is_running():
         # check for selected robots

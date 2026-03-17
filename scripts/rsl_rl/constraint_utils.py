@@ -37,13 +37,13 @@ class ConstraintNormalizer:
     @classmethod
     def from_cfg(cls, cfg: dict, device: str | torch.device) -> "ConstraintNormalizer":
         return cls(
-            enabled=cfg.get("constraint_normalization", True),
-            ema_beta=cfg.get("constraint_norm_beta", 0.99),
-            min_scale=cfg.get("constraint_norm_min_scale", 1e-3),
-            max_scale=cfg.get("constraint_norm_max_scale", 10.0),
-            clip=cfg.get("constraint_norm_clip", 5.0),
-            huber_delta=cfg.get("constraint_proxy_delta", 0.1),
-            agg_tau=cfg.get("constraint_agg_tau", 0.5),
+            enabled=cfg.get("enabled", cfg.get("constraint_normalization", True)),
+            ema_beta=cfg.get("ema_beta", cfg.get("constraint_norm_beta", 0.99)),
+            min_scale=cfg.get("min_scale", cfg.get("constraint_norm_min_scale", 1e-3)),
+            max_scale=cfg.get("max_scale", cfg.get("constraint_norm_max_scale", 10.0)),
+            clip=cfg.get("clip", cfg.get("constraint_norm_clip", 5.0)),
+            huber_delta=cfg.get("huber_delta", cfg.get("constraint_proxy_delta", 0.1)),
+            agg_tau=cfg.get("agg_tau", cfg.get("constraint_agg_tau", 0.5)),
             device=device,
         )
 

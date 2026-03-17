@@ -3,14 +3,12 @@ from __future__ import annotations
 import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
-import numpy as np
 
 import omni.log
 
-import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
 from isaaclab.managers import CommandTerm
-from isaaclab.markers import VisualizationMarkers
+from crl_isaaclab.terrains.runtime import resolve_env_terrain_names
 
 if TYPE_CHECKING:
     from crl_isaaclab.envs import CRLManagerBasedEnv
@@ -24,10 +22,7 @@ class UniformCRLCommand(CommandTerm):
         super().__init__(cfg, env)
         self.robot: Articulation = env.scene[cfg.asset_name]
         self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
-        self.heading_target = torch.zeros(self.num_envs, device=self.device)
-        self.is_heading_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.is_yaw_env = torch.zeros_like(self.is_heading_env)
-        self.is_standing_env = torch.zeros_like(self.is_heading_env)
+        self.is_standing_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
 
@@ -90,24 +85,14 @@ class UniformCRLCommand(CommandTerm):
                 pass
 
         # 如果无法从 crl_event 获取，尝试直接从 terrain 获取
-        if hasattr(terrain, "terrain_generator_class"):
-            terrain_gen = terrain.terrain_generator_class
-            if (
-                hasattr(terrain_gen, "terrain_names")
-                and hasattr(terrain, "terrain_levels")
-                and hasattr(terrain, "terrain_types")
-            ):
-                try:
-                    first_env_id = (
-                        env_ids[0] if isinstance(env_ids, (list, tuple)) else env_ids[0].item()
-                    )
-                    level = terrain.terrain_levels[first_env_id].item()
-                    terrain_type = terrain.terrain_types[first_env_id].item()
-                    terrain_names = terrain_gen.terrain_names
-                    if level < terrain_names.shape[0] and terrain_type < terrain_names.shape[1]:
-                        return str(terrain_names[level, terrain_type])
-                except Exception:
-                    pass
+        try:
+            env_names = resolve_env_terrain_names(terrain)
+            if env_names is not None and len(env_ids) > 0:
+                first_env_id = env_ids[0] if isinstance(env_ids, (list, tuple)) else env_ids[0].item()
+                if first_env_id < len(env_names):
+                    return str(env_names[first_env_id])
+        except Exception:
+            pass
 
         return None
 
@@ -142,8 +127,7 @@ class UniformCRLCommand(CommandTerm):
         # 获取地形名称并选择对应的指令配置
         terrain_name = self._get_terrain_name(env_ids)
         terrain_ranges = self._get_terrain_specific_ranges(terrain_name)
-        # If command-threshold curriculum is active, those terms update cfg.ranges.lin_vel_x/ang_vel_z.
-        # Keep these as the single source instead of overriding with terrain-specific static ranges.
+        # Terrain-specific curriculum endpoints define the x/yaw command ranges.
         use_lin_x_cfg_range = (
             self.cfg.ranges.start_curriculum_lin_x is not None
             and self.cfg.ranges.max_curriculum_lin_x is not None
@@ -162,13 +146,6 @@ class UniformCRLCommand(CommandTerm):
             lin_vel_y_base = terrain_ranges["lin_vel_y"]
             ang_vel_z_base = (
                 self.cfg.ranges.ang_vel_z if use_ang_z_cfg_range else terrain_ranges["ang_vel_z"]
-            )
-            heading_base = terrain_ranges.get("heading", self.cfg.ranges.heading)
-            heading_command_prob = terrain_ranges.get(
-                "heading_command_prob", self.cfg.ranges.heading_command_prob
-            )
-            yaw_command_prob = terrain_ranges.get(
-                "yaw_command_prob", self.cfg.ranges.yaw_command_prob
             )
             standing_command_prob = terrain_ranges.get(
                 "standing_command_prob", self.cfg.ranges.standing_command_prob
@@ -190,9 +167,6 @@ class UniformCRLCommand(CommandTerm):
             lin_vel_x_base = self.cfg.ranges.lin_vel_x
             lin_vel_y_base = self.cfg.ranges.lin_vel_y
             ang_vel_z_base = self.cfg.ranges.ang_vel_z
-            heading_base = self.cfg.ranges.heading
-            heading_command_prob = self.cfg.ranges.heading_command_prob
-            yaw_command_prob = self.cfg.ranges.yaw_command_prob
             standing_command_prob = self.cfg.ranges.standing_command_prob
             start_curriculum_lin_x = self.cfg.ranges.start_curriculum_lin_x
             start_curriculum_ang_z = self.cfg.ranges.start_curriculum_ang_z
@@ -203,6 +177,36 @@ class UniformCRLCommand(CommandTerm):
         r = torch.empty(len(env_ids), device=self.device)
         lin_x_range = lin_vel_x_base
         ang_z_range = ang_vel_z_base
+        lin_x_level = float(getattr(self.cfg, "lin_x_level", 0.0))
+        max_lin_x_level = max(float(getattr(self.cfg, "max_lin_x_level", 1.0)), 1.0e-6)
+        ang_z_level = float(getattr(self.cfg, "ang_z_level", 0.0))
+        max_ang_z_level = max(float(getattr(self.cfg, "max_ang_z_level", 1.0)), 1.0e-6)
+
+        def _interp_range(
+            start_range: tuple[float, float], end_range: tuple[float, float], level: float, max_level: float
+        ) -> tuple[float, float]:
+            progress = min(max(level / max_level, 0.0), 1.0)
+            return (
+                float(start_range[0] + (end_range[0] - start_range[0]) * progress),
+                float(start_range[1] + (end_range[1] - start_range[1]) * progress),
+            )
+
+        if use_lin_x_cfg_range and start_curriculum_lin_x is not None and max_curriculum_lin_x is not None:
+            lin_x_range = _interp_range(
+                start_curriculum_lin_x,
+                max_curriculum_lin_x,
+                lin_x_level,
+                max_lin_x_level,
+            )
+
+        if use_ang_z_cfg_range and start_curriculum_ang_z is not None and max_curriculum_ang_z is not None:
+            ang_z_range = _interp_range(
+                start_curriculum_ang_z,
+                max_curriculum_ang_z,
+                ang_z_level,
+                max_ang_z_level,
+            )
+
         progress = None
         # curriculum-aware range scaling (optional)
         if (
@@ -244,14 +248,6 @@ class UniformCRLCommand(CommandTerm):
         self.vel_command_b[env_ids, 1] = r.uniform_(*lin_vel_y_base)
         # -- ang vel yaw - rotation around z
         self.vel_command_b[env_ids, 2] = r.uniform_(*ang_z_range)
-        # heading target
-        heading_prob = 0.0
-        if self.cfg.heading_command and heading_base is not None:
-            self.heading_target[env_ids] = r.uniform_(*heading_base)
-            # 使用地形特定的 heading_command_prob，如果存在；否则使用配置中的值
-            heading_prob = (
-                heading_command_prob if terrain_ranges is not None else self.cfg.rel_heading_envs
-            )
         # update standing envs
         # 使用地形特定的 standing_command_prob，如果存在；否则使用配置中的值
         standing_prob = (
@@ -259,40 +255,10 @@ class UniformCRLCommand(CommandTerm):
         )
         self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= standing_prob
 
-        # Sample command modes for non-standing environments:
-        # heading mode, direct yaw-rate mode, or zero-yaw mode.
-        self.is_heading_env[env_ids] = False
-        self.is_yaw_env[env_ids] = False
-        active_mask = ~self.is_standing_env[env_ids]
-        if torch.any(active_mask):
-            active_env_ids = env_ids[active_mask]
-            mode_rand = torch.rand(active_env_ids.shape[0], device=self.device)
-
-            heading_prob = float(np.clip(heading_prob, 0.0, 1.0))
-            yaw_prob = float(np.clip(yaw_command_prob, 0.0, 1.0))
-            total_prob = heading_prob + yaw_prob
-            if total_prob > 1.0:
-                # Keep relative proportion while avoiding invalid probability mass.
-                scale = 1.0 / total_prob
-                heading_prob *= scale
-                yaw_prob *= scale
-
-            heading_mask = mode_rand < heading_prob
-            yaw_mask = (~heading_mask) & (mode_rand < (heading_prob + yaw_prob))
-
-            self.is_heading_env[active_env_ids] = heading_mask
-            self.is_yaw_env[active_env_ids] = yaw_mask
-
-            # Envs that are neither heading nor yaw mode are linear-only commands.
-            no_yaw_ids = active_env_ids[~yaw_mask & ~heading_mask]
-            if no_yaw_ids.numel() > 0:
-                self.vel_command_b[no_yaw_ids, 2] = 0.0
-
         # update standing envs
         if self.cfg.small_commands_to_zero:
-            self.vel_command_b[env_ids, :2] *= (
-                torch.abs(self.vel_command_b[env_ids, 0:1]) > self.cfg.clips.lin_vel_clip
-            )
+            xy_norm = torch.norm(self.vel_command_b[env_ids, :2], dim=1, keepdim=True)
+            self.vel_command_b[env_ids, :2] *= (xy_norm > self.cfg.clips.lin_vel_clip)
 
         # enforce minimum absolute command magnitudes (optional)
         min_abs_x = self.cfg.min_abs_lin_vel_x
@@ -320,25 +286,6 @@ class UniformCRLCommand(CommandTerm):
                 self.vel_command_b[env_ids[mask], 1] = signs * min_abs_y
 
     def _update_command(self):
-        # Optional alignment to crl goals for legacy tasks
-        if self.cfg.align_to_crl_goal and hasattr(self._env, "crl_manager"):
-            crl_term = self._env.crl_manager._terms.get("base_crl")
-            if crl_term and hasattr(crl_term, "target_yaw"):
-                self.heading_target = crl_term.target_yaw
-                self.is_heading_env[:] = True
-
-        # Compute angular velocity from heading direction
-        if self.cfg.heading_command:
-            env_ids = self.is_heading_env.nonzero(as_tuple=False).flatten()
-            if env_ids.numel() > 0:
-                heading_error = math_utils.wrap_to_pi(
-                    self.heading_target[env_ids] - self.robot.data.heading_w[env_ids]
-                )
-                self.vel_command_b[env_ids, 2] = torch.clip(
-                    self.cfg.heading_control_stiffness * heading_error,
-                    min=self.cfg.ranges.ang_vel_z[0],
-                    max=self.cfg.ranges.ang_vel_z[1],
-                )
         # Optionally zero very small yaw-rate commands, matching lin_vel_clip behavior.
         if self.cfg.small_commands_to_zero:
             self.vel_command_b[:, 2] *= (
@@ -348,70 +295,3 @@ class UniformCRLCommand(CommandTerm):
         standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
         if standing_env_ids.numel() > 0:
             self.vel_command_b[standing_env_ids, :] = 0.0
-
-    def _set_debug_vis_impl(self, debug_vis: bool):
-        if debug_vis:
-            if not hasattr(self, "goal_vel_visualizer"):
-                # -- goal
-                self.goal_vel_visualizer = VisualizationMarkers(self.cfg.goal_vel_visualizer_cfg)
-                # -- current
-                self.current_vel_visualizer = VisualizationMarkers(
-                    self.cfg.current_vel_visualizer_cfg
-                )
-            # set their visibility to true
-            self.goal_vel_visualizer.set_visibility(True)
-            self.current_vel_visualizer.set_visibility(True)
-        else:
-            if hasattr(self, "goal_vel_visualizer"):
-                self.goal_vel_visualizer.set_visibility(False)
-                self.current_vel_visualizer.set_visibility(False)
-
-    def _debug_vis_callback(self, event):
-        if not self.robot.is_initialized:
-            return
-        # get marker location
-        # -- base state
-        base_pos_w = self.robot.data.root_pos_w.clone()
-        base_pos_w[:, 2] += 0.5
-
-        # -- Goal Arrow (Green): Points towards the target yaw (heading_target)
-        # Create arrow quaternion directly from heading_target (World Frame)
-        zeros = torch.zeros_like(self.heading_target)
-        vel_des_arrow_quat = math_utils.quat_from_euler_xyz(zeros, zeros, self.heading_target)
-
-        # Scale based on commanded linear velocity magnitude
-        cmd_mag = torch.norm(self.command[:, :2], dim=1)
-        default_scale = self.goal_vel_visualizer.cfg.markers["arrow"].scale
-        vel_des_arrow_scale = torch.tensor(default_scale, device=self.device).repeat(
-            self.num_envs, 1
-        )
-        vel_des_arrow_scale[:, 0] *= cmd_mag * 3.0
-
-        # -- Current Velocity Arrow (Blue): Points in direction of actual movement
-        vel_arrow_scale, vel_arrow_quat = self._resolve_xy_velocity_to_arrow(
-            self.robot.data.root_lin_vel_b[:, :2]
-        )
-
-        # display markers
-        self.goal_vel_visualizer.visualize(base_pos_w, vel_des_arrow_quat, vel_des_arrow_scale)
-        self.current_vel_visualizer.visualize(base_pos_w, vel_arrow_quat, vel_arrow_scale)
-
-    def _resolve_xy_velocity_to_arrow(
-        self, xy_velocity: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # obtain default scale of the marker
-        default_scale = self.goal_vel_visualizer.cfg.markers["arrow"].scale
-        # arrow-scale
-        arrow_scale = torch.tensor(default_scale, device=self.device).repeat(
-            xy_velocity.shape[0], 1
-        )
-        arrow_scale[:, 0] *= torch.linalg.norm(xy_velocity, dim=1) * 3.0
-        # arrow-direction
-        heading_angle = torch.atan2(xy_velocity[:, 1], xy_velocity[:, 0])
-        zeros = torch.zeros_like(heading_angle)
-        arrow_quat = math_utils.quat_from_euler_xyz(zeros, zeros, heading_angle)
-        # convert everything back from base to world frame
-        base_quat_w = self.robot.data.root_quat_w
-        arrow_quat = math_utils.quat_mul(base_quat_w, arrow_quat)
-
-        return arrow_scale, arrow_quat

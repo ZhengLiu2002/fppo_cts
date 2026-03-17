@@ -190,14 +190,17 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 scripts/rsl_rl/train.py
 python scripts/rsl_rl/play.py \
   --task Isaac-Galileo-CRL-Teacher-Play-v0 \
   --num_envs 50 \
-  --checkpoint logs/rsl_rl/galileo_fppo/
+  --checkpoint logs/rsl_rl/galileo_
+```
 
 # Galileo 学生模型
+```bash
 python scripts/rsl_rl/play.py \
   --task Isaac-Galileo-CRL-Student-Play-v0 \
-  --num_envs 50 \
-  --checkpoint logs/rsl_rl/galileo_fppo/
-  --enable_cameras
+  --algo distillation \
+  --exp galileo/studies/algo_compare_student_distill_tuned \
+  --num_envs 16 \
+  --checkpoint logs/rsl_rl/galileo_
 
 ```
 

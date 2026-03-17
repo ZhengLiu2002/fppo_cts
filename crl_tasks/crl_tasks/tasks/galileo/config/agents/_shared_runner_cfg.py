@@ -5,8 +5,11 @@ from __future__ import annotations
 from typing import Literal
 
 from ..defaults import GalileoDefaults
+from ..symmetry import build_symmetry_cfg
 from .rsl_rl_cfg import (
+    CRLConstraintAdapterCfg,
     CRLRslRlActorCfg,
+    CRLRslRlFppoAlgorithmCfg,
     CRLRslRlPpoActorCriticCfg,
     CRLRslRlPpoAlgorithmCfg,
     CRLRslRlStateHistEncoderCfg,
@@ -19,8 +22,18 @@ _CRITIC_HIDDEN_DIMS = [512, 512, 256, 128]
 _SCAN_ENCODER_DIMS = [128, 64, 32]
 
 
-def build_algorithm_cfg(role: RunnerRole) -> CRLRslRlPpoAlgorithmCfg:
-    """Build algorithm config from ``GalileoDefaults`` for the given role."""
+def _merged_constraint_adapter_params(algo_key: str, role: RunnerRole) -> dict:
+    params: dict = {}
+    params.update(getattr(GalileoDefaults.algorithm, "constraint_adapter_base", {}))
+    params.update(getattr(GalileoDefaults.algorithm, "constraint_adapter_per_algo", {}).get(algo_key, {}))
+    if role == "teacher":
+        params.update(getattr(GalileoDefaults.algorithm, "constraint_adapter_teacher_override", {}))
+    else:
+        params.update(getattr(GalileoDefaults.algorithm, "constraint_adapter_student_override", {}))
+    return params
+
+
+def _merged_algorithm_params(role: RunnerRole) -> tuple[str, str, dict]:
     algo_key = getattr(GalileoDefaults.algorithm, "name", "fppo")
     class_name = GalileoDefaults.algorithm.class_name_map.get(algo_key, algo_key)
     params: dict = {}
@@ -30,7 +43,30 @@ def build_algorithm_cfg(role: RunnerRole) -> CRLRslRlPpoAlgorithmCfg:
         params.update(getattr(GalileoDefaults.algorithm, "teacher_override", {}))
     else:
         params.update(getattr(GalileoDefaults.algorithm, "student_override", {}))
-    return CRLRslRlPpoAlgorithmCfg(class_name=class_name, **params)
+    return algo_key, class_name, params
+
+
+def build_algorithm_cfg(role: RunnerRole) -> CRLRslRlPpoAlgorithmCfg | CRLRslRlFppoAlgorithmCfg:
+    """Build algorithm config from ``GalileoDefaults`` for the given role."""
+    algo_key, class_name, params = _merged_algorithm_params(role)
+    symmetry_params: dict = {}
+    symmetry_params.update(getattr(GalileoDefaults.algorithm, "symmetry_base", {}))
+    if role == "teacher":
+        symmetry_params.update(getattr(GalileoDefaults.algorithm, "symmetry_teacher_override", {}))
+    else:
+        symmetry_params.update(getattr(GalileoDefaults.algorithm, "symmetry_student_override", {}))
+    symmetry_cfg = build_symmetry_cfg(role, symmetry_params)
+    if symmetry_cfg is not None:
+        params["symmetry_cfg"] = symmetry_cfg
+    cfg_cls = CRLRslRlFppoAlgorithmCfg if algo_key == "fppo" else CRLRslRlPpoAlgorithmCfg
+    return cfg_cls(class_name=class_name, **params)
+
+
+def build_constraint_adapter_cfg(role: RunnerRole) -> CRLConstraintAdapterCfg:
+    """Build runner-side constraint preprocessing config."""
+    algo_key, _class_name, _params = _merged_algorithm_params(role)
+    adapter_params = _merged_constraint_adapter_params(algo_key, role)
+    return CRLConstraintAdapterCfg(**adapter_params)
 
 
 def build_obs_cfg(role: RunnerRole) -> tuple[dict[str, int], dict[str, int]]:
@@ -41,6 +77,13 @@ def build_obs_cfg(role: RunnerRole) -> tuple[dict[str, int], dict[str, int]]:
         "num_scan": obs_cfg.actor_num_scan,
         "num_priv_explicit": obs_cfg.actor_num_priv_explicit,
         "num_priv_latent": obs_cfg.actor_num_priv_latent,
+        "history_latent_dim": getattr(
+            obs_cfg, "actor_history_latent_dim", obs_cfg.actor_num_priv_latent
+        ),
+        "history_reconstruction_dim": max(obs_cfg.critic_num_prop - obs_cfg.actor_num_prop, 0)
+        + obs_cfg.critic_num_scan
+        + obs_cfg.critic_num_priv_explicit
+        + obs_cfg.critic_num_priv_latent,
         "num_hist": obs_cfg.actor_num_hist,
     }
     critic_cfg = {
@@ -64,6 +107,7 @@ def build_policy_cfg(role: RunnerRole) -> CRLRslRlPpoActorCriticCfg:
         num_scan=actor_obs["num_scan"],
         num_priv_explicit=actor_obs["num_priv_explicit"],
         num_priv_latent=actor_obs["num_priv_latent"],
+        history_latent_dim=actor_obs["history_latent_dim"],
         num_hist=actor_obs["num_hist"],
         encode_scan_for_critic=(critic_obs["critic_num_scan"] > 0),
         critic_num_prop=critic_obs["critic_num_prop"],
@@ -83,14 +127,18 @@ def build_policy_cfg(role: RunnerRole) -> CRLRslRlPpoActorCriticCfg:
             num_scan=actor_obs["num_scan"],
             num_priv_explicit=actor_obs["num_priv_explicit"],
             num_priv_latent=actor_obs["num_priv_latent"],
+            history_latent_dim=actor_obs["history_latent_dim"],
+            history_reconstruction_dim=actor_obs["history_reconstruction_dim"],
             num_hist=actor_obs["num_hist"],
             state_history_encoder=CRLRslRlStateHistEncoderCfg(
-                class_name="StateHistoryEncoder",
+                class_name="TCNHistoryEncoder",
                 num_prop=actor_obs["num_prop"],
+                history_latent_dim=actor_obs["history_latent_dim"],
                 num_hist=actor_obs["num_hist"],
+                channel_size=max(actor_obs["history_latent_dim"], 32),
             ),
         ),
     )
 
 
-__all__ = ["build_algorithm_cfg", "build_obs_cfg", "build_policy_cfg"]
+__all__ = ["build_algorithm_cfg", "build_constraint_adapter_cfg", "build_obs_cfg", "build_policy_cfg"]

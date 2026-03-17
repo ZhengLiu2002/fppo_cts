@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from importlib import import_module
+from importlib import util as importlib_util
+from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -39,6 +42,7 @@ class PPO:
         desired_kl=0.01,
         device="cpu",
         normalize_advantage_per_mini_batch=False,
+        symmetry_cfg: dict | None = None,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
         # Cost advantage normalization
@@ -52,12 +56,13 @@ class PPO:
         k_decay: float = 1.0,
         k_min: float = 0.0,
         k_violation_threshold: float = 0.02,
+        reconstruction_loss_coef: float = 0.0,
         cost_ratio_clip: float | None = None,
         log_ratio_clip: float = 6.0,
         kl_hard_ratio: float = 4.0,
         kl_hard_abs: float = 0.05,
         constraint_limits: list[float] | tuple[float, ...] | None = None,
-        ):
+    ):
         # device-related parameters
         self.device = device
         self.is_multi_gpu = multi_gpu_cfg is not None
@@ -95,6 +100,7 @@ class PPO:
         self.schedule = schedule
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
+        self.symmetry = symmetry_cfg
         self.normalize_cost_advantage = normalize_cost_advantage
         self.cost_limit = cost_limit
         self.cost_viol_loss_coef = cost_viol_loss_coef
@@ -104,6 +110,7 @@ class PPO:
         self.k_decay = float(k_decay)
         self.k_min = float(k_min)
         self.k_violation_threshold = float(k_violation_threshold)
+        self.reconstruction_loss_coef = float(reconstruction_loss_coef)
         self.cost_ratio_clip = float(cost_ratio_clip) if cost_ratio_clip is not None else clip_param
         self.log_ratio_clip = float(log_ratio_clip)
         self.kl_hard_ratio = float(kl_hard_ratio)
@@ -237,6 +244,94 @@ class PPO:
         if self.desired_kl is None:
             return self.kl_hard_abs
         return max(self.kl_hard_abs, float(self.desired_kl) * self.kl_hard_ratio)
+
+    def _use_history_encoding(self) -> bool:
+        actor = getattr(self.policy, "actor", None)
+        return bool(getattr(actor, "num_hist", 0) > 0)
+
+    def _policy_act(self, obs_batch: torch.Tensor, **kwargs):
+        hist_encoding = kwargs.pop("hist_encoding", self._use_history_encoding())
+        try:
+            return self.policy.act(obs_batch, hist_encoding=hist_encoding, **kwargs)
+        except TypeError as exc:
+            if "hist_encoding" not in str(exc):
+                raise
+            return self.policy.act(obs_batch, **kwargs)
+
+    def _history_reconstruction_loss(
+        self,
+        obs_batch: torch.Tensor,
+        critic_obs_batch: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        zero = torch.zeros((), device=obs_batch.device)
+        reconstruction_loss_coef = float(getattr(self, "reconstruction_loss_coef", 0.0) or 0.0)
+        if (
+            reconstruction_loss_coef <= 0.0
+            or critic_obs_batch is None
+            or not self._use_history_encoding()
+        ):
+            return zero, zero
+        if not hasattr(self.policy, "history_reconstruction"):
+            return zero, zero
+        prediction, target = self.policy.history_reconstruction(obs_batch, critic_obs_batch)
+        if prediction is None or target is None:
+            return zero, zero
+        reconstruction_loss = torch.nn.functional.mse_loss(prediction, target.detach())
+        reconstruction_loss = self._sanitize_tensor(
+            reconstruction_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
+        )
+        return reconstruction_loss, reconstruction_loss * reconstruction_loss_coef
+
+    @staticmethod
+    def _resolve_data_augmentation_func(func_spec):
+        if callable(func_spec):
+            return func_spec
+        if not isinstance(func_spec, str):
+            raise TypeError(
+                f"Expected symmetry data_augmentation_func to be callable or str, got {type(func_spec).__name__}."
+            )
+
+        spec = func_spec
+        if spec in {
+            "galileo_teacher_left_right_augmentation",
+            "crl_tasks.tasks.galileo.config.symmetry:galileo_teacher_left_right_augmentation",
+        }:
+            module_name = "crl_tasks.tasks.galileo.config.symmetry"
+            func_name = "galileo_teacher_left_right_augmentation"
+            try:
+                module = import_module(module_name)
+                func = getattr(module, func_name, None)
+                if callable(func):
+                    return func
+            except Exception:
+                pass
+
+            repo_root = Path(__file__).resolve().parents[3]
+            symmetry_file = repo_root / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "symmetry.py"
+            module_spec = importlib_util.spec_from_file_location("galileo_symmetry_runtime", symmetry_file)
+            if module_spec is None or module_spec.loader is None:
+                raise ImportError(f"Failed to load symmetry module from: {symmetry_file}")
+            module = importlib_util.module_from_spec(module_spec)
+            module_spec.loader.exec_module(module)
+            func = getattr(module, func_name, None)
+            if not callable(func):
+                raise TypeError(
+                    f"Resolved symmetry augmentation target is not callable from file: {symmetry_file}"
+                )
+            return func
+
+        if ":" not in spec:
+            raise ValueError(
+                "String symmetry data_augmentation_func must be a known augmentation id "
+                "or use 'module:function' format. "
+                f"Got: {func_spec!r}"
+            )
+        module_name, func_name = spec.split(":", 1)
+        module = import_module(module_name)
+        func = getattr(module, func_name, None)
+        if not callable(func):
+            raise TypeError(f"Resolved symmetry augmentation target is not callable: {spec!r}")
+        return func
 
     def _split_cost_value_heads(
         self, cost_values: torch.Tensor
@@ -562,6 +657,7 @@ class PPO:
         mean_cost_margin = 0.0
         mean_current_max_violation = 0.0
         mean_kl = 0.0
+        mean_reconstruction_loss = 0.0
         skipped_updates = 0
 
         if self.policy.is_recurrent:
@@ -572,6 +668,11 @@ class PPO:
             generator = self.storage.mini_batch_generator(
                 self.num_mini_batches, self.num_learning_epochs
             )
+
+        def _repeat_batch(tensor: torch.Tensor | None, num_aug: int) -> torch.Tensor | None:
+            if tensor is None:
+                return None
+            return tensor.repeat((num_aug,) + (1,) * (tensor.ndim - 1))
 
         for (
             obs_batch,
@@ -590,9 +691,54 @@ class PPO:
             masks_batch,
             *extra_batch,
         ) in generator:
+            original_batch_size = obs_batch.shape[0]
             cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
             cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
             cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
+
+            if self.symmetry and self.symmetry.get("use_data_augmentation", False):
+                if self.policy.is_recurrent:
+                    raise NotImplementedError("Symmetry augmentation is not implemented for recurrent PPO policies.")
+                data_augmentation_func = self._resolve_data_augmentation_func(
+                    self.symmetry["data_augmentation_func"]
+                )
+                self.symmetry["data_augmentation_func"] = data_augmentation_func
+                obs_batch, actions_batch = data_augmentation_func(
+                    obs=obs_batch,
+                    actions=actions_batch,
+                    env=self.symmetry.get("_env"),
+                    obs_type="policy",
+                )
+                critic_obs_batch, _ = data_augmentation_func(
+                    obs=critic_obs_batch,
+                    actions=None,
+                    env=self.symmetry.get("_env"),
+                    obs_type="critic",
+                )
+                _, old_mu_batch = data_augmentation_func(
+                    obs=None,
+                    actions=old_mu_batch,
+                    env=self.symmetry.get("_env"),
+                    obs_type="policy",
+                )
+                _, old_sigma_batch = data_augmentation_func(
+                    obs=None,
+                    actions=old_sigma_batch,
+                    env=self.symmetry.get("_env"),
+                    obs_type="policy",
+                    is_std=True,
+                )
+                num_aug = int(obs_batch.shape[0] / original_batch_size)
+                target_values_batch = _repeat_batch(target_values_batch, num_aug)
+                advantages_batch = _repeat_batch(advantages_batch, num_aug)
+                returns_batch = _repeat_batch(returns_batch, num_aug)
+                cost_values_batch = _repeat_batch(cost_values_batch, num_aug)
+                cost_returns_batch = _repeat_batch(cost_returns_batch, num_aug)
+                cost_advantages_batch = _repeat_batch(cost_advantages_batch, num_aug)
+                old_actions_log_prob_batch = _repeat_batch(old_actions_log_prob_batch, num_aug)
+                cost_term_returns_batch = _repeat_batch(cost_term_returns_batch, num_aug)
+                cost_term_advantages_batch = _repeat_batch(cost_term_advantages_batch, num_aug)
+                cost_term_values_batch = _repeat_batch(cost_term_values_batch, num_aug)
 
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
@@ -641,7 +787,11 @@ class PPO:
             batch_cost_margin = constraint_stats["min_cost_margin"]
             current_max_violation = constraint_stats["max_c_hat"]
 
-            self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+            self._policy_act(
+                obs_batch,
+                masks=masks_batch,
+                hidden_states=hid_states_batch[0],
+            )
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             value_batch = self.policy.evaluate(
                 critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
@@ -742,12 +892,16 @@ class PPO:
             cost_value_loss = self._sanitize_tensor(
                 cost_value_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
             )
+            reconstruction_loss, weighted_reconstruction_loss = self._history_reconstruction_loss(
+                obs_batch, critic_obs_batch
+            )
 
             loss = (
                 surrogate_loss
                 + viol_loss
                 + self.value_loss_coef * value_loss
                 + self.cost_value_loss_coef * cost_value_loss
+                + weighted_reconstruction_loss
                 - self.entropy_coef * entropy_batch.mean()
             )
             loss = self._sanitize_tensor(loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6)
@@ -774,6 +928,7 @@ class PPO:
             mean_cost_margin += batch_cost_margin.item()
             mean_current_max_violation += current_max_violation.item()
             mean_kl += kl_mean.item()
+            mean_reconstruction_loss += reconstruction_loss.item()
 
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
@@ -786,6 +941,7 @@ class PPO:
         mean_cost_margin /= num_updates
         mean_current_max_violation /= num_updates
         mean_kl /= num_updates
+        mean_reconstruction_loss /= num_updates
         kl_skip_rate = skipped_updates / num_updates
         self.storage.clear()
 
@@ -806,6 +962,7 @@ class PPO:
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
             "viol": mean_viol_loss,
+            "reconstruction": mean_reconstruction_loss,
         }
         return loss_dict
 

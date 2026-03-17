@@ -22,6 +22,8 @@ class CRLRslRlBaseCfg:
     num_priv_hurdles: int = 0
     num_priv_explicit: int = 0
     num_priv_latent: int = 0
+    history_latent_dim: int = 0
+    history_reconstruction_dim: int = 0
     num_prop: int = 180
     num_scan: int = 0
     num_hist: int = 0
@@ -47,6 +49,7 @@ class CRLRslRlPpoActorCriticCfg(RslRlPpoActorCriticCfg):
     num_scan: int = 0
     num_priv_explicit: int = 0
     num_priv_latent: int = 0
+    history_latent_dim: int = 0
     num_hist: int = 0
     tanh_encoder_output: bool = False
     scan_encoder_dims: list[int] = MISSING
@@ -64,64 +67,25 @@ class CRLRslRlPpoActorCriticCfg(RslRlPpoActorCriticCfg):
 
 @configclass
 class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
-    class_name: str = "FPPO"
+    class_name: str = "PPO"
     dagger_update_freq: int = 1
     priv_reg_coef_schedual: list[float] = [0, 0.1, 2000, 3000]
+    reconstruction_loss_coef: float = 0.0
+    symmetry_cfg: dict | None = None
 
-    # FPPO/CMDP extensions
+    # Constrained RL extensions shared by non-FPPO algorithms.
     cost_value_loss_coef: float = 1.0
-    step_size: float = 1e-3
     cost_gamma: float | None = None
     cost_lam: float | None = None
     cost_limit: float = 0.0
     lagrangian_multiplier_init: float = 0.0
     lagrange_optimizer: str = "Adam"
-    delta_safe: float | None = 0.01
+    lagrange_lr: float = 1e-2
+    lagrange_max: float = 100.0
     backtrack_coeff: float = 0.5
     max_backtracks: int = 10
-    projection_eps: float = 1e-8
-    epsilon_safe: float = 0.0
-    delta_kl: float | None = None
-    active_set_threshold: float = 0.05
-    softproj_max_iters: int = 40
-    softproj_tol: float = 1e-6
     constraint_limits: dict[str, float] | list[float] | None = None
-    constraint_limits_start: dict[str, float] | list[float] | None = None
-    constraint_limits_final: dict[str, float] | list[float] | None = None
-    adaptive_constraint_curriculum: bool = False
-    constraint_curriculum_names: list[str] | None = None
-    constraint_curriculum_ema_decay: float = 0.95
-    constraint_curriculum_check_interval: int = 20
-    constraint_curriculum_alpha: float = 0.8
-    constraint_curriculum_shrink: float = 0.97
-    use_clipped_surrogate: bool = True
     normalize_cost_advantage: bool = False
-    constraint_normalization: bool = True
-    constraint_norm_beta: float = 0.99
-    constraint_norm_min_scale: float = 1e-3
-    constraint_norm_max_scale: float = 10.0
-    constraint_norm_clip: float = 5.0
-    constraint_proxy_delta: float = 0.1
-    constraint_agg_tau: float = 0.5
-    constraint_scale_by_gamma: bool = False
-    constraint_cost_scale: float | None = None
-    use_preconditioner: bool = True
-    preconditioner_beta: float = 0.999
-    preconditioner_eps: float = 1e-8
-    feasible_first: bool = True
-    feasible_first_coef: float = 1.0
-    feasible_cost_margin: float = 1e-3
-    infeasible_improve_ratio: float = 0.01
-    infeasible_improve_abs: float = 1e-3
-    min_step_size: float = 1e-7
-    relax_cost_margin: float = 0.2
-    step_size_adaptive: bool = True
-    step_size_up: float = 1.02
-    step_size_down: float = 0.7
-    step_size_min: float = 5e-5
-    step_size_max: float = 2e-3
-    target_accept_rate: float = 0.75
-    step_size_cost_margin: float = 0.2
     k_decay: float = 1.0
     k_min: float = 0.0
     k_violation_threshold: float = 0.02
@@ -138,6 +102,62 @@ class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
 
 @configclass
+class CRLRslRlFppoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+    class_name: str = "FPPO"
+    dagger_update_freq: int = 1
+    priv_reg_coef_schedual: list[float] = [0, 0.1, 2000, 3000]
+    reconstruction_loss_coef: float = 0.0
+    symmetry_cfg: dict | None = None
+
+    cost_value_loss_coef: float = 1.0
+    step_size: float = 1e-3
+    cost_gamma: float | None = None
+    cost_lam: float | None = None
+    cost_limit: float = 0.0
+    backtrack_coeff: float = 0.5
+    max_backtracks: int = 10
+    projection_eps: float = 1e-8
+    epsilon_safe: float = 0.0
+    delta_kl: float | None = None
+    predictor_desired_kl: float | None = None
+    predictor_kl_hard_limit: float | None = None
+    softproj_max_iters: int = 40
+    softproj_tol: float = 1e-6
+    constraint_limits: dict[str, float] | list[float] | None = None
+    constraint_limits_start: dict[str, float] | list[float] | None = None
+    constraint_limits_final: dict[str, float] | list[float] | None = None
+    adaptive_constraint_curriculum: bool = False
+    constraint_curriculum_names: list[str] | None = None
+    constraint_curriculum_ema_decay: float = 0.95
+    constraint_curriculum_check_interval: int = 20
+    constraint_curriculum_alpha: float = 0.8
+    constraint_curriculum_shrink: float = 0.97
+    use_clipped_surrogate: bool = True
+    normalize_cost_advantage: bool = False
+    step_size_adaptive: bool = True
+    cost_viol_loss_coef: float = 0.0
+    k_value: float = 1.0
+    k_growth: float = 1.0
+    k_max: float = 1.0
+    k_decay: float = 1.0
+    k_min: float = 0.0
+    k_violation_threshold: float = 0.02
+
+
+@configclass
+class CRLConstraintAdapterCfg:
+    enabled: bool = False
+    ema_beta: float = 0.99
+    min_scale: float = 1e-3
+    max_scale: float = 10.0
+    clip: float = 5.0
+    huber_delta: float = 0.1
+    agg_tau: float = 0.5
+    scale_by_gamma: bool = False
+    cost_scale: float | None = None
+
+
+@configclass
 class CRLRslRlDistillationAlgorithmCfg(RslRlPpoAlgorithmCfg):
     class_name: str = "Distillation"
 
@@ -145,7 +165,8 @@ class CRLRslRlDistillationAlgorithmCfg(RslRlPpoAlgorithmCfg):
 @configclass
 class CRLRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     policy: CRLRslRlPpoActorCriticCfg = MISSING
-    algorithm: CRLRslRlPpoAlgorithmCfg | CRLRslRlDistillationAlgorithmCfg = MISSING
+    algorithm: CRLRslRlPpoAlgorithmCfg | CRLRslRlFppoAlgorithmCfg | CRLRslRlDistillationAlgorithmCfg = MISSING
+    constraint_adapter: CRLConstraintAdapterCfg = CRLConstraintAdapterCfg()
 
 
 __all__ = [
@@ -154,6 +175,8 @@ __all__ = [
     "CRLRslRlActorCfg",
     "CRLRslRlPpoActorCriticCfg",
     "CRLRslRlPpoAlgorithmCfg",
+    "CRLRslRlFppoAlgorithmCfg",
+    "CRLConstraintAdapterCfg",
     "CRLRslRlDistillationAlgorithmCfg",
     "CRLRslRlOnPolicyRunnerCfg",
 ]

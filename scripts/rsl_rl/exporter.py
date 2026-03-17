@@ -625,7 +625,10 @@ def export_inference_cfg(
     if clip_obs is None:
         clip_obs = 100.0
     policy_cfg_dict["clip_obs"] = _safe_float(clip_obs, 100.0)
-    policy_cfg_dict["obs_history_length"] = {"actor_obs": 1}
+    obs_history_length = getattr(env_summary, "obs_history_length", None)
+    if obs_history_length is None:
+        obs_history_length = getattr(getattr(env_cfg, "obs", None), "obs_history_length", 1)
+    policy_cfg_dict["obs_history_length"] = {"actor_obs": int(obs_history_length)}
 
     kp, kd, max_torques = _extract_actuator_vectors(env, joint_names)
     policy_cfg_dict["joint_kp"] = [float(f"{x:.4f}") for x in kp]

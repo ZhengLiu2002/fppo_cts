@@ -45,13 +45,16 @@ class Actor(nn.Module):
         self.num_actions = num_actions
         self.num_priv_latent = num_priv_latent = kwargs.pop("num_priv_latent")
         self.num_priv_explicit = num_priv_explicit = kwargs.pop("num_priv_explicit")
+        history_latent_dim = int(kwargs.pop("history_latent_dim", num_priv_latent) or 0)
+        self.history_latent_dim = history_latent_dim if history_latent_dim > 0 else num_priv_latent
+        self.history_reconstruction_dim = int(kwargs.pop("history_reconstruction_dim", 0) or 0)
         self.if_scan_encode = scan_encoder_dims is not None and num_scan > 0
-        # actor 输入由：当前本体(num_prop) + 激光(num_scan) + 特权显式 + 特权隐式 + 历史本体 拼接
+        # Raw observation layout: current proprio + optional scan / explicit priv + optional raw priv latent + history.
         self.in_features = (
             num_prop + num_scan + num_priv_latent + num_priv_explicit + num_prop * num_hist
         )
 
-        if len(priv_encoder_dims) > 0:
+        if len(priv_encoder_dims) > 0 and num_priv_latent > 0:
             priv_encoder_layers = []
             priv_encoder_layers.append(nn.Linear(num_priv_latent, priv_encoder_dims[0]))
             priv_encoder_layers.append(activation)
@@ -60,25 +63,31 @@ class Actor(nn.Module):
                     nn.Linear(priv_encoder_dims[l], priv_encoder_dims[l + 1])
                 )
                 priv_encoder_layers.append(activation)
+            if priv_encoder_dims[-1] != self.history_latent_dim:
+                priv_encoder_layers.append(nn.Linear(priv_encoder_dims[-1], self.history_latent_dim))
             self.priv_encoder = nn.Sequential(*priv_encoder_layers)
-            priv_encoder_output_dim = priv_encoder_dims[-1]
+        elif num_priv_latent > 0 and num_priv_latent != self.history_latent_dim:
+            self.priv_encoder = nn.Sequential(
+                nn.Linear(num_priv_latent, self.history_latent_dim),
+                activation,
+            )
         else:
             self.priv_encoder = nn.Identity()
-            priv_encoder_output_dim = num_priv_latent
+        latent_dim = self.history_latent_dim
 
         state_history_encoder_cfg = kwargs.pop("state_history_encoder")
-        if num_hist > 0:
+        if num_hist > 0 and latent_dim > 0:
             state_histroy_encoder_class = eval(state_history_encoder_cfg.pop("class_name"))
             self.history_encoder: StateHistoryEncoder = state_histroy_encoder_class(
                 activation,
                 num_prop,
                 num_hist,
-                priv_encoder_output_dim,
+                latent_dim,
                 state_history_encoder_cfg.pop("channel_size"),
             )
         else:
             self.history_encoder = nn.Identity()
-        self._hist_latent_dim = priv_encoder_output_dim
+        self._hist_latent_dim = latent_dim
         if self.if_scan_encode:
             scan_encoder = []
             scan_encoder.append(nn.Linear(num_scan, scan_encoder_dims[0]))
@@ -103,7 +112,7 @@ class Actor(nn.Module):
                 num_prop
                 + self.scan_encoder_output_dim
                 + num_priv_explicit
-                + priv_encoder_output_dim,
+                + latent_dim,
                 actor_hidden_dims[0],
             )
         )
@@ -117,6 +126,15 @@ class Actor(nn.Module):
         if tanh_encoder_output:
             actor_layers.append(nn.Tanh())
         self.actor_backbone = nn.Sequential(*actor_layers)
+        if latent_dim > 0 and self.history_reconstruction_dim > 0:
+            recon_hidden_dim = max(latent_dim * 2, 64)
+            self.history_reconstruction_head = nn.Sequential(
+                nn.Linear(latent_dim, recon_hidden_dim),
+                activation,
+                nn.Linear(recon_hidden_dim, self.history_reconstruction_dim),
+            )
+        else:
+            self.history_reconstruction_head = None
 
     def forward(self, obs, hist_encoding: bool, scandots_latent: Optional[torch.Tensor] = None):
         """前向推理：
@@ -146,6 +164,8 @@ class Actor(nn.Module):
 
     def infer_priv_latent(self, obs):
         """仅编码特权隐式变量。"""
+        if self.num_priv_latent <= 0 or self._hist_latent_dim <= 0:
+            return obs.new_zeros((obs.shape[0], self._hist_latent_dim))
         priv = obs[
             :,
             self.num_prop
@@ -159,7 +179,7 @@ class Actor(nn.Module):
 
     def infer_hist_latent(self, obs):
         """对历史本体序列做 1D 卷积编码。"""
-        if self.num_hist <= 0:
+        if self.num_hist <= 0 or self._hist_latent_dim <= 0:
             return self.infer_priv_latent(obs)
         hist = obs[:, -self.num_hist * self.num_prop :]
         return self.history_encoder(hist.view(-1, self.num_hist, self.num_prop))
@@ -168,6 +188,12 @@ class Actor(nn.Module):
         """仅对激光点做编码。"""
         scan = obs[:, self.num_prop : self.num_prop + self.num_scan]
         return self.scan_encoder(scan)
+
+    def reconstruct_privileged_from_history(self, obs):
+        if self.history_reconstruction_head is None:
+            return None
+        latent = self.infer_hist_latent(obs)
+        return self.history_reconstruction_head(latent)
 
 
 class ActorCriticRMA(nn.Module):
@@ -211,6 +237,7 @@ class ActorCriticRMA(nn.Module):
         self._num_scan = int(kwargs.get("num_scan", 0))
         self._num_priv_explicit = int(kwargs.get("num_priv_explicit", 0))
         self._num_priv_latent = int(kwargs.get("num_priv_latent", 0))
+        self._history_latent_dim = int(kwargs.get("history_latent_dim", 0) or 0)
         self._critic_num_prop = int(kwargs.get("critic_num_prop", self._num_prop) or self._num_prop)
         self._critic_num_scan = int(kwargs.get("critic_num_scan", self._num_scan) or self._num_scan)
         self._critic_num_priv_explicit = int(
@@ -243,6 +270,13 @@ class ActorCriticRMA(nn.Module):
             self._critic_scan_encoder_output_dim = critic_scan_encoder_dims[-1]
         elif self._encode_scan_for_critic and self._critic_num_scan > 0:
             self._critic_scan_encoder_output_dim = self.actor.scan_encoder_output_dim
+        self._reconstruction_missing_prop = max(self._critic_num_prop - self._num_prop, 0)
+        self._history_reconstruction_dim = (
+            self._reconstruction_missing_prop
+            + self._critic_num_scan
+            + self._critic_num_priv_explicit
+            + self._critic_num_priv_latent
+        )
 
         # Critic：直接接收 num_critic_obs（可能含特权信息）
         if self._encode_scan_for_critic and self._critic_num_scan > 0:
@@ -399,6 +433,56 @@ class ActorCriticRMA(nn.Module):
         cost_value = self.cost_critic(critic_input)
         return cost_value
 
+    def predict_history_reconstruction(self, observations: torch.Tensor) -> torch.Tensor | None:
+        return self.actor.reconstruct_privileged_from_history(observations)
+
+    def extract_history_reconstruction_target(
+        self, critic_observations: torch.Tensor
+    ) -> torch.Tensor | None:
+        target_terms: list[torch.Tensor] = []
+        if self._reconstruction_missing_prop > 0:
+            target_terms.append(critic_observations[:, : self._reconstruction_missing_prop])
+        cursor = self._critic_num_prop
+        if self._critic_num_scan > 0:
+            target_terms.append(critic_observations[:, cursor : cursor + self._critic_num_scan])
+            cursor += self._critic_num_scan
+        if self._critic_num_priv_explicit > 0:
+            target_terms.append(
+                critic_observations[:, cursor : cursor + self._critic_num_priv_explicit]
+            )
+            cursor += self._critic_num_priv_explicit
+        if self._critic_num_priv_latent > 0:
+            target_terms.append(
+                critic_observations[:, cursor : cursor + self._critic_num_priv_latent]
+            )
+        if not target_terms:
+            return None
+        return torch.cat(target_terms, dim=1)
+
+    def history_reconstruction(
+        self, observations: torch.Tensor, critic_observations: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        prediction = self.predict_history_reconstruction(observations)
+        target = self.extract_history_reconstruction_target(critic_observations)
+        if prediction is None or target is None:
+            return None, None
+        return prediction, target
+
     def load_state_dict(self, state_dict, strict=True):
-        super().load_state_dict(state_dict, strict=strict)
+        incompatible = super().load_state_dict(state_dict, strict=False)
+        missing = [
+            key
+            for key in incompatible.missing_keys
+            if not key.startswith("actor.history_reconstruction_head")
+        ]
+        unexpected = [
+            key
+            for key in incompatible.unexpected_keys
+            if not key.startswith("actor.history_reconstruction_head")
+        ]
+        if strict and (missing or unexpected):
+            raise RuntimeError(
+                "State dict mismatch for ActorCriticRMA. "
+                f"Missing keys: {missing}. Unexpected keys: {unexpected}."
+            )
         return True

@@ -1,13 +1,6 @@
 from isaaclab.managers import CommandTermCfg
-from isaaclab.markers import VisualizationMarkersCfg
-from isaaclab.markers.config import (
-    BLUE_ARROW_X_MARKER_CFG,
-    FRAME_MARKER_CFG,
-    GREEN_ARROW_X_MARKER_CFG,
-)
 from isaaclab.utils import configclass
 
-import math
 from dataclasses import MISSING
 from .uniform_crl_command import UniformCRLCommand
 
@@ -16,12 +9,8 @@ from .uniform_crl_command import UniformCRLCommand
 class CRLCommandCfg(CommandTermCfg):
     class_type: type = UniformCRLCommand
     asset_name: str = MISSING
-    heading_control_stiffness: float = 1.0
     small_commands_to_zero: bool = True
-    heading_command: bool = True
-    rel_heading_envs: float = 1.0
     rel_standing_envs: float = 0.0
-    align_to_crl_goal: bool = False
     # If enabled, command ranges are additionally scaled by terrain levels in
     # UniformCRLCommand._resample_command. Keep disabled when using curriculum
     # terms as the single source of command difficulty.
@@ -42,9 +31,6 @@ class CRLCommandCfg(CommandTermCfg):
         lin_vel_x: tuple[float, float] = MISSING
         lin_vel_y: tuple[float, float] = (-0.35, 0.35)
         ang_vel_z: tuple[float, float] = (-0.2, 0.2)
-        heading: tuple[float, float] | None = MISSING
-        heading_command_prob: float = 1.0
-        yaw_command_prob: float = 0.0
         standing_command_prob: float = 0.0
         start_curriculum_lin_x: tuple[float, float] | None = None
         start_curriculum_ang_z: tuple[float, float] | None = None
@@ -58,13 +44,3 @@ class CRLCommandCfg(CommandTermCfg):
 
     ranges: Ranges = MISSING
     clips: Clips = MISSING
-
-    goal_vel_visualizer_cfg: VisualizationMarkersCfg = GREEN_ARROW_X_MARKER_CFG.replace(
-        prim_path="/Visuals/Command/velocity_goal"
-    )
-
-    current_vel_visualizer_cfg: VisualizationMarkersCfg = BLUE_ARROW_X_MARKER_CFG.replace(
-        prim_path="/Visuals/Command/velocity_current"
-    )
-    goal_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)
-    current_vel_visualizer_cfg.markers["arrow"].scale = (0.5, 0.5, 0.5)

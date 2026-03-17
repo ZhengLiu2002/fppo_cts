@@ -262,6 +262,11 @@ class PolicyHistory(ManagerTermBase):
         return self._obs_history_buffer.view(self.num_envs, -1)
 
 
+def zeros(env: CRLManagerBasedRLEnv, size: int) -> torch.Tensor:
+    """Return a constant zero observation block with the requested feature size."""
+    return torch.zeros(env.num_envs, int(size), device=env.device)
+
+
 class image_features(ManagerTermBase):
 
     def __init__(self, cfg: ObservationTermCfg, env: CRLManagerBasedRLEnv):

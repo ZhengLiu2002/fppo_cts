@@ -169,6 +169,13 @@ class CRLRslRlVecEnvWrapper(VecEnv):
                     if step_reward.numel() > 0 and len(term_names) == step_reward.shape[1]:
                         step_mean = step_reward.mean(dim=0).detach().cpu()
                         for idx, name in enumerate(term_names):
+                            try:
+                                term_cfg = reward_manager.get_term_cfg(name)
+                                weight = float(getattr(term_cfg, "weight", 0.0))
+                            except Exception:
+                                weight = 0.0
+                            if weight == 0.0:
+                                continue
                             log_for_episode[f"Step_Reward/{name}"] = step_mean[idx]
             # normalize tensors to cpu for logging
             episode_log = {}

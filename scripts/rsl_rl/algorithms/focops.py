@@ -34,6 +34,7 @@ class FOCOPS(PPOLagrange):
         desired_kl=0.01,
         device="cpu",
         normalize_advantage_per_mini_batch=False,
+        symmetry_cfg: dict | None = None,
         normalize_cost_advantage: bool = False,
         cost_limit=0.0,
         lagrange_lr=1e-2,
@@ -49,6 +50,7 @@ class FOCOPS(PPOLagrange):
         k_decay: float = 1.0,
         k_min: float = 0.0,
         k_violation_threshold: float = 0.02,
+        reconstruction_loss_coef: float = 0.0,
         constraint_limits: list[float] | tuple[float, ...] | None = None,
         multi_gpu_cfg: dict | None = None,
     ):
@@ -71,6 +73,7 @@ class FOCOPS(PPOLagrange):
             desired_kl=desired_kl,
             device=device,
             normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
+            symmetry_cfg=symmetry_cfg,
             normalize_cost_advantage=normalize_cost_advantage,
             cost_limit=cost_limit,
             lagrange_lr=lagrange_lr,
@@ -84,6 +87,7 @@ class FOCOPS(PPOLagrange):
             k_decay=k_decay,
             k_min=k_min,
             k_violation_threshold=k_violation_threshold,
+            reconstruction_loss_coef=reconstruction_loss_coef,
             constraint_limits=constraint_limits,
             multi_gpu_cfg=multi_gpu_cfg,
         )
@@ -103,6 +107,7 @@ class FOCOPS(PPOLagrange):
         mean_cost_margin = 0.0
         mean_current_max_violation = 0.0
         mean_kl = 0.0
+        mean_reconstruction_loss = 0.0
 
         if self.policy.is_recurrent:
             generator = self.storage.recurrent_mini_batch_generator(
@@ -176,7 +181,11 @@ class FOCOPS(PPOLagrange):
             batch_cost_margin = constraint_stats["min_cost_margin"]
             current_max_violation = constraint_stats["max_c_hat"]
 
-            self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+            self._policy_act(
+                obs_batch,
+                masks=masks_batch,
+                hidden_states=hid_states_batch[0],
+            )
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             value_batch = self.policy.evaluate(
                 critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
@@ -272,12 +281,16 @@ class FOCOPS(PPOLagrange):
             cost_value_loss = self._sanitize_tensor(
                 cost_value_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
             )
+            reconstruction_loss, weighted_reconstruction_loss = self._history_reconstruction_loss(
+                obs_batch, critic_obs_batch
+            )
 
             loss = (
                 surrogate_loss
                 + viol_loss
                 + self.value_loss_coef * value_loss
                 + self.cost_value_loss_coef * cost_value_loss
+                + weighted_reconstruction_loss
                 - self.entropy_coef * entropy_batch.mean()
             )
             loss = self._sanitize_tensor(loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6)
@@ -302,6 +315,7 @@ class FOCOPS(PPOLagrange):
             mean_cost_margin += batch_cost_margin.item()
             mean_current_max_violation += current_max_violation.item()
             mean_kl += kl_mean.item()
+            mean_reconstruction_loss += reconstruction_loss.item()
 
         mean_value_loss /= num_updates
         mean_cost_value_loss /= num_updates
@@ -313,6 +327,7 @@ class FOCOPS(PPOLagrange):
         mean_cost_margin /= num_updates
         mean_current_max_violation /= num_updates
         mean_kl /= num_updates
+        mean_reconstruction_loss /= num_updates
 
         self.storage.clear()
         self.train_metrics = {
@@ -333,4 +348,5 @@ class FOCOPS(PPOLagrange):
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
             "viol": mean_viol_loss,
+            "reconstruction": mean_reconstruction_loss,
         }

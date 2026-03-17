@@ -329,7 +329,10 @@ class PPOWithExtractor(PPO):
             # Perform symmetric augmentation
             if self.symmetry and self.symmetry["use_data_augmentation"]:
                 # augmentation using symmetry
-                data_augmentation_func = self.symmetry["data_augmentation_func"]
+                data_augmentation_func = self._resolve_data_augmentation_func(
+                    self.symmetry["data_augmentation_func"]
+                )
+                self.symmetry["data_augmentation_func"] = data_augmentation_func
                 # returned shape: [batch_size * num_aug, ...]
                 obs_batch, actions_batch = data_augmentation_func(
                     obs=obs_batch,
@@ -455,7 +458,10 @@ class PPOWithExtractor(PPO):
                 # obtain the symmetric actions
                 # if we did augmentation before then we don't need to augment again
                 if not self.symmetry["use_data_augmentation"]:
-                    data_augmentation_func = self.symmetry["data_augmentation_func"]
+                    data_augmentation_func = self._resolve_data_augmentation_func(
+                        self.symmetry["data_augmentation_func"]
+                    )
+                    self.symmetry["data_augmentation_func"] = data_augmentation_func
                     obs_batch, _ = data_augmentation_func(
                         obs=obs_batch, actions=None, env=self.symmetry["_env"], obs_type="policy"
                     )

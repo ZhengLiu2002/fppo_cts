@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -31,20 +33,21 @@ class FPPO(PPO):
         learning_rate=1e-3,
         step_size=1e-3,
         cost_limit=0.0,
-        delta_safe=0.01,
         epsilon_safe=0.0,
         delta_kl: float | None = None,
         backtrack_coeff=0.5,
-        max_corrections=10,
-        max_backtracks: int | None = None,
+        max_backtracks: int = 10,
         projection_eps=1e-8,
         max_grad_norm=1.0,
         use_clipped_value_loss=True,
         use_clipped_surrogate: bool = True,
         schedule="fixed",
         desired_kl=0.01,
+        predictor_desired_kl: float | None = None,
+        predictor_kl_hard_limit: float | None = None,
         device="cpu",
         normalize_advantage_per_mini_batch=False,
+        symmetry_cfg: dict | None = None,
         normalize_cost_advantage: bool = False,
         cost_viol_loss_coef: float = 0.0,
         k_value: float = 1.0,
@@ -53,13 +56,7 @@ class FPPO(PPO):
         k_decay: float = 1.0,
         k_min: float = 0.0,
         k_violation_threshold: float = 0.02,
-        use_preconditioner: bool = True,
-        preconditioner_beta: float = 0.999,
-        preconditioner_eps: float = 1.0e-8,
-        use_momentum: bool = True,
-        momentum_beta: float = 0.9,
-        slack_penalty: float = 1.0,
-        active_set_threshold: float = 0.05,
+        reconstruction_loss_coef: float = 0.0,
         softproj_max_iters: int = 40,
         softproj_tol: float = 1.0e-6,
         constraint_limits: list[float] | tuple[float, ...] | None = None,
@@ -72,21 +69,7 @@ class FPPO(PPO):
         constraint_curriculum_check_interval: int = 20,
         constraint_curriculum_alpha: float = 0.8,
         constraint_curriculum_shrink: float = 0.97,
-        feasible_first: bool = True,
-        feasible_first_coef: float = 1.0,
-        projection_scale_clip: float = 1.0e3,
-        feasible_cost_margin: float = 1.0e-3,
-        infeasible_improve_ratio: float = 0.01,
-        infeasible_improve_abs: float = 1.0e-3,
-        min_step_size: float = 1.0e-7,
-        relax_cost_margin: float = 0.2,
         step_size_adaptive: bool = True,
-        step_size_up: float = 1.02,
-        step_size_down: float = 0.7,
-        step_size_min: float = 5.0e-5,
-        step_size_max: float = 2.0e-3,
-        target_accept_rate: float = 0.75,
-        step_size_cost_margin: float = 0.2,
         multi_gpu_cfg: dict | None = None,
     ):
         super().__init__(
@@ -108,6 +91,7 @@ class FPPO(PPO):
             desired_kl=desired_kl,
             device=device,
             normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
+            symmetry_cfg=symmetry_cfg,
             normalize_cost_advantage=normalize_cost_advantage,
             cost_limit=cost_limit,
             cost_viol_loss_coef=cost_viol_loss_coef,
@@ -117,24 +101,25 @@ class FPPO(PPO):
             k_decay=k_decay,
             k_min=k_min,
             k_violation_threshold=k_violation_threshold,
+            reconstruction_loss_coef=reconstruction_loss_coef,
             multi_gpu_cfg=multi_gpu_cfg,
         )
         self.step_size = float(step_size)
-        self.delta_safe = float(delta_safe) if delta_safe is not None else None
         self.epsilon_safe = float(epsilon_safe)
         self.delta_kl = float(delta_kl) if delta_kl is not None else None
+        self.predictor_desired_kl = (
+            float(predictor_desired_kl)
+            if predictor_desired_kl is not None
+            else (float(desired_kl) if desired_kl is not None else None)
+        )
+        self.predictor_kl_hard_limit = (
+            float(predictor_kl_hard_limit) if predictor_kl_hard_limit is not None else None
+        )
         self.backtrack_coeff = float(backtrack_coeff)
-        self.max_corrections = int(max_backtracks if max_backtracks is not None else max_corrections)
+        self.max_corrections = max(int(max_backtracks), 1)
         self.max_backtracks = self.max_corrections
         self.projection_eps = float(projection_eps)
         self.use_clipped_surrogate = bool(use_clipped_surrogate)
-        self.use_preconditioner = bool(use_preconditioner)
-        self.preconditioner_beta = float(preconditioner_beta)
-        self.preconditioner_eps = float(preconditioner_eps)
-        self.use_momentum = bool(use_momentum)
-        self.momentum_beta = float(momentum_beta)
-        self.slack_penalty = max(float(slack_penalty), 1.0e-8)
-        self.active_set_threshold = float(active_set_threshold)
         self.softproj_max_iters = max(int(softproj_max_iters), 1)
         self.softproj_tol = max(float(softproj_tol), 1.0e-12)
         self.constraint_limits = (
@@ -183,26 +168,26 @@ class FPPO(PPO):
         self._constraint_curriculum_ema: torch.Tensor | None = None
         self._constraint_curriculum_updates = 0
         self._constraint_curriculum_tighten_count = 0
-        self.min_step_size = float(min_step_size)
+        self._constraint_curriculum_reward_ema: torch.Tensor | None = None
+        self._constraint_curriculum_reward_best: torch.Tensor | None = None
+        self._curriculum_reward_tol_ratio = 0.15
+        self._curriculum_reward_tol_abs = 0.05
+        self._curriculum_predictor_stop_limit = 0.5
         self.step_size_adaptive = bool(step_size_adaptive)
-        self.step_size_up = float(step_size_up)
-        self.step_size_down = float(step_size_down)
-        self.step_size_min = float(step_size_min)
-        self.step_size_max = float(step_size_max)
-        self.target_accept_rate = float(target_accept_rate)
-        self.step_size_cost_margin = float(step_size_cost_margin)
-        self.feasible_first = bool(feasible_first)
-        self.feasible_first_coef = float(feasible_first_coef)
-        self.projection_scale_clip = float(projection_scale_clip)
-        self.feasible_cost_margin = float(feasible_cost_margin)
-        self.infeasible_improve_ratio = float(infeasible_improve_ratio)
-        self.infeasible_improve_abs = float(infeasible_improve_abs)
-        self.relax_cost_margin = float(relax_cost_margin)
+        self._corrector_step_up = 1.01
+        self._corrector_step_down = 0.85
+        self._corrector_step_min = max(self.step_size * 0.5, 1.0e-5)
+        self._corrector_step_max = max(self.step_size * 4.0, self.step_size)
+        self._corrector_target_accept_rate = 0.7
+        self._corrector_margin_threshold = max(self.epsilon_safe, 0.01)
         self._actor_params = self._get_actor_params()
         self._critic_params = list(self.policy.critic.parameters()) + list(self.policy.cost_critic.parameters())
         self.critic_learning_rate = float(learning_rate)
-        self.learning_rate = float(step_size)
-        self.actor_optimizer = optim.Adam(self._actor_params, lr=self.learning_rate)
+        self.predictor_lr = float(learning_rate)
+        self._predictor_lr_min = max(self.predictor_lr * 0.1, 1.0e-6)
+        self._predictor_lr_max = max(self.predictor_lr * 3.0, self._predictor_lr_min)
+        self.learning_rate = self.predictor_lr
+        self.actor_optimizer = optim.Adam(self._actor_params, lr=self.predictor_lr)
         self.critic_optimizer = optim.Adam(self._critic_params, lr=self.critic_learning_rate)
         self.optimizer = {"actor": self.actor_optimizer, "critic": self.critic_optimizer}
         self.train_metrics: dict[str, float] = {}
@@ -223,6 +208,7 @@ class FPPO(PPO):
 
         mean_cost_return = projection_batch["j_cost"].mean().item()
         mean_cost_margin = torch.min(projection_batch["d_tight"] - projection_batch["j_cost"]).item()
+        reward_return_mean = projection_batch["reward_returns"].mean().item()
         sample_violation = (
             projection_batch["cost_terms_ret"] > projection_batch["d_limits"].unsqueeze(0)
         ).any(dim=1)
@@ -240,21 +226,28 @@ class FPPO(PPO):
             clamp=1.0e6,
         )
         self._step_constraint_scale(mean_cost_violation)
-        self._adapt_step_size(
+        self._adapt_corrector_step_size(
             accept_rate=correction_metrics["accept_rate"],
             mean_cost_margin=mean_cost_margin,
         )
-        self._set_actor_learning_rate(self.step_size)
-        curriculum_metrics = self._update_constraint_limit_curriculum(projection_batch["j_cost"])
+        curriculum_metrics = self._update_constraint_limit_curriculum(
+            projection_batch["j_cost"],
+            reward_return_mean=reward_return_mean,
+            predictor_stop_rate=predictor_metrics["stop_rate"],
+        )
+
+        constraint_diag_metrics = self._constraint_diagnostic_metrics(projection_batch)
 
         self.train_metrics = {
             "mean_cost_return": mean_cost_return,
+            "reward_return_mean": reward_return_mean,
             "cost_limit_margin": mean_cost_margin,
             "cost_violation_rate": mean_cost_violation,
             "viol_loss": viol_loss.item(),
             "k_value": self.k_value,
             "step_size": correction_metrics["effective_step_size"],
             "base_step_size": self.step_size,
+            "predictor_lr": self.predictor_lr,
             "effective_step_ratio": correction_metrics["effective_step_ratio"],
             "accept_rate": correction_metrics["accept_rate"],
             "reject_rate": 1.0 - correction_metrics["accept_rate"],
@@ -268,8 +261,12 @@ class FPPO(PPO):
             "recovery_mode_rate": correction_metrics["recovery_mode_rate"],
             "predictor_kl": predictor_metrics["mean_kl"],
             "predictor_stop_rate": predictor_metrics["stop_rate"],
+            "predictor_updates": predictor_metrics["updates"],
+            "predictor_update_ratio": predictor_metrics["update_ratio"],
+            "reconstruction": predictor_metrics["mean_reconstruction"],
         }
         self.train_metrics.update(curriculum_metrics)
+        self.train_metrics.update(constraint_diag_metrics)
 
         self.storage.clear()
         return {
@@ -278,22 +275,54 @@ class FPPO(PPO):
             "surrogate": predictor_metrics["mean_surrogate"],
             "entropy": predictor_metrics["mean_entropy"],
             "viol": viol_loss.item(),
+            "reconstruction": predictor_metrics["mean_reconstruction"],
         }
+
+    def _constraint_diagnostic_metrics(
+        self,
+        projection_batch: dict[str, torch.Tensor | None],
+    ) -> dict[str, float]:
+        j_cost = projection_batch.get("j_cost")
+        d_limits = projection_batch.get("d_limits")
+        d_tight = projection_batch.get("d_tight")
+        if j_cost is None or d_limits is None or d_tight is None:
+            return {}
+        if not torch.is_tensor(j_cost) or not torch.is_tensor(d_limits) or not torch.is_tensor(d_tight):
+            return {}
+
+        names = list(self.constraint_names) if self.constraint_names is not None else []
+        metrics: dict[str, float] = {}
+        for idx in range(int(j_cost.numel())):
+            name = names[idx] if idx < len(names) else f"constraint_{idx}"
+            name = str(name).replace(" ", "_")
+            cost = float(j_cost[idx].item())
+            limit = float(d_limits[idx].item())
+            tight_limit = float(d_tight[idx].item())
+            denom = max(abs(limit), 1.0e-8)
+            metrics[f"constraint_cost/{name}"] = cost
+            metrics[f"constraint_limit/{name}"] = limit
+            metrics[f"constraint_tight_limit/{name}"] = tight_limit
+            metrics[f"constraint_ratio/{name}"] = cost / denom
+            metrics[f"constraint_margin/{name}"] = tight_limit - cost
+        return metrics
 
     def _run_ppo_predictor(self) -> dict[str, float]:
         mean_surrogate_loss = 0.0
         mean_entropy = 0.0
         mean_kl = 0.0
+        mean_reconstruction_loss = 0.0
         kl_checks = 0
+        planned_updates = max(int(self.num_learning_epochs) * int(self.num_mini_batches), 1)
         updates = 0
-        stop_count = 0
-        stop_predictor = False
-        self._set_actor_learning_rate(self.learning_rate)
+        skipped_batches = 0
+        self._set_predictor_learning_rate(self.predictor_lr)
+        predictor_desired_kl = self.predictor_desired_kl
+        predictor_kl_hard_limit = self._predictor_kl_hard_limit_value()
 
         generator = self._mini_batch_generator()
         for (
             obs_batch,
-            _critic_obs_batch,
+            critic_obs_batch,
             actions_batch,
             _target_values_batch,
             advantages_batch,
@@ -336,7 +365,11 @@ class FPPO(PPO):
                 clamp=1.0e2,
             ).clamp_min(1.0e-6)
 
-            self.policy.act(obs_batch, masks=masks_batch, hidden_states=hid_states_batch[0])
+            self._policy_act(
+                obs_batch,
+                masks=masks_batch,
+                hidden_states=hid_states_batch[0],
+            )
             actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
             mu_batch = self.policy.action_mean
             sigma_batch = self.policy.action_std
@@ -349,34 +382,34 @@ class FPPO(PPO):
             mean_kl += kl_mean.item()
             kl_checks += 1
 
-            if self.desired_kl is not None and self.schedule == "adaptive":
+            if predictor_desired_kl is not None and self.schedule == "adaptive":
                 if self.gpu_global_rank == 0:
-                    if kl_mean > self.desired_kl * 2.0:
-                        self.learning_rate = max(self.step_size_min, self.learning_rate / 1.5)
-                    elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
-                        self.learning_rate = min(self.step_size_max, self.learning_rate * 1.5)
+                    if kl_mean > predictor_desired_kl * 2.0:
+                        predictor_lr = max(self._predictor_lr_min, self.predictor_lr / 1.5)
+                    elif kl_mean < predictor_desired_kl / 2.0 and kl_mean > 0.0:
+                        predictor_lr = min(self._predictor_lr_max, self.predictor_lr * 1.5)
+                    else:
+                        predictor_lr = self.predictor_lr
+                else:
+                    predictor_lr = self.predictor_lr
                 if self.is_multi_gpu:
-                    lr_tensor = torch.tensor(self.learning_rate, device=self.device)
+                    lr_tensor = torch.tensor(predictor_lr, device=self.device)
                     torch.distributed.broadcast(lr_tensor, src=0)
-                    self.learning_rate = lr_tensor.item()
-                self._set_actor_learning_rate(self.learning_rate)
+                    predictor_lr = lr_tensor.item()
+                self._set_predictor_learning_rate(predictor_lr)
 
-            if torch.isfinite(kl_mean) and kl_mean.item() > self._kl_hard_limit():
+            if torch.isfinite(kl_mean) and kl_mean.item() > predictor_kl_hard_limit:
                 if self.gpu_global_rank == 0:
-                    self.learning_rate = max(self.step_size_min, self.learning_rate / 2.0)
+                    predictor_lr = max(self._predictor_lr_min, self.predictor_lr / 2.0)
+                else:
+                    predictor_lr = self.predictor_lr
                 if self.is_multi_gpu:
-                    lr_tensor = torch.tensor(self.learning_rate, device=self.device)
+                    lr_tensor = torch.tensor(predictor_lr, device=self.device)
                     torch.distributed.broadcast(lr_tensor, src=0)
-                    self.learning_rate = lr_tensor.item()
-                self._set_actor_learning_rate(self.learning_rate)
-                stop_count += 1
-                stop_predictor = True
-                break
-
-            if self.desired_kl is not None and torch.isfinite(kl_mean) and kl_mean.item() > self.desired_kl:
-                stop_count += 1
-                stop_predictor = True
-                break
+                    predictor_lr = lr_tensor.item()
+                self._set_predictor_learning_rate(predictor_lr)
+                skipped_batches += 1
+                continue
 
             ratio = self._safe_ratio(actions_log_prob_batch, old_actions_log_prob_batch).reshape(-1)
             adv_flat = advantages_batch.reshape(-1)
@@ -390,7 +423,14 @@ class FPPO(PPO):
                 surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
             else:
                 surrogate_loss = surrogate.mean()
-            loss = surrogate_loss - self.entropy_coef * entropy_batch.mean()
+            reconstruction_loss, weighted_reconstruction_loss = self._history_reconstruction_loss(
+                obs_batch, critic_obs_batch
+            )
+            loss = (
+                surrogate_loss
+                + weighted_reconstruction_loss
+                - self.entropy_coef * entropy_batch.mean()
+            )
             loss = self._sanitize_tensor(
                 loss,
                 nan=0.0,
@@ -411,14 +451,25 @@ class FPPO(PPO):
             updates += 1
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy_batch.mean().item()
+            mean_reconstruction_loss += reconstruction_loss.item()
 
         denom = max(updates, 1)
         return {
             "mean_surrogate": mean_surrogate_loss / denom,
             "mean_entropy": mean_entropy / denom,
             "mean_kl": mean_kl / max(kl_checks, 1),
-            "stop_rate": float(stop_predictor or stop_count > 0),
+            "mean_reconstruction": mean_reconstruction_loss / denom,
+            "stop_rate": float(skipped_batches / planned_updates),
+            "updates": float(updates),
+            "update_ratio": float(updates / planned_updates),
         }
+
+    def _predictor_kl_hard_limit_value(self) -> float:
+        if self.predictor_kl_hard_limit is not None:
+            return float(self.predictor_kl_hard_limit)
+        if self.predictor_desired_kl is None:
+            return self.kl_hard_abs
+        return max(self.kl_hard_abs, float(self.predictor_desired_kl) * self.kl_hard_ratio)
 
     def _update_value_functions(self) -> tuple[float, float]:
         mean_value_loss = 0.0
@@ -572,7 +623,7 @@ class FPPO(PPO):
             actions_batch,
             _target_values_batch,
             _advantages_batch,
-            _returns_batch,
+            returns_batch,
             _cost_values_batch,
             cost_returns_batch,
             cost_advantages_batch,
@@ -591,6 +642,13 @@ class FPPO(PPO):
 
         cost_returns_batch = self._sanitize_tensor(
             cost_returns_batch,
+            nan=0.0,
+            posinf=1.0e4,
+            neginf=-1.0e4,
+            clamp=1.0e4,
+        )
+        returns_batch = self._sanitize_tensor(
+            returns_batch,
             nan=0.0,
             posinf=1.0e4,
             neginf=-1.0e4,
@@ -643,6 +701,7 @@ class FPPO(PPO):
             "d_limits": d_limits,
             "d_tight": d_tight,
             "j_cost": j_cost,
+            "reward_returns": returns_batch,
         }
 
     def _compute_constraint_gradients(
@@ -656,7 +715,7 @@ class FPPO(PPO):
                 device=self.device,
             )
 
-        self.policy.act(
+        self._policy_act(
             projection_batch["obs"],
             masks=projection_batch["masks"],
             hidden_states=projection_batch["hid_actor"],
@@ -710,6 +769,18 @@ class FPPO(PPO):
         if kl_limit is None:
             kl_limit = self.desired_kl if self.desired_kl is not None else float("inf")
 
+        projected_delta = theta_projected - theta_anchor
+        projected_step_norm = torch.linalg.vector_norm(projected_delta)
+        step_budget = float(getattr(self, "step_size", 1.0)) * math.sqrt(
+            max(projected_delta.numel(), 1)
+        )
+        if not torch.isfinite(projected_step_norm) or projected_step_norm.item() <= 0.0 or step_budget <= 0.0:
+            step_ratio = 0.0
+            limited_delta = torch.zeros_like(projected_delta)
+        else:
+            step_ratio = min(1.0, step_budget / max(projected_step_norm.item(), 1.0e-12))
+            limited_delta = projected_delta * step_ratio
+
         eta = 1.0
         accepted = False
         reject_kl_count = 0
@@ -718,10 +789,10 @@ class FPPO(PPO):
 
         total_checks = max(self.max_corrections, 1)
         for _ in range(total_checks):
-            theta_candidate = theta_anchor + eta * (theta_projected - theta_anchor)
+            theta_candidate = theta_anchor + eta * limited_delta
             self._set_actor_param_vector(theta_candidate)
             final_kl = self._evaluate_candidate(projection_batch)
-            kl_ok = (not torch.isfinite(final_kl).item()) or final_kl.item() <= kl_limit
+            kl_ok = torch.isfinite(final_kl).item() and final_kl.item() <= kl_limit
             if kl_ok:
                 accepted = True
                 break
@@ -735,13 +806,13 @@ class FPPO(PPO):
             self._set_actor_param_vector(theta_anchor)
             final_kl = self._evaluate_candidate(projection_batch)
         else:
-            self._set_actor_param_vector(theta_anchor + eta * (theta_projected - theta_anchor))
+            self._set_actor_param_vector(theta_anchor + eta * limited_delta)
 
         theta_final = self._actor_param_vector().detach()
         effective_step_size = torch.norm(theta_final - theta_anchor).item()
         return {
             "accept_rate": float(accepted),
-            "effective_step_ratio": eta,
+            "effective_step_ratio": eta * step_ratio,
             "effective_step_size": effective_step_size,
             "final_kl": final_kl.item(),
             "active_constraints": float(active_count),
@@ -961,7 +1032,12 @@ class FPPO(PPO):
             ).float()
         return float(progress.mean().item())
 
-    def _update_constraint_limit_curriculum(self, j_cost: torch.Tensor) -> dict[str, float]:
+    def _update_constraint_limit_curriculum(
+        self,
+        j_cost: torch.Tensor,
+        reward_return_mean: float | None = None,
+        predictor_stop_rate: float | None = None,
+    ) -> dict[str, float]:
         if j_cost.ndim != 1:
             j_cost = j_cost.reshape(-1)
         j_cost = self._sanitize_tensor(
@@ -992,6 +1068,7 @@ class FPPO(PPO):
             "curriculum_update_count": float(self._constraint_curriculum_updates),
             "curriculum_gate_count": 0.0,
             "curriculum_gate_ready": 0.0,
+            "curriculum_perf_gate_ready": 1.0,
             "curriculum_gate_max_ratio": 0.0,
             "curriculum_gate_min_margin": 0.0,
             "curriculum_limit_mean": float(current_limits.mean().item()) if num_constraints > 0 else 0.0,
@@ -999,6 +1076,12 @@ class FPPO(PPO):
             "curriculum_progress": self._constraint_curriculum_progress(current_limits, final_limits)
             if num_constraints > 0
             else 1.0,
+            "curriculum_reward_return_mean": float(reward_return_mean) if reward_return_mean is not None else 0.0,
+            "curriculum_reward_ema": 0.0,
+            "curriculum_reward_best": 0.0,
+            "curriculum_predictor_stop_rate": float(predictor_stop_rate)
+            if predictor_stop_rate is not None
+            else 0.0,
             "curriculum_tighten_triggered": 0.0,
             "curriculum_tighten_count": float(self._constraint_curriculum_tighten_count),
         }
@@ -1016,6 +1099,51 @@ class FPPO(PPO):
                 1.0 - self.constraint_curriculum_ema_decay
             ) * j_cost
         self._constraint_curriculum_ema = ema_cost.detach().cpu()
+
+        performance_ready = True
+        reward_ema_state = getattr(self, "_constraint_curriculum_reward_ema", None)
+        reward_best_state = getattr(self, "_constraint_curriculum_reward_best", None)
+        if reward_return_mean is not None:
+            reward_tensor = self._sanitize_tensor(
+                torch.as_tensor(reward_return_mean, device=j_cost.device, dtype=torch.float32),
+                nan=0.0,
+                posinf=1.0e6,
+                neginf=-1.0e6,
+                clamp=1.0e6,
+            )
+            if reward_ema_state is None:
+                reward_ema = reward_tensor
+            else:
+                reward_ema = reward_ema_state.to(device=j_cost.device, dtype=reward_tensor.dtype)
+                reward_ema = self.constraint_curriculum_ema_decay * reward_ema + (
+                    1.0 - self.constraint_curriculum_ema_decay
+                ) * reward_tensor
+            if reward_best_state is None:
+                reward_best = reward_ema
+            else:
+                reward_best = torch.maximum(
+                    reward_best_state.to(device=j_cost.device, dtype=reward_tensor.dtype),
+                    reward_ema,
+                )
+            self._constraint_curriculum_reward_ema = reward_ema.detach().cpu()
+            self._constraint_curriculum_reward_best = reward_best.detach().cpu()
+            reward_tol_ratio = float(getattr(self, "_curriculum_reward_tol_ratio", 0.15))
+            reward_tol_abs = float(getattr(self, "_curriculum_reward_tol_abs", 0.05))
+            tolerance = max(abs(reward_best.item()) * reward_tol_ratio, reward_tol_abs)
+            performance_ready = bool(reward_ema.item() >= (reward_best.item() - tolerance))
+            metrics["curriculum_reward_ema"] = float(reward_ema.item())
+            metrics["curriculum_reward_best"] = float(reward_best.item())
+        elif reward_ema_state is not None:
+            metrics["curriculum_reward_ema"] = float(reward_ema_state.item())
+        elif reward_best_state is not None:
+            metrics["curriculum_reward_best"] = float(reward_best_state.item())
+
+        if predictor_stop_rate is not None:
+            performance_ready = performance_ready and (
+                float(predictor_stop_rate)
+                <= float(getattr(self, "_curriculum_predictor_stop_limit", 0.5))
+            )
+        metrics["curriculum_perf_gate_ready"] = float(performance_ready)
 
         gate_indices = self._resolve_constraint_gate_indices(num_constraints)
         metrics["curriculum_gate_count"] = float(len(gate_indices))
@@ -1040,7 +1168,7 @@ class FPPO(PPO):
             self._constraint_curriculum_updates % self.constraint_curriculum_check_interval == 0
         )
         has_tightening_room = bool(torch.any(current_limits > (final_limits + 1.0e-8)).item())
-        if should_check and ready_to_tighten and has_tightening_room:
+        if should_check and ready_to_tighten and performance_ready and has_tightening_room:
             tightened_limits = torch.minimum(
                 current_limits,
                 torch.maximum(final_limits, current_limits * self.constraint_curriculum_shrink),
@@ -1061,6 +1189,7 @@ class FPPO(PPO):
 
     def state_dict(self) -> dict:
         return {
+            "predictor_lr": self.predictor_lr,
             "step_size": self.step_size,
             "constraint_limits_current": (
                 self.constraint_limits_current.detach().clone()
@@ -1074,15 +1203,27 @@ class FPPO(PPO):
             ),
             "constraint_curriculum_updates": self._constraint_curriculum_updates,
             "constraint_curriculum_tighten_count": self._constraint_curriculum_tighten_count,
+            "constraint_curriculum_reward_ema": (
+                self._constraint_curriculum_reward_ema.detach().clone()
+                if self._constraint_curriculum_reward_ema is not None
+                else None
+            ),
+            "constraint_curriculum_reward_best": (
+                self._constraint_curriculum_reward_best.detach().clone()
+                if self._constraint_curriculum_reward_best is not None
+                else None
+            ),
         }
 
     def load_state_dict(self, state_dict: dict) -> None:
         if not state_dict:
             return
+        predictor_lr = state_dict.get("predictor_lr")
+        if predictor_lr is not None:
+            self._set_predictor_learning_rate(float(predictor_lr))
         step_size = state_dict.get("step_size")
         if step_size is not None:
             self.step_size = float(step_size)
-            self._set_actor_learning_rate(self.step_size)
         current_limits = state_dict.get("constraint_limits_current")
         if current_limits is not None:
             if not torch.is_tensor(current_limits):
@@ -1099,6 +1240,16 @@ class FPPO(PPO):
         tighten_count = state_dict.get("constraint_curriculum_tighten_count")
         if tighten_count is not None:
             self._constraint_curriculum_tighten_count = int(tighten_count)
+        reward_ema_state = state_dict.get("constraint_curriculum_reward_ema")
+        if reward_ema_state is not None:
+            if not torch.is_tensor(reward_ema_state):
+                reward_ema_state = torch.as_tensor(reward_ema_state, dtype=torch.float32)
+            self._constraint_curriculum_reward_ema = reward_ema_state.detach().clone().cpu()
+        reward_best_state = state_dict.get("constraint_curriculum_reward_best")
+        if reward_best_state is not None:
+            if not torch.is_tensor(reward_best_state):
+                reward_best_state = torch.as_tensor(reward_best_state, dtype=torch.float32)
+            self._constraint_curriculum_reward_best = reward_best_state.detach().clone().cpu()
 
     def _project_safe_set(
         self,
@@ -1143,7 +1294,7 @@ class FPPO(PPO):
         projection_batch: dict[str, torch.Tensor | None],
     ) -> torch.Tensor:
         with torch.inference_mode():
-            self.policy.act(
+            self._policy_act(
                 projection_batch["obs"],
                 masks=projection_batch["masks"],
                 hidden_states=projection_batch["hid_actor"],
@@ -1162,22 +1313,24 @@ class FPPO(PPO):
             )
         return kl
 
-    def _set_actor_learning_rate(self, learning_rate: float):
-        self.learning_rate = float(learning_rate)
+    def _set_predictor_learning_rate(self, learning_rate: float):
+        self.predictor_lr = float(learning_rate)
+        self.learning_rate = self.predictor_lr
         for param_group in self.actor_optimizer.param_groups:
-            param_group["lr"] = self.learning_rate
+            param_group["lr"] = self.predictor_lr
 
-    def _adapt_step_size(self, accept_rate: float, mean_cost_margin: float):
+    def _adapt_corrector_step_size(self, accept_rate: float, mean_cost_margin: float):
         if not self.step_size_adaptive:
-            self.step_size = self.learning_rate
             return
-        if mean_cost_margin > self.step_size_cost_margin and accept_rate >= self.target_accept_rate:
-            self.step_size = min(self.step_size_max, self.learning_rate * self.step_size_up)
-        elif mean_cost_margin < 0.0 or accept_rate < self.target_accept_rate * 0.5:
-            self.step_size = max(self.step_size_min, self.learning_rate * self.step_size_down)
+        if (
+            mean_cost_margin > self._corrector_margin_threshold
+            and accept_rate >= self._corrector_target_accept_rate
+        ):
+            self.step_size = min(self._corrector_step_max, self.step_size * self._corrector_step_up)
+        elif mean_cost_margin < 0.0 or accept_rate < self._corrector_target_accept_rate * 0.5:
+            self.step_size = max(self._corrector_step_min, self.step_size * self._corrector_step_down)
         else:
-            self.step_size = min(max(self.learning_rate, self.step_size_min), self.step_size_max)
-        self.learning_rate = self.step_size
+            self.step_size = min(max(self.step_size, self._corrector_step_min), self._corrector_step_max)
 
     def _step_constraint_scale(self, cost_violation: float | None = None):
         if cost_violation is None:

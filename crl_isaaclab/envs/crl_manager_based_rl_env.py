@@ -11,13 +11,13 @@ from .crl_manager_based_rl_env_cfg import CRLManagerBasedRLEnvCfg
 from .crl_manager_based_env import CRLManagerBasedEnv
 from isaaclab.ui.widgets import ManagerLiveVisualizer
 from isaacsim.core.version import get_version
-from isaaclab.managers import CommandManager, CurriculumManager, TerminationManager, RewardManager
+from isaaclab.managers import CommandManager, CurriculumManager, TerminationManager
 from isaaclab.envs.common import VecEnvStepReturn
 from collections.abc import Sequence
 from typing import Any, ClassVar
 import math, torch
 import numpy as np
-from crl_isaaclab.managers.crl_reward_manager import CRLRewardManager
+from crl_isaaclab.managers.crl_reward_manager import CRLCostManager, CRLRewardManager
 
 
 class CRLManagerBasedRLEnv(CRLManagerBasedEnv, gym.Env):
@@ -62,7 +62,7 @@ class CRLManagerBasedRLEnv(CRLManagerBasedEnv, gym.Env):
         print("[INFO] Reward Manager: ", self.reward_manager)
         # -- cost manager (CMDP constraints)
         if getattr(self.cfg, "costs", None) is not None:
-            self.cost_manager = RewardManager(self.cfg.costs, self)
+            self.cost_manager = CRLCostManager(self.cfg.costs, self)
             print("[INFO] Cost Manager: ", self.cost_manager)
         # -- curriculum manager
         self.curriculum_manager = CurriculumManager(self.cfg.curriculum, self)
@@ -92,6 +92,74 @@ class CRLManagerBasedRLEnv(CRLManagerBasedEnv, gym.Env):
         for idx, name in enumerate(term_names):
             cost_terms[str(name)] = step_reward[:, idx]
         return cost_terms
+
+    @staticmethod
+    def _resolve_joint_ids(asset_cfg) -> slice | list[int]:
+        joint_ids = getattr(asset_cfg, "joint_ids", None) if asset_cfg is not None else None
+        return slice(None) if joint_ids is None else joint_ids
+
+    def _collect_constraint_diagnostics(self) -> dict[str, torch.Tensor]:
+        diagnostics: dict[str, torch.Tensor] = {}
+        costs_cfg = getattr(self.cfg, "costs", None)
+        if costs_cfg is None:
+            return diagnostics
+
+        robot = self.scene["robot"]
+
+        pos_cfg = getattr(costs_cfg, "prob_joint_pos", None)
+        if pos_cfg is not None:
+            asset_cfg = pos_cfg.params.get("asset_cfg", None)
+            joint_ids = self._resolve_joint_ids(asset_cfg)
+            joint_pos = robot.data.joint_pos
+            limits = getattr(robot.data, "soft_joint_pos_limits", None)
+            if joint_pos is not None and limits is not None:
+                if not isinstance(joint_ids, slice):
+                    joint_pos = joint_pos[:, joint_ids]
+                    limits = limits[:, joint_ids] if limits.ndim == 3 else limits[joint_ids]
+                limits = limits.to(device=joint_pos.device, dtype=joint_pos.dtype)
+                if limits.ndim == 2:
+                    limits = limits.unsqueeze(0).expand(joint_pos.shape[0], -1, -1)
+                lower_margin = joint_pos - limits[..., 0]
+                upper_margin = limits[..., 1] - joint_pos
+                min_margin = torch.minimum(lower_margin, upper_margin)
+                diagnostics["ConstraintDiag/raw_joint_pos_margin_min"] = min_margin.min(dim=1).values
+                diagnostics["ConstraintDiag/raw_joint_pos_margin_p05"] = torch.quantile(
+                    min_margin, 0.05, dim=1
+                )
+                diagnostics["ConstraintDiag/raw_joint_pos_margin_mean"] = min_margin.mean(dim=1)
+                diagnostics["ConstraintDiag/raw_joint_pos_violation_frac"] = (min_margin < 0.0).float().mean(dim=1)
+
+        torque_cfg = getattr(costs_cfg, "prob_joint_torque", None)
+        if torque_cfg is not None:
+            asset_cfg = torque_cfg.params.get("asset_cfg", None)
+            joint_ids = self._resolve_joint_ids(asset_cfg)
+            torque = getattr(robot.data, "applied_torque", None)
+            if torque is not None:
+                if not isinstance(joint_ids, slice):
+                    torque = torque[:, joint_ids]
+                limit = float(torque_cfg.params.get("limit", 1.0))
+                soft_ratio = float(torque_cfg.params.get("soft_ratio", 1.0))
+                abs_torque = torch.abs(torque)
+                limit_t = torch.as_tensor(limit, device=abs_torque.device, dtype=abs_torque.dtype)
+                ratio = abs_torque / torch.clamp(limit_t, min=torch.finfo(abs_torque.dtype).eps)
+                diagnostics["ConstraintDiag/raw_joint_torque_ratio_mean"] = ratio.mean(dim=1)
+                diagnostics["ConstraintDiag/raw_joint_torque_ratio_p95"] = torch.quantile(
+                    ratio, 0.95, dim=1
+                )
+                diagnostics["ConstraintDiag/raw_joint_torque_ratio_max"] = ratio.max(dim=1).values
+                diagnostics["ConstraintDiag/raw_joint_torque_margin_min"] = (
+                    limit_t - abs_torque
+                ).min(dim=1).values
+                diagnostics["ConstraintDiag/raw_joint_torque_violation_frac"] = (
+                    abs_torque > limit_t
+                ).float().mean(dim=1)
+                if soft_ratio < 1.0:
+                    soft_start = limit_t * min(max(soft_ratio, 1.0e-6), 0.999999)
+                    denom = torch.clamp(limit_t - soft_start, min=torch.finfo(abs_torque.dtype).eps)
+                    soft_violation = torch.clamp((abs_torque - soft_start) / denom, min=0.0, max=1.0)
+                    diagnostics["ConstraintDiag/raw_joint_torque_soft_violation_mean"] = soft_violation.mean(dim=1)
+
+        return diagnostics
 
     def setup_manager_visualizers(self):
         """Creates live visualizers for manager terms."""
@@ -203,6 +271,9 @@ class CRLManagerBasedRLEnv(CRLManagerBasedEnv, gym.Env):
         # logging: terrain level stats
         if "log" not in self.extras:
             self.extras["log"] = dict()
+        constraint_diagnostics = self._collect_constraint_diagnostics()
+        if constraint_diagnostics:
+            self.extras["log"].update(constraint_diagnostics)
         # note: terrain level hist/mean logging removed to reduce duplicate console/W&B noise
         # return observations, rewards, resets and extras
         return (
@@ -339,6 +410,9 @@ class CRLManagerBasedRLEnv(CRLManagerBasedEnv, gym.Env):
             cost_info = self.cost_manager.reset(env_ids)
             if cost_info:
                 for key, value in cost_info.items():
+                    if key.startswith("Episode_Cost/"):
+                        self.extras["log"][key] = value
+                        continue
                     if key.startswith("Episode_Reward/"):
                         self.extras["log"]["Episode_Cost/" + key.split("/", 1)[1]] = value
                     else:

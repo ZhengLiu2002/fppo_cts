@@ -1,0 +1,24 @@
+{
+  "extends": "galileo/studies/algo_compare_student_fair",
+  "meta": {
+    "description": "Student distillation tuning preset: lower distillation learning rate, stronger history reconstruction, and a wider student history latent for better command tracking.",
+    "study": "algo_compare_student_distill_tuned",
+    "parent": "galileo/studies/algo_compare_student_fair"
+  },
+  "agent": {
+    "policy": {
+      "history_latent_dim": 64,
+      "actor": {
+        "history_latent_dim": 64,
+        "state_history_encoder": {
+          "channel_size": 64
+        }
+      }
+    },
+    "algorithm": {
+      "learning_rate": 0.0003,
+      "reconstruction_loss_coef": 0.25
+    }
+  },
+  "env": {}
+}

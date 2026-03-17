@@ -128,7 +128,6 @@ def lin_vel_x_command_threshold(
 
     return torch.tensor(lin_x_level, device=env.device)
 
-
 def ang_vel_z_command_threshold(
     env: ManagerBasedRLEnv,
     env_ids: Sequence[int],
@@ -145,6 +144,7 @@ def ang_vel_z_command_threshold(
     command = env.command_manager.get_term("base_velocity")
     max_episode_length = env.max_episode_length
     ang_z_level = float(getattr(command.cfg, "ang_z_level", 0.0))
+    lin_x_level = float(getattr(command.cfg, "lin_x_level", 0.0))
     max_ang_z_level = float(getattr(command.cfg, "max_ang_z_level", 1.0))
     ang_z_level_step = float(getattr(command.cfg, "ang_z_level_step", 1.0))
     ang_z_level_step = max(ang_z_level_step, 0.0)
@@ -164,38 +164,28 @@ def ang_vel_z_command_threshold(
             env.common_step_counter >= warmup_steps
             and (env.common_step_counter - last_step) >= min_progress_steps
         )
-        if should_advance and float(getattr(command.cfg, "lin_x_level", 0.0)) < float(min_lin_x_level):
+        if should_advance and lin_x_level < float(min_lin_x_level):
             should_advance = False
         if should_advance and terrain_level_threshold is not None:
             terrain_levels = getattr(getattr(env.scene, "terrain", None), "terrain_levels", None)
             if terrain_levels is not None:
                 terrain_level_mean = float(torch.mean(terrain_levels.float()).item())
                 should_advance = terrain_level_mean >= float(terrain_level_threshold)
+            else:
+                should_advance = False
         if should_advance and error_threshold is not None:
             asset_name = getattr(command.cfg, "asset_name", "robot")
             asset: Articulation = env.scene[asset_name]
             cmd = env.command_manager.get_command("base_velocity")
             cmd_speed = torch.abs(cmd[:, 2])
-            # Prefer evaluating turning curriculum on true yaw-command environments.
-            yaw_env_mask = getattr(command, "is_yaw_env", None)
-            if torch.is_tensor(yaw_env_mask):
-                yaw_env_mask = yaw_env_mask.to(device=cmd.device, dtype=torch.bool)
-                if yaw_env_mask.ndim > 1:
-                    yaw_env_mask = yaw_env_mask.squeeze(-1)
-                if torch.any(yaw_env_mask):
-                    candidate_mask = yaw_env_mask
-                else:
-                    candidate_mask = torch.ones_like(cmd_speed, dtype=torch.bool)
-            else:
-                candidate_mask = torch.ones_like(cmd_speed, dtype=torch.bool)
-
-            active = candidate_mask & (cmd_speed > max(float(min_command_speed), 0.0))
-            denom = torch.clamp(candidate_mask.float().sum(), min=1.0)
-            active_ratio = float((active.float().sum() / denom).item())
+            active = cmd_speed > max(float(min_command_speed), 0.0)
+            active_ratio = float(active.float().mean().item())
             should_advance = active_ratio >= max(float(min_active_ratio), 0.0)
             if should_advance and torch.any(active):
                 yaw_err = torch.abs(cmd[active, 2] - asset.data.root_ang_vel_b[active, 2])
                 should_advance = float(yaw_err.mean().item()) <= float(error_threshold)
+            else:
+                should_advance = False
 
     if should_advance and (ang_z_level < max_ang_z_level):
         if ang_z_level_step > 0.0:

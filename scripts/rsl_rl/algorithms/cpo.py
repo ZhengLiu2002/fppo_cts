@@ -49,11 +49,13 @@ class CPO(PPO):
         desired_kl=0.01,
         device="cpu",
         normalize_advantage_per_mini_batch=False,
+        symmetry_cfg: dict | None = None,
         normalize_cost_advantage: bool = False,
         cost_viol_loss_coef: float = 0.0,
         k_value: float = 1.0,
         k_growth: float = 1.0,
         k_max: float = 1.0,
+        reconstruction_loss_coef: float = 0.0,
         cg_iters: int = 10,
         cg_damping: float = 1e-2,
         fvp_sample_freq: int = 1,
@@ -79,12 +81,14 @@ class CPO(PPO):
             desired_kl=desired_kl,
             device=device,
             normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
+            symmetry_cfg=symmetry_cfg,
             normalize_cost_advantage=normalize_cost_advantage,
             cost_limit=cost_limit,
             cost_viol_loss_coef=cost_viol_loss_coef,
             k_value=k_value,
             k_growth=k_growth,
             k_max=k_max,
+            reconstruction_loss_coef=reconstruction_loss_coef,
             constraint_limits=constraint_limits,
             multi_gpu_cfg=multi_gpu_cfg,
         )
@@ -133,7 +137,7 @@ class CPO(PPO):
         return unique_params
 
     def _make_distribution(self, obs_batch: torch.Tensor) -> torch.distributions.Normal:
-        self.policy.act(obs_batch)
+        self._policy_act(obs_batch)
         mean = self._sanitize_tensor(
             self.policy.action_mean,
             nan=0.0,

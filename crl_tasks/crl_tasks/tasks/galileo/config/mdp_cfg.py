@@ -57,10 +57,10 @@ BASE_BODY_NAMES = ["base_link"]
 
 @configclass
 class CommandsCfg:
-    """前进速度指令（针对直线跑道栏杆）
+    """全向底盘速度指令。
 
-    - 仅在 X 方向采样 0.6~1.2 m/s，保持训练聚焦在跨栏核心动作。
-    - heading 控制设置轻微偏移范围，利于生成左右对称的轨迹。
+    - 训练时按地形采样不同的 `(vx, vy, wz)` 指令范围。
+    - x/yaw 方向使用 terrain-specific curriculum 扩展范围。
     """
 
     base_velocity = crl_commands.CRLCommandCfg(
@@ -74,19 +74,12 @@ class CommandsCfg:
         ang_z_level_step=GalileoDefaults.command.ang_z_level_step,
         min_abs_lin_vel_x=GalileoDefaults.command.min_abs_lin_vel_x,
         min_abs_lin_vel_y=GalileoDefaults.command.min_abs_lin_vel_y,
-        heading_control_stiffness=GalileoDefaults.command.heading_control_stiffness,
-        heading_command=True,
-        rel_heading_envs=GalileoDefaults.command.default.heading_command_prob,
         rel_standing_envs=GalileoDefaults.command.default.standing_command_prob,
-        align_to_crl_goal=False,
         terrain_level_range_scaling=False,
         ranges=crl_commands.CRLCommandCfg.Ranges(
             lin_vel_x=GalileoDefaults.command.default.lin_vel_x,
             lin_vel_y=GalileoDefaults.command.default.lin_vel_y,
             ang_vel_z=GalileoDefaults.command.default.ang_vel_z,
-            heading=GalileoDefaults.command.default.heading,
-            heading_command_prob=GalileoDefaults.command.default.heading_command_prob,
-            yaw_command_prob=GalileoDefaults.command.default.yaw_command_prob,
             standing_command_prob=GalileoDefaults.command.default.standing_command_prob,
             start_curriculum_lin_x=GalileoDefaults.command.default.start_curriculum_lin_x,
             start_curriculum_ang_z=GalileoDefaults.command.default.start_curriculum_ang_z,
@@ -175,13 +168,28 @@ class StudentObservationsCfg:
             params={"command_name": "base_velocity"},
             scale=(2.0, 2.0, 0.25),
         )
+        proprio_history = ObsTerm(
+            func=crl_obs.PolicyHistory,
+            params={
+                "history_length": GalileoDefaults.obs.student.actor_num_hist,
+                "include_base_lin_vel": False,
+                "command_name": "base_velocity",
+            },
+        )
 
     @configclass
     class CriticCfg(_PrivilegedObsGroupCfg):
         pass
 
+    @configclass
+    class TeacherCfg(_PrivilegedObsGroupCfg):
+        """Teacher-policy observations exposed during distillation."""
+
+        pass
+
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
+    teacher: TeacherCfg = TeacherCfg()
 
 
 @configclass
@@ -217,205 +225,11 @@ class TeacherCostsCfg:
             "asset_cfg": LEG_JOINT_CFG,
         },
     )
-    prob_body_contact = CostTerm(
-        func=mdp_constraints.body_contact_prob_constraint,
-        weight=0.10,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "foot_body_names": FOOT_BODY_NAMES,
-            # Use a practical threshold to avoid counting tiny contact-noise spikes.
-            "threshold": 10.0,
-            "limit": 1.0,
-        },
-    )
-    prob_com_height = CostTerm(
-        func=mdp_constraints.com_height_prob_constraint,
-        weight=0.45,
-        params={
-            # Keep COM height inside a narrow physically stable band at convergence.
-            "height_range": (0.41, 0.44),
-            "cost_limit": 1.0,
-            # Start from a tolerant but still locomotion-relevant height envelope.
-            "height_range_start": (0.22, 0.56),
-            "height_range_end": (0.41, 0.44),
-            "schedule_start_step": GalileoDefaults.curriculum.command_warmup_steps,
-            "schedule_end_step": (
-                GalileoDefaults.curriculum.command_warmup_steps
-                + 10 * GalileoDefaults.curriculum.command_min_progress_steps
-            ),
-            # Flat-terrain training: use world-frame height to avoid height-map bias.
-            "terrain_sensor_cfg": None,
-            "height_offset": 0.0,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    prob_com_angle = CostTerm(
-        func=mdp_constraints.com_angle_prob_constraint,
-        weight=0.45,
-        params={
-            # Keep base tilt as a separate feasibility constraint for clearer diagnostics.
-            "max_angle_rad": 0.60,
-            "cost_limit": 1.0,
-            # Start permissive, then tighten to the final stance-quality target.
-            "max_angle_rad_start": 0.85,
-            "max_angle_rad_end": 0.60,
-            "schedule_start_step": GalileoDefaults.curriculum.command_warmup_steps,
-            "schedule_end_step": (
-                GalileoDefaults.curriculum.command_warmup_steps
-                + 10 * GalileoDefaults.curriculum.command_min_progress_steps
-            ),
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    prob_gait_pattern = CostTerm(
-        func=mdp_constraints.gait_pattern_prob_constraint,
-        weight=0.65,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "foot_body_names": FOOT_BODY_NAMES,
-            "gait_frequency": 1.5,
-            "phase_offsets": [0.0, 0.5, 0.5, 0.0],
-            "stance_ratio": 0.5,
-            "contact_threshold": 8.0,
-            "command_name": "base_velocity",
-            "min_frequency": None,
-            "max_frequency": None,
-            "max_command_speed": None,
-            "frequency_scale": 0.0,
-            "min_command_speed": 0.10,
-            "min_base_speed": None,
-            "max_abs_yaw_cmd": 0.10,
-            "asset_cfg": SceneEntityCfg("robot"),
-            "limit": 1.0,
-            # Start from a tolerant gait consistency target and tighten over time.
-            "gait_frequency_start": 1.0,
-            "gait_frequency_end": 1.8,
-            "stance_ratio_start": 0.62,
-            "stance_ratio_end": 0.5,
-            "phase_offset_scale_start": 0.60,
-            "phase_offset_scale_end": 1.0,
-            "phase_tolerance_start": 0.18,
-            "phase_tolerance_end": 0.04,
-            "schedule_start_step": GalileoDefaults.curriculum.command_warmup_steps,
-            "schedule_end_step": (
-                GalileoDefaults.curriculum.command_warmup_steps
-                + 10 * GalileoDefaults.curriculum.command_min_progress_steps
-            ),
-        },
-    )
-    orthogonal_velocity = CostTerm(
-        func=mdp_constraints.orthogonal_velocity_constraint,
-        weight=0.10,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "command_name": "base_velocity",
-            "limit": 3.0,
-        },
-    )
-    contact_velocity = CostTerm(
-        func=mdp_constraints.contact_velocity_constraint,
-        weight=0.10,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "foot_body_names": FOOT_BODY_NAMES,
-            "contact_threshold": 5.0,
-            "limit": 0.8,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    foot_clearance = CostTerm(
-        func=mdp_constraints.foot_clearance_constraint,
-        weight=0.15,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "foot_body_names": FOOT_BODY_NAMES,
-            # Replace reward shaping with a minimum-swing-clearance constraint.
-            "min_height": 0.05,
-            "height_offset": 0.0,
-            "contact_threshold": 5.0,
-            "gait_frequency": 1.5,
-            "phase_offsets": [0.0, 0.5, 0.5, 0.0],
-            "stance_ratio": 0.5,
-            "terrain_sensor_cfg": SceneEntityCfg("height_scanner"),
-            "limit": 0.05,
-            "asset_cfg": SceneEntityCfg("robot"),
-            "command_name": "base_velocity",
-            "min_command_speed": 0.10,
-            "min_base_speed": None,
-            "max_abs_yaw_cmd": 0.10,
-        },
-    )
-    foot_height_limit = CostTerm(
-        func=mdp_constraints.foot_height_limit_constraint,
-        weight=0.10,
-        params={
-            "foot_body_names": FOOT_BODY_NAMES,
-            "height_offset": 0.0,
-            "terrain_sensor_cfg": SceneEntityCfg("height_scanner"),
-            "limit": 0.4,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
-    symmetric = CostTerm(
-        func=mdp_constraints.symmetric_constraint,
-        weight=0.30,
-        params={
-            "joint_pair_indices": [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11)],
-            "action_pair_indices": [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11)],
-            "asset_cfg": SceneEntityCfg("robot"),
-            "include_actions": True,
-            "command_name": "base_velocity",
-            "min_command_speed": 0.10,
-            "min_base_speed": None,
-            "max_abs_yaw_cmd": 0.10,
-            "limit": 5.0,
-        },
-    )
-    base_contact_force = CostTerm(
-        func=mdp_constraints.base_contact_force_constraint,
-        weight=0.05,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "body_names": BASE_BODY_NAMES,
-            "threshold": 10.0,
-            "limit": 1.0,
-        },
-    )
 
 
 @configclass
-class StudentCostsCfg:
-    """Simple proprioceptive constraints for the blind student."""
-
-    prob_joint_pos = CostTerm(
-        func=mdp_constraints.joint_pos_prob_constraint,
-        weight=1.0,
-        params={
-            "margin": 0.0,
-            "limit": 1.0,
-            "asset_cfg": LEG_JOINT_CFG,
-        },
-    )
-    prob_joint_vel = CostTerm(
-        func=mdp_constraints.joint_vel_prob_constraint,
-        weight=1.0,
-        params={
-            "limit": 15.0,
-            "soft_ratio": 0.8,
-            "cost_limit": 1.0,
-            "asset_cfg": LEG_JOINT_CFG,
-        },
-    )
-    prob_joint_torque = CostTerm(
-        func=mdp_constraints.joint_torque_prob_constraint,
-        weight=1.0,
-        params={
-            "limit": 80.0,
-            "soft_ratio": 0.8,
-            "cost_limit": 1.0,
-            "asset_cfg": LEG_JOINT_CFG,
-        },
-    )
+class StudentCostsCfg(TeacherCostsCfg):
+    """Mirror the teacher feasibility constraints for the student."""
 
 
 # Backwards compatibility alias.
@@ -424,51 +238,40 @@ CostsCfg = TeacherCostsCfg
 
 @configclass
 class StudentRewardsCfg:
-    """FPPO 奖励配置（盲走，不使用外感知传感器）。"""
+    """Teacher-aligned student rewards with mild proprioceptive-policy tuning."""
+
+    only_positive_rewards: bool = True
 
     track_lin_vel_xy_exp = RewTerm(
         func=rewards.track_lin_vel_xy_exp,
-        weight=3.0,
+        weight=1.0,
         params={
             "command_name": "base_velocity",
-            "std": 0.2,
-            "min_command_speed": 0.0,
+            "std": 0.25,
+            "min_command_speed": 0.05,
         },
     )
     track_ang_vel_z_exp = RewTerm(
         func=rewards.track_ang_vel_z_exp,
-        weight=1.5,
+        weight=0.5,
         params={
             "command_name": "base_velocity",
-            "std": 0.2,
+            "std": 0.25,
             "min_command_speed": 0.05,
         },
     )
-    flat_orientation_l2 = RewTerm(
-        func=rewards.flat_orientation_l2, 
-        weight=-0.1
-    )
     joint_torques_l2 = RewTerm(
         func=rewards.joint_torque_l2,
-        weight=-4.0e-07,
+        weight=-2.5e-7,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
-    joint_vel_l2 = RewTerm(
-        func=rewards.joint_vel_l2, 
-        weight=-2.0e-5
-    )
-    joint_power_distribution = RewTerm(
-        func=rewards.joint_power_distribution,
-        weight=-1.0e-6,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_joint")},
-    )
     joint_acc_l2 = RewTerm(
-        func=rewards.joint_acc_l2, 
-        weight=-3.0e-9
+        func=rewards.joint_acc_l2,
+        weight=-2.5e-9,
     )
     dof_error_l2 = RewTerm(
         func=rewards.dof_error_l2,
-        weight=-0.05,
+        weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     hip_pos_l2 = RewTerm(
@@ -477,87 +280,74 @@ class StudentRewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint")},
     )
     action_rate_l2 = RewTerm(
-        func=rewards.action_rate_l2, 
-        weight=-0.002
+        func=rewards.action_rate_l2,
+        weight=-1.0e-4,
     )
     action_smoothness_l2 = RewTerm(
-        func=rewards.action_smoothness_l2, 
-        weight=-0.002
+        func=rewards.action_smoothness_l2,
+        weight=-0.0, # -5.0e-5
     )
     lin_vel_z_l2 = RewTerm(
-        func=rewards.lin_vel_z_l2, 
-        weight=-0.1
+        func=rewards.lin_vel_z_l2,
+        weight=-2.0,
     )
     ang_vel_xy_l2 = RewTerm(
-        func=rewards.ang_vel_xy_l2, 
-        weight=-0.05
-    )
-    base_height_l2_fix = RewTerm(
-        func=rewards.base_height_l2_fix,
-        weight=0.0,
-        params={
-            "target_height": 0.426,
-            "sensor_cfg": SceneEntityCfg("height_scanner"),
-            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-        },
+        func=rewards.ang_vel_xy_l2,
+        weight=-0.1,
     )
     feet_air_time = RewTerm(
         func=rewards.feet_air_time,
-        weight=0.3,
+        weight=0.8,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.18,
+            "threshold": 0.22,
         },
     )
     feet_slide = RewTerm(
         func=rewards.feet_slide,
-        weight=-0.05,
+        weight=-0.1,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
-            "asset_cfg": SceneEntityCfg("robot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
             "contact_threshold": 5.0,
         },
     )
-    load_sharing = RewTerm(
-        func=rewards.load_sharing,
-        weight=0.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
-            "min_contacts": 2,
-        },
-    )
-    gait_contact_symmetry = RewTerm(
-        func=rewards.gait_contact_symmetry,
-        weight=0.2,
+    trot_phase_reward = RewTerm(
+        func=rewards.trot_phase_reward,
+        weight=0.35,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "left_foot_names": ["FL_foot", "RL_foot"],
-            "right_foot_names": ["FR_foot", "RR_foot"],
-            "command_name": "base_velocity",
-            "min_command_speed": 0.05,
+            "foot_body_names": FOOT_BODY_NAMES,
             "contact_threshold": 5.0,
-            "ema_decay": 0.98,
-            "symmetry_sigma": 0.25,
+            "contact_smoothing": 1.5,
+            "ema_decay": 0.9,
+            "command_name": "base_velocity",
+            "min_command_speed": 0.1,
+            "low_speed_threshold": 0.45,
+            "max_abs_yaw_cmd": 0.2,
         },
     )
     undesired_contacts = RewTerm(
         func=rewards.undesired_contacts,
-        weight=0.0,
+        weight=-0.8,
         params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_thigh"),
-            "threshold": 10.0,
+            "sensor_cfg": SceneEntityCfg(
+                "contact_forces", body_names=[".*_thigh", ".*_calf"]
+            ),
+            "threshold": 1.0,
         },
     )
-
 
 @configclass
 class TeacherRewardsCfg:
     """FPPO 奖励配置（与 FPPO 基线一致）。"""
 
+    only_positive_rewards: bool = True
+
     track_lin_vel_xy_exp = RewTerm(
         func=rewards.track_lin_vel_xy_exp,
-        weight=5.0,
+        weight=1.0,
         params={
             "command_name": "base_velocity",
             "std": 0.25,
@@ -566,147 +356,88 @@ class TeacherRewardsCfg:
     )
     track_ang_vel_z_exp = RewTerm(
         func=rewards.track_ang_vel_z_exp,
-        weight=4.5,
+        weight=0.5,
         params={
             "command_name": "base_velocity",
             "std": 0.25,
             "min_command_speed": 0.05,
         },
     )
-    flat_orientation_l2 = RewTerm(
-        func=rewards.flat_orientation_l2, 
-        weight=0.0,  # old: -0.0
-    )
-    base_height_l2_fix = RewTerm(
-        func=rewards.base_height_l2_fix,
-        weight=0.0,  # old: -0.0
-        params={
-            "target_height": 0.426,
-            # Flat-terrain training: avoid coupling to sparse ray-hit outliers.
-            "sensor_cfg": None,
-            "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
-        },
-    )
     joint_torques_l2 = RewTerm(
         func=rewards.joint_torque_l2,
-        weight=-6.0e-7,  # old: -6.0e-7
+        weight=-2.0e-7,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
-    joint_vel_l2 = RewTerm(
-        func=rewards.joint_vel_l2, weight=0.0  # old: -5.0e-6
-    )
-    joint_power_distribution = RewTerm(
-        func=rewards.joint_power_distribution,
-        weight=-1.0e-6,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_joint")},
-    )
+
     joint_acc_l2 = RewTerm(
         func=rewards.joint_acc_l2, 
-        weight=0.0,  # old: -3.0e-9
+        weight=-2.5e-9,
     )
     dof_error_l2 = RewTerm(
-        func=rewards.dof_error_l2, 
-        weight=0.0,  # old: -5.0e-3
+        func=rewards.dof_error_l2,
+        weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     hip_pos_l2 = RewTerm(
         func=rewards.hip_pos_l2,
-        weight=0.0,  # old: -5.0e-3
+        weight=-0.1,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint")},
     )
     action_rate_l2 = RewTerm(
         func=rewards.action_rate_l2,
-        weight=0.0  # old: -6.0e-5
-    )
-    action_smoothness_l2 = RewTerm(
-        func=rewards.action_smoothness_l2, 
-        weight=-3.5e-4
+        weight=-1.0e-4,
     )
     lin_vel_z_l2 = RewTerm(
         func=rewards.lin_vel_z_l2, 
-        weight=0.0  # old: -0.1
+        weight=-2.0
     )
     ang_vel_xy_l2 = RewTerm(
         func=rewards.ang_vel_xy_l2, 
-        weight=0.0  # old: -0.01
+        weight=-0.1
     )
     feet_air_time = RewTerm(
         func=rewards.feet_air_time,
-        weight=0.0,  # old: 1.0
+        weight=1.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.10,
+            "threshold": 0.25,
         },
     )
     feet_slide = RewTerm(
         func=rewards.feet_slide,
-        weight=0.0,  # old: -0.01
+        weight=-0.1,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
             "contact_threshold": 5.0,
         },
     )
-    load_sharing = RewTerm(
-        func=rewards.load_sharing,
-        weight=0.0,  # old: 0.0
-        params={"sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot")},
-    )
-    gait_contact_symmetry = RewTerm(
-        func=rewards.gait_contact_symmetry,
-        weight=0.0,
+    trot_phase_reward = RewTerm(
+        func=rewards.trot_phase_reward,
+        weight=0.5,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "left_foot_names": ["FL_foot", "RL_foot"],
-            "right_foot_names": ["FR_foot", "RR_foot"],
-            "command_name": "base_velocity",
-            "min_command_speed": 0.05,
+            "foot_body_names": FOOT_BODY_NAMES,
             "contact_threshold": 5.0,
-            "ema_decay": 0.98,
-            "symmetry_sigma": 0.25,
-        },
-    )
-    fore_hind_contact_balance = RewTerm(
-        func=rewards.gait_contact_symmetry,
-        weight=0.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "left_foot_names": ["FL_foot", "FR_foot"],
-            "right_foot_names": ["RL_foot", "RR_foot"],
+            "contact_smoothing": 1.5,
+            "ema_decay": 0.9,
             "command_name": "base_velocity",
             "min_command_speed": 0.1,
-            "contact_threshold": 5.0,
-            "ema_decay": 0.98,
-            "symmetry_sigma": 0.3,
+            "low_speed_threshold": 0.45,
+            "max_abs_yaw_cmd": 0.2,
         },
     )
     undesired_contacts = RewTerm(
         func=rewards.undesired_contacts,
-        weight=0.0,  # old: -2.0
+        weight=-1.0,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces", body_names=[".*_thigh", ".*_calf"]
             ),
-            "threshold": 10.0,
+            "threshold": 1.0,
         },
     )
-    foot_clearance = RewTerm(
-        func=rewards.foot_clearance,
-        weight=0.0,  # old: 0.0
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
-            "command_name": "base_velocity",
-            "target_height": 0.05,
-        },
-    )
-    joint_pos_limits = RewTerm(
-        func=rewards.joint_pos_limits,
-        weight=0.0,  # old: -0.0
-        params={"asset_cfg": LEG_JOINT_CFG},
-    )
-
 
 @configclass
 class TerminationsCfg:
@@ -831,19 +562,6 @@ class EventCfg:
         },
     )
 
-    # Kt 增益随机化（需要扩展功能，当前不支持）
-    # 注意：当前代码库中 randomize_actuator_gains 不支持 Kt 随机化
-    # 如果需要此功能，需要扩展 events.randomize_actuator_gains 函数
-    # randomize_actuator_kt_gains = EventTerm(
-    #     func=events.randomize_actuator_gains,
-    #     mode="reset",
-    #     params={
-    #         "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),
-    #         "kt_distribution_params": (0.8, 1.2),  # Kt 乘性
-    #         "operation": "scale",
-    #     },
-    # )
-
     # ========== 五、外力扰动（interval，训练中周期施加） ==========
     # 速度扰动（对基座施加瞬时速度扰动）
     push_robot_vel = EventTerm(
@@ -916,6 +634,44 @@ class CurriculumCfg:
             "min_command_speed": GalileoDefaults.curriculum.ang_eval_min_command_speed,
             "min_active_ratio": GalileoDefaults.curriculum.command_min_active_ratio,
             "min_lin_x_level": GalileoDefaults.curriculum.ang_min_lin_x_level,
+        },
+    )
+
+
+@configclass
+class StudentCurriculumCfg:
+    """Teacher curriculum with slightly slower command progression for the blind student."""
+
+    terrain_levels = CurrTerm(
+        func=curriculums.terrain_levels_vel,
+        params={
+            "move_up_ratio": GalileoDefaults.curriculum.terrain_move_up_ratio,
+            "move_down_ratio": GalileoDefaults.curriculum.terrain_move_down_ratio,
+        },
+    )
+    lin_vel_x_command_threshold = CurrTerm(
+        func=curriculums.lin_vel_x_command_threshold,
+        params={
+            "episodes_per_level": GalileoDefaults.curriculum.episodes_per_level,
+            "warmup_steps": int(GalileoDefaults.curriculum.command_warmup_steps * 1.5),
+            "min_progress_steps": int(GalileoDefaults.curriculum.command_min_progress_steps * 1.25),
+            "terrain_level_threshold": GalileoDefaults.curriculum.command_terrain_gate_level,
+            "error_threshold": GalileoDefaults.curriculum.lin_tracking_error_threshold,
+            "min_command_speed": GalileoDefaults.curriculum.lin_eval_min_command_speed,
+            "min_active_ratio": GalileoDefaults.curriculum.command_min_active_ratio,
+        },
+    )
+    ang_vel_z_command_threshold = CurrTerm(
+        func=curriculums.ang_vel_z_command_threshold,
+        params={
+            "episodes_per_level": GalileoDefaults.curriculum.episodes_per_level,
+            "warmup_steps": int(GalileoDefaults.curriculum.command_warmup_steps * 1.5),
+            "min_progress_steps": int(GalileoDefaults.curriculum.command_min_progress_steps * 1.25),
+            "terrain_level_threshold": GalileoDefaults.curriculum.command_terrain_gate_level,
+            "error_threshold": GalileoDefaults.curriculum.ang_tracking_error_threshold,
+            "min_command_speed": GalileoDefaults.curriculum.ang_eval_min_command_speed,
+            "min_active_ratio": GalileoDefaults.curriculum.command_min_active_ratio,
+            "min_lin_x_level": max(float(GalileoDefaults.curriculum.ang_min_lin_x_level), 0.4),
         },
     )
 

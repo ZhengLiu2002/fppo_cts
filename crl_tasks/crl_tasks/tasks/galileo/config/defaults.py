@@ -11,10 +11,11 @@ import torch
 import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
 from crl_isaaclab.actuators.crl_actuator_cfg import CRLDCMotorCfg
+from crl_isaaclab.terrains import CRLTerrainImporter
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ViewerCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.terrains import TerrainImporter, TerrainImporterCfg
+from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.terrains.terrain_generator_cfg import TerrainGeneratorCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
@@ -100,7 +101,7 @@ class GalileoBaseSceneCfg(InteractiveSceneCfg):
     )
 
     terrain = TerrainImporterCfg(
-        class_type=TerrainImporter,
+        class_type=CRLTerrainImporter,
         prim_path="/World/ground",
         terrain_type="generator",
         terrain_generator=None,
@@ -166,36 +167,48 @@ GALILEO_ROUGH_TERRAIN_CFG = TerrainGeneratorCfg(
     use_cache=False,
     curriculum=True,
     sub_terrains={
-        # "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
-        #     proportion=0.20,
-        #     step_height_range=(0.05, 0.2),
-        #     step_width=0.3,
-        #     platform_width=3.0,
-        #     border_width=1.0,
-        #     holes=False,
-        # ),
-        # "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
-        #     proportion=0.20,
-        #     step_height_range=(0.05, 0.2),
-        #     step_width=0.3,
-        #     platform_width=3.0,
-        #     border_width=1.0,
-        #     holes=False,
-        # ),
-        # "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
-        #     proportion=0.15,
-        #     slope_range=(0.0, 0.4),
-        #     platform_width=2.0,
-        #     border_width=0.25,
-        # ),
-        # "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
-        #     proportion=0.15,
-        #     slope_range=(0.0, 0.4),
-        #     platform_width=2.0,
-        #     border_width=0.25,
-        # ),
+        "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
+            proportion=0.15,
+            step_height_range=(0.05, 0.2),
+            step_width=0.3,
+            platform_width=3.0,
+            border_width=1.0,
+            holes=False,
+        ),
+        "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
+            proportion=0.15,
+            step_height_range=(0.05, 0.2),
+            step_width=0.3,
+            platform_width=3.0,
+            border_width=1.0,
+            holes=False,
+        ),
+        "boxes": terrain_gen.MeshRandomGridTerrainCfg(
+            proportion=0.15,
+            grid_width=0.45,
+            grid_height_range=(0.05, 0.2),
+            platform_width=2.0,
+        ),
+        "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
+            proportion=0.15,
+            noise_range=(0.02, 0.10),
+            noise_step=0.02,
+            border_width=0.25,
+        ),
+        "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
+            proportion=0.15,
+            slope_range=(0.0, 0.4),
+            platform_width=2.0,
+            border_width=0.25,
+        ),
+        "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
+            proportion=0.15,
+            slope_range=(0.0, 0.4),
+            platform_width=2.0,
+            border_width=0.25,
+        ),
         "plane_run": terrain_gen.MeshPlaneTerrainCfg(
-            proportion=1.0,
+            proportion=0.10,
         ),
     },
 )
@@ -213,17 +226,17 @@ class GalileoDefaults:
         # episodes_per_level is retained for backward compatibility with legacy
         # time-based logic in curriculums.py.
         episodes_per_level = 15
-        terrain_move_up_ratio = 0.3
-        terrain_move_down_ratio = 0.25
+        terrain_move_up_ratio = 0.5
+        terrain_move_down_ratio = 0.1
         command_warmup_steps = 4800
-        command_min_progress_steps = 3600
-        command_terrain_gate_level = 2.0
+        command_min_progress_steps = 7200
+        command_terrain_gate_level = 4.0
         command_min_active_ratio = 0.12
-        lin_tracking_error_threshold = 0.21
-        ang_tracking_error_threshold = 0.22
+        lin_tracking_error_threshold = 0.22
+        ang_tracking_error_threshold = 0.30
         lin_eval_min_command_speed = 0.20
         ang_eval_min_command_speed = 0.16
-        ang_min_lin_x_level = 0.50
+        ang_min_lin_x_level = 0.32
 
     class sim:
         dt = 0.0025
@@ -253,6 +266,7 @@ class GalileoDefaults:
             actor_num_scan = 132
             actor_num_priv_explicit = 5
             actor_num_priv_latent = 0
+            actor_history_latent_dim = 0
             actor_num_hist = 0
             num_actor_obs = (
                 actor_num_prop
@@ -285,7 +299,8 @@ class GalileoDefaults:
             actor_num_scan = 0
             actor_num_priv_explicit = 0
             actor_num_priv_latent = 0
-            actor_num_hist = 0
+            actor_history_latent_dim = 32
+            actor_num_hist = 20
             num_actor_obs = (
                 actor_num_prop
                 + actor_num_scan
@@ -311,7 +326,7 @@ class GalileoDefaults:
             )
 
         # 观测历史相关（如需）
-        obs_history_length = 5
+        obs_history_length = 20
         action_history_length = 3
         clip_actions = 100.0
         clip_obs = 100.0
@@ -335,115 +350,90 @@ class GalileoDefaults:
         max_ang_z_level: float = 1.0
         lin_x_level_step: float = 0.01
         ang_z_level_step: float = 0.01
-        min_abs_lin_vel_x: float = 0.1
+        min_abs_lin_vel_x: float = 0.0
         min_abs_lin_vel_y: float = 0.0
-        heading_control_stiffness = 1.0
 
         # 默认配置（用于 CommandsCfg 的初始化，不在地形特定配置中）
         class default:
-            heading_command_prob: float = 0.4
             standing_command_prob: float = 0.05
-            yaw_command_prob: float = 0.55
-            lin_vel_x = (0.2, 0.55)
-            lin_vel_y = (-0.1, 0.1)
-            ang_vel_z = (-0.22, 0.22)
-            heading = (-math.pi / 3, math.pi / 3)
-            start_curriculum_lin_x = (0.2, 0.45)
-            start_curriculum_ang_z = (-0.12, 0.12)
-            max_curriculum_lin_x = (0.45, 1.0)
-            max_curriculum_ang_z = (-0.45, 0.45)
+            lin_vel_x = (-0.5, 1.0)
+            lin_vel_y = (-0.5, 0.5)
+            ang_vel_z = (-0.5, 0.5)
+            start_curriculum_lin_x = (-0.15, 0.3)
+            start_curriculum_ang_z = (-0.08, 0.08)
+            max_curriculum_lin_x = (-0.5, 1.0)
+            max_curriculum_ang_z = (-0.5, 0.5)
 
         ranges = {
             "pyramid_stairs": dict(
-                lin_vel_x=(0.2, 0.8),
-                lin_vel_y=(-0.2, 0.2),
-                ang_vel_z=(-0.12, 0.12),
-                heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=0.6,
-                yaw_command_prob=0.35,
+                lin_vel_x=(-0.5, 1.0),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.5, 0.5),
                 standing_command_prob=0.0,
-                start_curriculum_lin_x=(0.15, 0.3),
+                start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(0.7, 0.9),
-                max_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-0.5, 1.0),
+                max_curriculum_ang_z=(-0.5, 0.5),
             ),
             "pyramid_stairs_inv": dict(
-                lin_vel_x=(0.15, 0.75),
-                lin_vel_y=(-0.2, 0.2),
-                ang_vel_z=(-0.12, 0.12),
-                heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=0.6,
-                yaw_command_prob=0.35,
+                lin_vel_x=(-0.5, 1.0),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.5, 0.5),
                 standing_command_prob=0.0,
-                start_curriculum_lin_x=(0.12, 0.25),
+                start_curriculum_lin_x=(-0.12, 0.25),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(0.6, 0.85),
-                max_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-0.5, 1.0),
+                max_curriculum_ang_z=(-0.5, 0.5),
             ),
             "boxes": dict(
-                lin_vel_x=(0.2, 0.8),
-                lin_vel_y=(-0.25, 0.25),
-                ang_vel_z=(-0.12, 0.12),
-                heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=0.6,
-                yaw_command_prob=0.35,
+                lin_vel_x=(-0.5, 1.0),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.5, 0.5),
                 standing_command_prob=0.0,
-                start_curriculum_lin_x=(0.15, 0.3),
+                start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(0.7, 0.9),
-                max_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-0.5, 1.0),
+                max_curriculum_ang_z=(-0.5, 0.5),
             ),
             "random_rough": dict(
-                lin_vel_x=(0.2, 0.85),
-                lin_vel_y=(-0.25, 0.25),
-                ang_vel_z=(-0.12, 0.12),
-                heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=0.6,
-                yaw_command_prob=0.35,
+                lin_vel_x=(-0.5, 1.0),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.5, 0.5),
                 standing_command_prob=0.0,
-                start_curriculum_lin_x=(0.15, 0.3),
+                start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(0.7, 0.95),
-                max_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-0.5, 1.0),
+                max_curriculum_ang_z=(-0.5, 0.5),
             ),
             "hf_pyramid_slope": dict(
-                lin_vel_x=(0.2, 0.8),
-                lin_vel_y=(-0.2, 0.2),
-                ang_vel_z=(-0.12, 0.12),
-                heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=0.6,
-                yaw_command_prob=0.35,
+                lin_vel_x=(-0.5, 1.0),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.5, 0.5),
                 standing_command_prob=0.0,
-                start_curriculum_lin_x=(0.15, 0.3),
+                start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(0.7, 0.9),
-                max_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-0.5, 1.0),
+                max_curriculum_ang_z=(-0.5, 0.5),
             ),
             "hf_pyramid_slope_inv": dict(
-                lin_vel_x=(0.2, 0.8),
-                lin_vel_y=(-0.2, 0.2),
-                ang_vel_z=(-0.12, 0.12),
-                heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=0.6,
-                yaw_command_prob=0.35,
+                lin_vel_x=(-0.5, 1.0),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.5, 0.5),
                 standing_command_prob=0.0,
-                start_curriculum_lin_x=(0.15, 0.3),
+                start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(0.7, 0.9),
-                max_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-0.5, 1.0),
+                max_curriculum_ang_z=(-0.5, 0.5),
             ),
             "plane_run": dict(
-                lin_vel_x=(0.3, 1.1),
-                lin_vel_y=(-0.25, 0.25),
-                ang_vel_z=(-0.22, 0.22),
-                heading=(-math.pi / 3, math.pi / 3),
-                heading_command_prob=0.4,
-                yaw_command_prob=0.55,
+                lin_vel_x=(-0.5, 1.5),
+                lin_vel_y=(-1.0, 1.0),
+                ang_vel_z=(-0.5, 0.5),
                 standing_command_prob=0.0,
-                start_curriculum_lin_x=(0.2, 0.5),
+                start_curriculum_lin_x=(-0.2, 0.5),
                 start_curriculum_ang_z=(-0.12, 0.12),
-                max_curriculum_lin_x=(0.8, 1.2),
-                max_curriculum_ang_z=(-0.45, 0.45),
+                max_curriculum_lin_x=(-0.5, 1.5),
+                max_curriculum_ang_z=(-0.5, 0.5),
             ),
         }
 
@@ -539,9 +529,9 @@ class GalileoDefaults:
         - 应用时按顺序合并：base -> per_algo[name] -> teacher/student_override。
 
         说明：
-        - 我们当前的 `CRLRslRlPpoAlgorithmCfg` 是一个“超集”配置（包含 FPPO/CMDP 扩展字段），
-          对于 PPO/CPO/PCPO 等算法，未用到的字段会被忽略（由算法实现决定）。
-        - 若你希望“严格模式”，可以在应用时对未知字段做过滤/报错（后续可加）。
+        - `FPPO` 现在使用更精简的专用配置类；约束归一化/缩放等 runner 侧逻辑单独走
+          `constraint_adapter`，不再混在算法超参里。
+        - 其他算法继续复用通用 constrained-RL 配置；未用到的字段会在 runner 中过滤。
         """
 
         # 与 CLI `--algo` 对齐：{"fppo","np3o","ppo","ppo_lagrange","cpo","pcpo","focops","distillation"}
@@ -600,6 +590,32 @@ class GalileoDefaults:
         shared_constraint_limits_start = {
             name: float(limit * 2.0) for name, limit in shared_constraint_limits.items()
         }
+        constraint_adapter_base = dict()
+        constraint_adapter_per_algo = {
+            "fppo": dict(
+                enabled=True,
+                ema_beta=0.9,
+                min_scale=1e-3,
+                max_scale=10.0,
+                clip=5.0,
+                huber_delta=0.2,
+                agg_tau=0.5,
+                scale_by_gamma=True,
+                cost_scale=None,
+            ),
+        }
+        symmetry_base = dict(
+            enabled=False,
+            use_data_augmentation=True,
+            use_mirror_loss=False,
+            mirror_loss_coeff=0.0,
+        )
+        symmetry_teacher_override = dict(
+            enabled=True,
+            use_mirror_loss=True,
+            mirror_loss_coeff=0.02,
+        )
+        symmetry_student_override = dict()
 
         # 各算法差异化字段（只写需要的即可）
         per_algo = {
@@ -607,17 +623,18 @@ class GalileoDefaults:
             "fppo": dict(
                 cost_value_loss_coef=1.0,
                 num_learning_epochs=4,
-                desired_kl=0.006,
-                delta_kl=0.01,
-                step_size=4.0e-4,
+                learning_rate=3.0e-4,
+                desired_kl=0.004,
+                delta_kl=0.006,
+                predictor_desired_kl=0.01,
+                predictor_kl_hard_limit=0.02,
+                step_size=1.5e-4,
                 cost_gamma=None,
                 cost_lam=None,
-                delta_safe=0.03,
                 epsilon_safe=0.01,
                 backtrack_coeff=0.5,
                 max_backtracks=10,
                 projection_eps=1e-6,
-                active_set_threshold=0.2,
                 softproj_max_iters=40,
                 softproj_tol=1e-6,
                 constraint_limits=dict(shared_constraint_limits),
@@ -635,31 +652,7 @@ class GalileoDefaults:
                 constraint_curriculum_alpha=0.7,
                 constraint_curriculum_shrink=0.985,
                 normalize_cost_advantage=False,
-                constraint_normalization=False,
-                constraint_norm_beta=0.9,
-                constraint_norm_min_scale=1e-3,
-                constraint_norm_max_scale=10.0,
-                constraint_norm_clip=5.0,
-                constraint_proxy_delta=0.2,
-                constraint_agg_tau=0.5,
-                constraint_scale_by_gamma=True,
-                use_preconditioner=True,
-                preconditioner_beta=0.999,
-                preconditioner_eps=1e-8,
-                feasible_first=True,
-                feasible_first_coef=0.75,
-                feasible_cost_margin=5e-4,
-                infeasible_improve_ratio=0.005,
-                infeasible_improve_abs=5e-4,
-                min_step_size=1e-7,
-                relax_cost_margin=0.2,
                 step_size_adaptive=True,
-                step_size_up=1.01,
-                step_size_down=0.85,
-                step_size_min=1.0e-4,
-                step_size_max=8.0e-4,
-                target_accept_rate=0.7,
-                step_size_cost_margin=0.01,
                 cost_viol_loss_coef=0.05,
                 k_value=0.1,
                 k_growth=1.00005,
@@ -749,12 +742,28 @@ class GalileoDefaults:
         }
 
         # Teacher/Student 差异
+        constraint_adapter_teacher_override = dict(
+            enabled=False,
+        )
+        constraint_adapter_student_override = dict()
+
         teacher_override = dict(
             entropy_coef=0.005,
+            constraint_curriculum_names=[
+                "prob_joint_pos",
+                "prob_joint_vel",
+                "prob_joint_torque",
+            ],
         )
         student_override = dict(
             entropy_coef=0.01,
             dagger_update_freq=1,  # Student stage-2: always use history latent (DAgger)
+            reconstruction_loss_coef=0.1,
+            constraint_curriculum_names=[
+                "prob_joint_pos",
+                "prob_joint_vel",
+                "prob_joint_torque",
+            ],
         )
 
 

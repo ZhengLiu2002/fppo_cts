@@ -11,8 +11,8 @@ from .defaults import GalileoDefaults, VIEWER_CFG
 from .mdp_cfg import (
     ActionsCfg,
     CommandsCfg,
-    CurriculumCfg,
     EventCfg,
+    StudentCurriculumCfg,
     StudentCostsCfg,
     StudentObservationsCfg,
     StudentRewardsCfg,
@@ -45,7 +45,7 @@ class GalileoStudentCRLEnvCfg(CRLManagerBasedRLEnvCfg):
     rewards: StudentRewardsCfg = StudentRewardsCfg()
     costs: StudentCostsCfg = StudentCostsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
-    curriculum: CurriculumCfg = CurriculumCfg()
+    curriculum: StudentCurriculumCfg = StudentCurriculumCfg()
     crl_events = None
     events: EventCfg = EventCfg()
 
@@ -78,7 +78,6 @@ class GalileoStudentCRLEnvCfg_EVAL(GalileoStudentCRLEnvCfg):
         super().__post_init__()
         # 评估/可视化：减少并行环境数量、放宽命令采样，开启调试可视化
         self.scene.num_envs = GalileoDefaults.env.student_eval_num_envs
-        self.commands.base_velocity.debug_vis = True
         self.scene.terrain.max_init_terrain_level = None
         self.commands.base_velocity.resampling_time_range = (60.0, 60.0)
         self.scene.terrain.terrain_generator.difficulty_range = (0.0, 1.0)

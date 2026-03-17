@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict
+from typing import Any
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -64,9 +65,10 @@ class WandbSummaryWriter(SummaryWriter):
         wandb.config.update({"policy_cfg": policy_cfg})
         wandb.config.update({"alg_cfg": alg_cfg})
         try:
-            wandb.config.update({"env_cfg": env_cfg.to_dict()})
+            env_cfg_dict = env_cfg.to_dict()
         except Exception:
-            wandb.config.update({"env_cfg": asdict(env_cfg)})
+            env_cfg_dict = asdict(env_cfg)
+        wandb.config.update({"env_cfg": self._filter_env_cfg_for_logging(env_cfg_dict)})
 
     def add_scalar(self, tag, scalar_value, global_step=None, walltime=None, new_style=False):
         super().add_scalar(
@@ -99,3 +101,38 @@ class WandbSummaryWriter(SummaryWriter):
             return self.name_map[path]
         else:
             return path
+
+    @classmethod
+    def _filter_env_cfg_for_logging(cls, env_cfg: dict[str, Any]) -> dict[str, Any]:
+        filtered_env_cfg = dict(env_cfg)
+        for section_name in ("rewards", "costs"):
+            section_cfg = filtered_env_cfg.get(section_name)
+            if isinstance(section_cfg, dict):
+                filtered_env_cfg[section_name] = cls._filter_manager_cfg(section_cfg)
+        return filtered_env_cfg
+
+    @classmethod
+    def _filter_manager_cfg(cls, manager_cfg: dict[str, Any]) -> dict[str, Any]:
+        filtered_cfg: dict[str, Any] = {}
+        for key, value in manager_cfg.items():
+            if cls._is_zero_weight_term_cfg(value):
+                continue
+            if isinstance(value, dict):
+                filtered_cfg[key] = cls._filter_manager_cfg(value)
+            elif isinstance(value, list):
+                filtered_cfg[key] = [
+                    cls._filter_manager_cfg(item) if isinstance(item, dict) else item
+                    for item in value
+                ]
+            else:
+                filtered_cfg[key] = value
+        return filtered_cfg
+
+    @staticmethod
+    def _is_zero_weight_term_cfg(value: Any) -> bool:
+        if not isinstance(value, dict) or "func" not in value or "weight" not in value:
+            return False
+        weight = value.get("weight")
+        if not isinstance(weight, (float, int)):
+            return False
+        return float(weight) == 0.0

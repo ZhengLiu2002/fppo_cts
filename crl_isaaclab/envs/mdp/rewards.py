@@ -20,6 +20,7 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, yaw_quat
+from crl_isaaclab.terrains.runtime import resolve_env_terrain_names
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -100,8 +101,26 @@ def feet_slide(
     asset: Articulation = env.scene[asset_cfg.name]
 
     foot_body_ids = asset_cfg.body_ids
-    if foot_body_ids is None or (isinstance(foot_body_ids, (list, tuple)) and len(foot_body_ids) == 0):
-        foot_body_ids = sensor_cfg.body_ids
+    sensor_body_ids = sensor_cfg.body_ids
+    sensor_body_count = None
+    if not isinstance(sensor_body_ids, slice):
+        try:
+            sensor_body_count = len(sensor_body_ids)
+        except TypeError:
+            sensor_body_count = None
+
+    if (
+        foot_body_ids is None
+        or isinstance(foot_body_ids, slice)
+        or (isinstance(foot_body_ids, (list, tuple)) and len(foot_body_ids) == 0)
+    ):
+        foot_body_ids = sensor_body_ids
+    elif sensor_body_count is not None:
+        try:
+            if len(foot_body_ids) != sensor_body_count:
+                foot_body_ids = sensor_body_ids
+        except TypeError:
+            foot_body_ids = sensor_body_ids
 
     body_vel = asset.data.body_lin_vel_w[:, foot_body_ids, :2]
     reward = torch.sum(body_vel.norm(dim=-1) * contacts, dim=1)
@@ -114,9 +133,17 @@ def load_sharing(
     min_contacts: int = 2,
     force_threshold: float = 1.0,
     var_scale: float = 1.0,
+    ema_decay: float = 0.995,
     eps: float = 1.0e-6,
 ) -> torch.Tensor:
-    """Reward even load sharing across feet using contact force distribution."""
+    """Reward four-foot participation and balanced support loads.
+
+    This term keeps the original instantaneous load-balancing objective among
+    currently contacting feet, but additionally tracks an EMA duty factor for
+    every foot. The final reward is scaled by the *minimum* per-foot duty
+    participation score, so any foot that stays permanently airborne or planted
+    collapses the reward for the whole robot.
+    """
     contact_sensor: ContactSensor | None = env.scene.sensors.get(sensor_cfg.name, None)
     if contact_sensor is None:
         return torch.zeros(env.scene.num_envs, device=env.device)
@@ -147,6 +174,26 @@ def load_sharing(
 
     reward = torch.clamp(1.0 - var_scale * var, min=0.0)
     reward = torch.where(num_contacts >= min_contacts, reward, torch.zeros_like(reward))
+
+    decay = min(max(float(ema_decay), 0.0), 0.9999)
+    duty_state_name = f"_load_sharing_contact_ema_{sensor_cfg.name}_{num_feet}"
+    duty_ema = getattr(env, duty_state_name, None)
+    contact_float = contact_mask.float()
+    if duty_ema is None or duty_ema.shape != contact_float.shape or duty_ema.device != contact_float.device:
+        duty_ema = contact_float
+    else:
+        duty_ema = decay * duty_ema + (1.0 - decay) * contact_float
+
+    episode_length_buf = getattr(env, "episode_length_buf", None)
+    if episode_length_buf is not None:
+        reset_mask = episode_length_buf <= 1
+        if torch.any(reset_mask):
+            duty_ema[reset_mask] = contact_float[reset_mask]
+    setattr(env, duty_state_name, duty_ema)
+
+    duty_participation = 4.0 * duty_ema * (1.0 - duty_ema)
+    participation_floor = torch.min(duty_participation, dim=1).values.clamp(min=0.0, max=1.0)
+    reward = reward * participation_floor
     return reward
 
 
@@ -222,6 +269,130 @@ def gait_contact_symmetry(
             else:
                 speed_scale = torch.clamp(cmd_speed / max(low_speed_threshold, eps), min=0.0, max=1.0)
                 reward = reward * speed_scale
+
+    return reward
+
+
+def trot_phase_reward(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg,
+    foot_body_names: list[str],
+    contact_threshold: float = 1.0,
+    contact_smoothing: float = 1.0,
+    ema_decay: float = 0.9,
+    duty_ema_decay: float = 0.98,
+    command_name: str | None = None,
+    min_command_speed: float = 0.1,
+    low_speed_threshold: float = 0.4,
+    max_abs_yaw_cmd: float | None = None,
+    eps: float = 1.0e-6,
+) -> torch.Tensor:
+    """Reward natural diagonal trot contact phasing without a hard constraint.
+
+    The reward is decomposed into three factors:
+    1. Instantaneous exclusive diagonal support: only when one diagonal pair is
+       contacting while the other pair is mostly off the ground.
+    2. Diagonal pair switching: both diagonal support pairs must appear over
+       time instead of a single pair staying active.
+    3. Per-foot participation floor: all four feet must contribute over time;
+       any foot staying permanently airborne or planted collapses the reward.
+    """
+    contact_sensor: ContactSensor | None = env.scene.sensors.get(sensor_cfg.name, None)
+    if contact_sensor is None:
+        return torch.zeros(env.scene.num_envs, device=env.device)
+
+    foot_ids, _ = contact_sensor.find_bodies(foot_body_names, preserve_order=True)
+    if len(foot_ids) < 4:
+        warn_name = "_warn_trot_phase_reward_missing_feet"
+        if not getattr(env, warn_name, False):
+            setattr(env, warn_name, True)
+            print(
+                "[WARN] trot_phase_reward: cannot match configured foot names, reward term will output zeros."
+            )
+        return torch.zeros(env.scene.num_envs, device=env.device)
+    foot_ids = foot_ids[:4]
+
+    forces_hist = contact_sensor.data.net_forces_w_history
+    if forces_hist.ndim != 4:
+        return torch.zeros(env.scene.num_envs, device=env.device)
+
+    max_foot_id = max(foot_ids)
+    if forces_hist.shape[2] > max_foot_id:
+        force_mag = forces_hist[:, :, foot_ids, :].norm(dim=-1).max(dim=1)[0]
+    elif forces_hist.shape[1] > max_foot_id:
+        force_mag = forces_hist[:, foot_ids, :, :].norm(dim=-1).max(dim=2)[0]
+    else:
+        return torch.zeros(env.scene.num_envs, device=env.device)
+
+    smoothing = max(float(contact_smoothing), eps)
+    threshold = float(contact_threshold)
+    contact_prob = torch.sigmoid((force_mag - threshold) / smoothing)
+
+    duty_decay = min(max(float(duty_ema_decay), 0.0), 0.9999)
+    duty_state_name = f"_trot_duty_contact_ema_{sensor_cfg.name}_{len(foot_ids)}"
+    duty_ema = getattr(env, duty_state_name, None)
+    if duty_ema is None or duty_ema.shape != contact_prob.shape or duty_ema.device != contact_prob.device:
+        duty_ema = contact_prob
+    else:
+        duty_ema = duty_decay * duty_ema + (1.0 - duty_decay) * contact_prob
+
+    episode_length_buf = getattr(env, "episode_length_buf", None)
+    if episode_length_buf is not None:
+        reset_mask = episode_length_buf <= 1
+        if torch.any(reset_mask):
+            duty_ema[reset_mask] = contact_prob[reset_mask]
+    setattr(env, duty_state_name, duty_ema)
+
+    fl = contact_prob[:, 0]
+    fr = contact_prob[:, 1]
+    rl = contact_prob[:, 2]
+    rr = contact_prob[:, 3]
+
+    exclusive_pair_a = fl * rr * (1.0 - fr) * (1.0 - rl)
+    exclusive_pair_b = fr * rl * (1.0 - fl) * (1.0 - rr)
+    exclusive_diag = torch.clamp(exclusive_pair_a + exclusive_pair_b, min=0.0, max=1.0)
+
+    pair_share = torch.stack((exclusive_pair_a, exclusive_pair_b), dim=1)
+    pair_total = pair_share.sum(dim=1, keepdim=True)
+    normalized_pair_share = pair_share / pair_total.clamp_min(eps)
+
+    pair_decay = min(max(float(ema_decay), 0.0), 0.9999)
+    pair_state_name = f"_trot_pair_share_ema_{sensor_cfg.name}_{len(foot_ids)}"
+    pair_ema = getattr(env, pair_state_name, None)
+    if pair_ema is None or pair_ema.shape != normalized_pair_share.shape or pair_ema.device != normalized_pair_share.device:
+        pair_ema = torch.full_like(normalized_pair_share, 0.5)
+
+    active_pair_mask = pair_total.squeeze(-1) > 0.05
+    if torch.any(active_pair_mask):
+        pair_ema[active_pair_mask] = (
+            pair_decay * pair_ema[active_pair_mask]
+            + (1.0 - pair_decay) * normalized_pair_share[active_pair_mask]
+        )
+
+    if episode_length_buf is not None and torch.any(reset_mask):
+        pair_ema[reset_mask] = 0.5
+    setattr(env, pair_state_name, pair_ema)
+
+    pair_switch = 4.0 * pair_ema[:, 0] * pair_ema[:, 1]
+
+    foot_participation = 4.0 * duty_ema * (1.0 - duty_ema)
+    foot_participation_floor = torch.sqrt(torch.clamp(torch.min(foot_participation, dim=1).values, min=0.0))
+
+    reward = exclusive_diag * torch.sqrt(torch.clamp(pair_switch, min=0.0)) * foot_participation_floor
+
+    if command_name is not None and hasattr(env, "command_manager"):
+        command = env.command_manager.get_command(command_name)
+        if command is not None:
+            cmd_speed = torch.norm(command[:, :2], dim=1)
+            min_speed = max(float(min_command_speed), 0.0)
+            speed_scale = torch.clamp(
+                (cmd_speed - min_speed) / max(float(low_speed_threshold) - min_speed, eps),
+                min=0.0,
+                max=1.0,
+            )
+            reward = reward * speed_scale
+            if max_abs_yaw_cmd is not None and command.shape[1] > 2:
+                reward = reward * (torch.abs(command[:, 2]) <= float(max_abs_yaw_cmd)).float()
 
     return reward
 
@@ -567,21 +738,62 @@ def base_height_l2_fix(
         For flat terrain, target height is in the world frame. For rough terrain,
         sensor readings can adjust the target height to account for the terrain.
     """
-    # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
     if sensor_cfg is not None:
         sensor: RayCaster = env.scene[sensor_cfg.name]
-        # Adjust the target height using the sensor data
-        # 检查sensor数据是否包含inf或nan
         ray_hits = sensor.data.ray_hits_w[..., 2]
         ray_hits = torch.where(torch.isinf(ray_hits), 0.0, ray_hits)
         ray_hits = torch.where(torch.isnan(ray_hits), 0.0, ray_hits)
         adjusted_target_height = target_height + torch.mean(ray_hits, dim=1)
     else:
-        # Use the provided target height directly for flat terrain
         adjusted_target_height = target_height
-    # Compute the L2 squared penalty
     return torch.square(asset.data.root_pos_w[:, 2] - adjusted_target_height)
+
+
+def _flat_terrain_mask(
+    env: ManagerBasedRLEnv,
+    flat_terrain_name: str,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    crl_manager = getattr(env, "crl_manager", None)
+    if crl_manager is not None:
+        try:
+            base_crl = crl_manager._terms.get("base_crl")
+            terrain_names = getattr(base_crl, "env_per_terrain_name", None)
+            if terrain_names is not None:
+                return torch.as_tensor(terrain_names == flat_terrain_name, device=device, dtype=dtype)
+        except Exception:
+            pass
+
+    terrain = getattr(getattr(env, "scene", None), "terrain", None)
+    if terrain is not None:
+        try:
+            env_names = resolve_env_terrain_names(terrain)
+            if env_names is not None:
+                return torch.as_tensor(env_names == flat_terrain_name, device=device, dtype=dtype)
+        except Exception:
+            pass
+
+    return torch.zeros(env.num_envs, device=device, dtype=dtype)
+
+
+def flat_base_height_l2_fix(
+    env: ManagerBasedRLEnv,
+    target_height: float,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    sensor_cfg: SceneEntityCfg | None = None,
+    flat_terrain_name: str = "crl_flat",
+) -> torch.Tensor:
+    """Flat-terrain-only variant of ``base_height_l2_fix``."""
+    reward = base_height_l2_fix(
+        env,
+        target_height=target_height,
+        asset_cfg=asset_cfg,
+        sensor_cfg=sensor_cfg,
+    )
+    flat_mask = _flat_terrain_mask(env, flat_terrain_name, reward.device, reward.dtype)
+    return reward * flat_mask
 
 
 def track_lin_vel_xy_exp(
@@ -626,15 +838,19 @@ def track_ang_vel_z_exp(
 
 
 def flat_orientation_l2(
-    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    flat_terrain_name: str = "crl_flat",
 ) -> torch.Tensor:
     """Penalize non-flat base orientation using L2 squared kernel.
 
-    This is computed by penalizing the xy-components of the projected gravity vector.
+    This is computed by penalizing the xy-components of the projected gravity
+    vector, but only on the configured flat terrain.
     """
-    # extract the used quantities (to enable type-hinting)
     asset: RigidObject = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+    reward = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+    flat_mask = _flat_terrain_mask(env, flat_terrain_name, reward.device, reward.dtype)
+    return reward * flat_mask
 
 
 def lin_vel_z_l2(
@@ -723,24 +939,6 @@ def undesired_contacts(
     net_contact_forces = contact_sensor.data.net_forces_w_history[:, 0, sensor_cfg.body_ids]
     is_contact = torch.max(torch.norm(net_contact_forces, dim=-1), dim=1)[0] > threshold
     return is_contact.float()
-
-
-def joint_pos_limits(
-    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
-) -> torch.Tensor:
-    """Penalize joint positions if they are close to limits."""
-    # extract the used quantities (to enable type-hinting)
-    asset: Articulation = env.scene[asset_cfg.name]
-    # compute limits
-    out_of_limits = -(
-        asset.data.joint_pos[:, asset_cfg.joint_ids]
-        - asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids, 0]
-    ).clip(max=0.0)
-    out_of_limits += (
-        asset.data.joint_pos[:, asset_cfg.joint_ids]
-        - asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids, 1]
-    ).clip(min=0.0)
-    return torch.sum(out_of_limits, dim=1)
 
 
 def applied_torque_limits(

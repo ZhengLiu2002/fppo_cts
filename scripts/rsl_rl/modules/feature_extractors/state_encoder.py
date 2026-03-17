@@ -1,3 +1,5 @@
+import copy
+
 import torch
 import torch.nn as nn
 
@@ -77,3 +79,65 @@ class StateHistoryEncoder(nn.Module):
         output = self.conv_layers(projection.reshape([nd, T, -1]).permute((0, 2, 1)))
         output = self.linear_output(output)
         return output
+
+
+class _TemporalResidualBlock(nn.Module):
+    """Small residual TCN block with causal-same padding for fixed-length history."""
+
+    def __init__(self, channels: int, dilation: int, activation_fn: nn.Module):
+        super().__init__()
+        padding = dilation
+        self.block = nn.Sequential(
+            nn.Conv1d(
+                in_channels=channels,
+                out_channels=channels,
+                kernel_size=3,
+                padding=padding,
+                dilation=dilation,
+            ),
+            copy.deepcopy(activation_fn),
+            nn.Conv1d(
+                in_channels=channels,
+                out_channels=channels,
+                kernel_size=3,
+                padding=padding,
+                dilation=dilation,
+            ),
+        )
+        self.activation = copy.deepcopy(activation_fn)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.activation(self.block(x) + x)
+
+
+class TCNHistoryEncoder(nn.Module):
+    """TCN-20 encoder for student proprio history."""
+
+    def __init__(self, activation_fn, input_size, tsteps, output_size, channel_size):
+        super().__init__()
+        if int(tsteps) != 20:
+            raise ValueError(f"TCNHistoryEncoder expects 20 history steps, got {tsteps}.")
+
+        hidden_channels = max(int(channel_size), int(output_size), 32)
+        self.tsteps = int(tsteps)
+        self.input_projection = nn.Sequential(
+            nn.Linear(input_size, hidden_channels),
+            copy.deepcopy(activation_fn),
+        )
+        self.temporal_backbone = nn.Sequential(
+            _TemporalResidualBlock(hidden_channels, dilation=1, activation_fn=activation_fn),
+            _TemporalResidualBlock(hidden_channels, dilation=2, activation_fn=activation_fn),
+            _TemporalResidualBlock(hidden_channels, dilation=4, activation_fn=activation_fn),
+        )
+        self.output_head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(hidden_channels, output_size),
+        )
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        batch_size = obs.shape[0]
+        projected = self.input_projection(obs.reshape(batch_size * self.tsteps, -1))
+        temporal = projected.reshape(batch_size, self.tsteps, -1).permute(0, 2, 1)
+        encoded = self.temporal_backbone(temporal)
+        return self.output_head(encoded)

@@ -8,10 +8,7 @@ from __future__ import annotations
 import torch
 from typing import TYPE_CHECKING
 
-import omni.log
-
 import isaaclab.sim as sim_utils
-from .crl_terrain_generator import CRLTerrainGenerator
 from isaaclab.terrains.terrain_importer import TerrainImporter
 import numpy as np
 
@@ -20,6 +17,7 @@ if TYPE_CHECKING:
 
 
 class CRLTerrainImporter(TerrainImporter):
+    """Terrain importer that retains the runtime terrain generator instance."""
 
     terrain_prim_paths: list[str]
 
@@ -27,8 +25,35 @@ class CRLTerrainImporter(TerrainImporter):
 
     env_origins: torch.Tensor
 
-    def __init__(self, cfg: TerrainImporterCfg):
+    @staticmethod
+    def _build_curriculum_terrain_names(terrain_generator_cfg) -> np.ndarray | None:
+        sub_terrains = getattr(terrain_generator_cfg, "sub_terrains", None)
+        num_rows = getattr(terrain_generator_cfg, "num_rows", None)
+        num_cols = getattr(terrain_generator_cfg, "num_cols", None)
+        if not isinstance(sub_terrains, dict) or not sub_terrains or num_rows is None or num_cols is None:
+            return None
 
+        proportions = np.asarray(
+            [float(getattr(sub_cfg, "proportion", 0.0)) for sub_cfg in sub_terrains.values()],
+            dtype=np.float64,
+        )
+        total = float(proportions.sum())
+        if total <= 0.0:
+            return None
+        proportions /= total
+        cumsum = np.cumsum(proportions)
+        terrain_names = np.empty((int(num_rows), int(num_cols)), dtype=object)
+        sub_terrain_names = list(sub_terrains.keys())
+
+        for col in range(int(num_cols)):
+            threshold = col / float(num_cols) + 0.001
+            matches = np.where(threshold < cumsum)[0]
+            sub_index = int(matches.min()) if matches.size > 0 else len(sub_terrain_names) - 1
+            terrain_names[:, col] = sub_terrain_names[sub_index]
+
+        return terrain_names
+
+    def __init__(self, cfg: TerrainImporterCfg):
         # check that the config is valid
         cfg.validate()
         # store inputs
@@ -49,18 +74,24 @@ class CRLTerrainImporter(TerrainImporter):
                 raise ValueError(
                     "Input terrain type is 'generator' but no value provided for 'terrain_generator'."
                 )
-            # generate the terrain
-            self._terrain_generator_class = CRLTerrainGenerator(
-                cfg=self.cfg.terrain_generator,
-                device=self.device,
+            terrain_generator_cls = self.cfg.terrain_generator.class_type
+            self._terrain_generator_class = terrain_generator_cls(
+                cfg=self.cfg.terrain_generator, device=self.device
             )
+            if getattr(self._terrain_generator_class, "terrain_names", None) is None and getattr(
+                self.cfg.terrain_generator, "curriculum", False
+            ):
+                self._terrain_generator_class.terrain_names = self._build_curriculum_terrain_names(
+                    self.cfg.terrain_generator
+                )
             self.import_mesh("terrain", self._terrain_generator_class.terrain_mesh)
-            # configure the terrain origins based on the terrain generator
-            self.configure_env_origins(self._terrain_generator_class.terrain_origins)
-            # refer to the flat patches
+            if self.cfg.use_terrain_origins:
+                self.configure_env_origins(self._terrain_generator_class.terrain_origins)
+            else:
+                self.configure_env_origins()
             self._terrain_flat_patches = self._terrain_generator_class.flat_patches
         else:
-            TypeError(f"CRL Terrain type only support generator, not {self.cfg.terrain_type}")
+            raise TypeError(f"CRL Terrain type only support generator, not {self.cfg.terrain_type}")
         # set initial state of debug visualization
         self.set_debug_vis(self.cfg.debug_vis)
 

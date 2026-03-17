@@ -71,18 +71,36 @@ _RUNNER_ONLY_ALG_KEYS = {
     "constraint_curriculum_shrink",
     "rnd_cfg",
     "symmetry_cfg",
-    "constraint_normalization",
-    "constraint_norm_beta",
-    "constraint_norm_min_scale",
-    "constraint_norm_max_scale",
-    "constraint_norm_clip",
-    "constraint_proxy_delta",
-    "constraint_agg_tau",
     "constraint_limits_final",
     "constraint_limits_start",
-    "constraint_scale_by_gamma",
-    "constraint_cost_scale",
 }
+
+_TERMINAL_LOSS_KEYS = (
+    "value_function",
+    "cost_value_function",
+    "surrogate",
+    "viol",
+    "reconstruction",
+    "entropy",
+    "symmetry",
+)
+
+_TERMINAL_COST_KEYS = (
+    "mean_cost_return",
+    "cost_limit_margin",
+    "cost_violation_rate",
+    "kl",
+    "step_size",
+    "effective_step_ratio",
+    "current_max_violation",
+)
+
+_TERMINAL_EP_KEYS = (
+    "Episode_Reward/track_lin_vel_xy_exp",
+    "Episode_Reward/track_ang_vel_z_exp",
+    "Episode_Reward/trot_phase_reward",
+    "Episode_Reward/foot_clearance",
+)
 
 _KEY_CURVE_MIRROR_MAP = {
     "Train/mean_reward": "Compare/Core/reward",
@@ -107,6 +125,33 @@ _KEY_CURVE_MIRROR_MAP = {
     "Cost/current_max_violation": "Compare/FPPO/current_max_violation",
     "Cost/boundary_mode_rate": "Compare/FPPO/boundary_mode_rate",
     "Cost/recovery_mode_rate": "Compare/FPPO/recovery_mode_rate",
+    "Cost/predictor_lr": "Compare/FPPO/predictor_lr",
+    "Cost/predictor_kl": "Compare/FPPO/predictor_kl",
+    "Cost/predictor_stop_rate": "Compare/FPPO/predictor_stop_rate",
+    "Cost/predictor_updates": "Compare/FPPO/predictor_updates",
+    "Cost/curriculum_progress": "Compare/FPPO/curriculum_progress",
+    "Cost/curriculum_perf_gate_ready": "Compare/FPPO/curriculum_perf_gate_ready",
+    "Cost/curriculum_gate_max_ratio": "Compare/FPPO/curriculum_gate_max_ratio",
+    "Cost/curriculum_gate_min_margin": "Compare/FPPO/curriculum_gate_min_margin",
+    "Cost/curriculum_reward_ema": "Compare/FPPO/curriculum_reward_ema",
+    "Cost/curriculum_tighten_count": "Compare/FPPO/curriculum_tighten_count",
+    "Cost/constraint_ratio/prob_joint_pos": "Compare/Diag/constraint_ratio_prob_joint_pos",
+    "Cost/constraint_ratio/prob_joint_torque": "Compare/Diag/constraint_ratio_prob_joint_torque",
+    "Cost/constraint_margin/prob_joint_pos": "Compare/Diag/constraint_margin_prob_joint_pos",
+    "Cost/constraint_margin/prob_joint_torque": "Compare/Diag/constraint_margin_prob_joint_torque",
+    "ConstraintDiag/raw_joint_pos_margin_min": "Compare/Diag/raw_joint_pos_margin_min",
+    "ConstraintDiag/raw_joint_pos_violation_frac": "Compare/Diag/raw_joint_pos_violation_frac",
+    "ConstraintDiag/raw_joint_torque_ratio_mean": "Compare/Diag/raw_joint_torque_ratio_mean",
+    "ConstraintDiag/raw_joint_torque_ratio_max": "Compare/Diag/raw_joint_torque_ratio_max",
+    "ConstraintDiag/raw_joint_torque_violation_frac": "Compare/Diag/raw_joint_torque_violation_frac",
+    "Cost/active_constraint_index": "Compare/CPO/active_constraint_index",
+    "Cost/active_cost_return": "Compare/CPO/active_cost_return",
+    "Cost/active_cost_limit": "Compare/CPO/active_cost_limit",
+    "Cost/acceptance_step": "Compare/CPO/acceptance_step",
+    "Cost/final_step_norm": "Compare/CPO/final_step_norm",
+    "Cost/gradient_norm": "Compare/CPO/gradient_norm",
+    "Cost/cost_gradient_norm": "Compare/CPO/cost_gradient_norm",
+    "Cost/optim_case": "Compare/CPO/optim_case",
     "Episode_Cost/prob_gait_pattern": "Compare/Gait/prob_gait_pattern",
     "Episode_Cost/symmetric": "Compare/Gait/symmetric",
     "Episode_Cost/contact_velocity": "Compare/Gait/contact_velocity",
@@ -156,10 +201,68 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             return sorted(str(name) for name in term_names)
         return None
 
+    @staticmethod
+    def _infer_terminal_episode_reward_tags(env: VecEnv) -> list[str]:
+        reward_manager = getattr(env.unwrapped, "reward_manager", None)
+        if reward_manager is None:
+            return list(_TERMINAL_EP_KEYS)
+
+        term_names = getattr(reward_manager, "active_terms", None)
+        if not isinstance(term_names, (list, tuple)) or len(term_names) == 0:
+            return list(_TERMINAL_EP_KEYS)
+
+        terminal_tags: list[str] = []
+        for name in term_names:
+            term_name = str(name)
+            try:
+                term_cfg = reward_manager.get_term_cfg(term_name)
+            except Exception:
+                continue
+            try:
+                weight = float(getattr(term_cfg, "weight", 0.0))
+            except Exception:
+                weight = 0.0
+            if weight != 0.0:
+                terminal_tags.append(f"Episode_Reward/{term_name}")
+
+        return terminal_tags if terminal_tags else list(_TERMINAL_EP_KEYS)
+
+    @staticmethod
+    def _cfg_to_dict(cfg) -> dict:
+        if hasattr(cfg, "to_dict"):
+            return cfg.to_dict()
+        if isinstance(cfg, dict):
+            return dict(cfg)
+        raise TypeError(f"Unsupported config object type: {type(cfg).__name__}")
+
+    def _build_teacher_policy_for_distillation(self, num_teacher_obs: int) -> ActorCriticRMA:
+        try:
+            from crl_tasks.tasks.galileo.config.agents._shared_runner_cfg import build_policy_cfg
+        except Exception as exc:
+            raise RuntimeError(
+                "Distillation for Galileo requires the shared teacher policy builder, "
+                "but it could not be imported."
+            ) from exc
+
+        teacher_policy_cfg = self._cfg_to_dict(build_policy_cfg("teacher"))
+        inferred_teacher_cost_heads = self._infer_num_cost_terms(self.env)
+        if inferred_teacher_cost_heads is not None and inferred_teacher_cost_heads > 0:
+            teacher_policy_cfg["num_cost_heads"] = int(inferred_teacher_cost_heads)
+        teacher_policy_class_name = teacher_policy_cfg.pop("class_name")
+        teacher_policy_class = eval(teacher_policy_class_name)
+        teacher_policy: ActorCriticRMA = teacher_policy_class(
+            num_teacher_obs, self.env.num_actions, **teacher_policy_cfg
+        ).to(self.device)
+        teacher_policy.eval()
+        for param in teacher_policy.parameters():
+            param.requires_grad_(False)
+        return teacher_policy
+
     def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device="cpu"):
         self.cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
         self.alg_cfg_full = dict(self.alg_cfg)
+        self.constraint_cfg = dict(train_cfg.get("constraint_adapter", {}))
         self.estimator_cfg = train_cfg.get("estimator")
         self.depth_encoder_cfg = train_cfg.get("depth_encoder")
         self.policy_cfg = train_cfg["policy"]
@@ -167,18 +270,20 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         self.env = env
         self.mean_hist_latent_loss = 0.0
         self._key_curve_mirror_map = dict(_KEY_CURVE_MIRROR_MAP)
+        self._terminal_ep_tags = self._infer_terminal_episode_reward_tags(env)
         self._configure_multi_gpu()
         self._constraint_normalizer = None
+        constraint_cfg = dict(self.constraint_cfg)
         self._constraint_scale_by_gamma = bool(
-            self.alg_cfg_full.get("constraint_scale_by_gamma", False)
+            constraint_cfg.get("scale_by_gamma", False)
         )
-        self._constraint_scale = self.alg_cfg_full.get("constraint_cost_scale", None)
+        self._constraint_scale = constraint_cfg.get("cost_scale", None)
         self._constraint_gamma = self.alg_cfg_full.get("cost_gamma")
         if self._constraint_gamma is None:
             self._constraint_gamma = self.alg_cfg_full.get("gamma")
-        if self.alg_cfg_full.get("constraint_normalization", False):
+        if constraint_cfg.get("enabled", False):
             self._constraint_normalizer = ConstraintNormalizer.from_cfg(
-                self.alg_cfg_full, device=self.device
+                constraint_cfg, device=self.device
             )
         self._constraint_term_names = self._infer_cost_term_names(self.env)
         alg_class_name = self.alg_cfg["class_name"]
@@ -221,7 +326,10 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             if "teacher" in extras["observations"]:
                 self.privileged_obs_type = "teacher"  # 策略蒸馏：教师观测
             else:
-                self.privileged_obs_type = None
+                raise ValueError(
+                    "Distillation requires a 'teacher' observation group in the environment, "
+                    "but none was found."
+                )
 
         if self.privileged_obs_type is not None:
             num_privileged_obs = extras["observations"][self.privileged_obs_type].shape[1]
@@ -274,10 +382,16 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 f"critic_num_priv_latent={self.policy_cfg.get('critic_num_priv_latent', 0)}, "
                 f"critic_num_hist={self.policy_cfg.get('critic_num_hist', 0)})."
             )
-        policy_class = eval(self.policy_cfg.pop("class_name"))
+        policy_class_name = self.policy_cfg.pop("class_name")
+        policy_class = eval(policy_class_name)
         policy: ActorCriticRMA = policy_class(
             num_privileged_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
+        teacher_policy = None
+        if self.training_type == "distillation":
+            teacher_policy = self._build_teacher_policy_for_distillation(
+                num_teacher_obs=num_privileged_obs
+            )
 
         if "rnd_cfg" in self.alg_cfg and self.alg_cfg["rnd_cfg"] is not None:
             # check if rnd gated state is present
@@ -330,6 +444,11 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             and "multi_gpu_cfg" not in alg_kwargs
         ):
             alg_kwargs["multi_gpu_cfg"] = self.multi_gpu_cfg
+        if (
+            self.training_type == "distillation"
+            and "teacher_policy" in inspect.signature(alg_class.__init__).parameters
+        ):
+            alg_kwargs["teacher_policy"] = teacher_policy
         self.alg = alg_class(policy=policy, **alg_kwargs)
 
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
@@ -582,6 +701,13 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
     def load(self, path: str, load_optimizer: bool = True):
         loaded_dict = torch.load(path, weights_only=False)
         model_state = loaded_dict["model_state_dict"]
+        if self.training_type == "distillation" and hasattr(self.alg, "load_teacher_state_dict"):
+            self.alg.load_teacher_state_dict(model_state)
+            if self.empirical_normalization:
+                teacher_norm_state = loaded_dict.get("obs_norm_state_dict")
+                if teacher_norm_state is not None:
+                    self.privileged_obs_normalizer.load_state_dict(teacher_norm_state)
+            return loaded_dict.get("infos")
         try:
             resumed_training = self.alg.policy.load_state_dict(model_state)
         except RuntimeError as exc:
@@ -678,6 +804,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
 
         # Log episode information (use union of keys to avoid missing cost metrics)
         ep_string = ""
+        terminal_ep_values: dict[str, tuple[str, str]] = {}
         ep_infos = locs.get("ep_infos", [])
         if ep_infos:
             keys = set()
@@ -699,11 +826,19 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 scalar = value.item() if torch.is_tensor(value) else float(value)
                 fmt = "{:.6f}" if abs(scalar) < 1.0e-3 else "{:.4f}"
                 if "/" in key:
-                    _log_scalar(key, scalar, locs["it"])
-                    ep_string += f"""{f"{key}:":>{pad}} {fmt.format(scalar)}\n"""
+                    tag = key
                 else:
-                    _log_scalar("Episode/" + key, scalar, locs["it"])
-                    ep_string += f"""{f"Mean episode {key}:":>{pad}} {fmt.format(scalar)}\n"""
+                    tag = "Episode/" + key
+                _log_scalar(tag, scalar, locs["it"])
+                if tag in self._terminal_ep_tags:
+                    label = key if "/" in key else f"Mean episode {key}"
+                    terminal_ep_values[tag] = (label, fmt.format(scalar))
+            for tag in self._terminal_ep_tags:
+                payload = terminal_ep_values.get(tag)
+                if payload is None:
+                    continue
+                label, value_str = payload
+                ep_string += f"""{f"{label}:":>{pad}} {value_str}\n"""
 
         mean_std = self.alg.policy.action_std.mean()
         fps = int(collection_size / (locs["collection_time"] + locs["learn_time"]))
@@ -712,7 +847,9 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         # Log losses
         for key, value in locs["loss_dict"].items():
             _log_scalar(f"Loss/{key}", value, locs["it"])
-        if isinstance(cost_metrics, dict) and "base_step_size" in cost_metrics:
+        if isinstance(cost_metrics, dict) and "predictor_lr" in cost_metrics:
+            _log_scalar("Loss/learning_rate", float(cost_metrics["predictor_lr"]), locs["it"])
+        elif isinstance(cost_metrics, dict) and "base_step_size" in cost_metrics:
             _log_scalar("Loss/learning_rate", float(cost_metrics["base_step_size"]), locs["it"])
         else:
             _log_scalar("Loss/learning_rate", float(self.alg.learning_rate), locs["it"])
@@ -727,7 +864,8 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             for key, value in cost_metrics.items():
                 scalar = value.item() if torch.is_tensor(value) else float(value)
                 _log_scalar(f"Cost/{key}", scalar, locs["it"])
-                cost_string += f"""{f"Cost/{key}:":>{pad}} {scalar:.4f}\n"""
+                if key in _TERMINAL_COST_KEYS:
+                    cost_string += f"""{f"Cost/{key}:":>{pad}} {scalar:.4f}\n"""
 
         # Log noise std
         _log_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
@@ -770,7 +908,10 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             f"""{'Computation:':>{pad}} {fps:.0f} steps/s (collection: {locs['collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
             f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
         )
-        for key, value in locs["loss_dict"].items():
+        for key in _TERMINAL_LOSS_KEYS:
+            value = locs["loss_dict"].get(key)
+            if value is None:
+                continue
             log_string += f"""{f"Mean {key} loss:":>{pad}} {value:.4f}\n"""
         if cost_string:
             log_string += cost_string
@@ -828,13 +969,22 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         self.eval_mode()  # switch to evaluation mode (dropout for example)
         if device is not None:
             self.alg.policy.to(device)
-        policy = self.alg.policy.act_inference
+        use_history = bool(getattr(getattr(self.alg.policy, "actor", None), "num_hist", 0) > 0)
+
+        def _policy(x, *args, **kwargs):
+            kwargs.setdefault("hist_encoding", use_history)
+            return self.alg.policy.act_inference(x, *args, **kwargs)
+
+        policy = _policy
         if self.cfg["empirical_normalization"]:
             if device is not None:
                 self.obs_normalizer.to(device)
-            policy = lambda x, *args, **kwargs: self.alg.policy.act_inference(  # noqa: E731
-                self.obs_normalizer(x), *args, **kwargs
-            )
+
+            def _normalized_policy(x, *args, **kwargs):
+                kwargs.setdefault("hist_encoding", use_history)
+                return self.alg.policy.act_inference(self.obs_normalizer(x), *args, **kwargs)
+
+            policy = _normalized_policy
         return policy
 
     def _extract_costs(self, infos: dict, rewards: torch.Tensor) -> tuple[torch.Tensor, dict | None]:

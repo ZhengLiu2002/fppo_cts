@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Literal
 
 from ..defaults import GalileoDefaults
@@ -9,6 +10,7 @@ from ..symmetry import build_symmetry_cfg
 from .rsl_rl_cfg import (
     CRLConstraintAdapterCfg,
     CRLRslRlActorCfg,
+    CRLRslRlDAggerAlgorithmCfg,
     CRLRslRlFppoAlgorithmCfg,
     CRLRslRlPpoActorCriticCfg,
     CRLRslRlPpoAlgorithmCfg,
@@ -22,6 +24,16 @@ _CRITIC_HIDDEN_DIMS = [512, 512, 256, 128]
 _SCAN_ENCODER_DIMS = [128, 64, 32]
 
 
+def _filter_supported_cfg_params(cfg_cls, params: dict) -> dict:
+    """Drop merged defaults that the target config class does not accept."""
+    try:
+        sig = inspect.signature(cfg_cls.__init__)
+    except (TypeError, ValueError):
+        return dict(params)
+    allowed = {name for name in sig.parameters if name != "self"}
+    return {key: value for key, value in params.items() if key in allowed}
+
+
 def _merged_constraint_adapter_params(algo_key: str, role: RunnerRole) -> dict:
     params: dict = {}
     params.update(getattr(GalileoDefaults.algorithm, "constraint_adapter_base", {}))
@@ -33,8 +45,11 @@ def _merged_constraint_adapter_params(algo_key: str, role: RunnerRole) -> dict:
     return params
 
 
-def _merged_algorithm_params(role: RunnerRole) -> tuple[str, str, dict]:
-    algo_key = getattr(GalileoDefaults.algorithm, "name", "fppo")
+def _merged_algorithm_params(
+    role: RunnerRole,
+    algo_key_override: str | None = None,
+) -> tuple[str, str, dict]:
+    algo_key = algo_key_override or getattr(GalileoDefaults.algorithm, "name", "fppo")
     class_name = GalileoDefaults.algorithm.class_name_map.get(algo_key, algo_key)
     params: dict = {}
     params.update(getattr(GalileoDefaults.algorithm, "base", {}))
@@ -46,9 +61,12 @@ def _merged_algorithm_params(role: RunnerRole) -> tuple[str, str, dict]:
     return algo_key, class_name, params
 
 
-def build_algorithm_cfg(role: RunnerRole) -> CRLRslRlPpoAlgorithmCfg | CRLRslRlFppoAlgorithmCfg:
+def build_algorithm_cfg(
+    role: RunnerRole,
+    algo_key: str | None = None,
+) -> CRLRslRlPpoAlgorithmCfg | CRLRslRlFppoAlgorithmCfg | CRLRslRlDAggerAlgorithmCfg:
     """Build algorithm config from ``GalileoDefaults`` for the given role."""
-    algo_key, class_name, params = _merged_algorithm_params(role)
+    algo_key, class_name, params = _merged_algorithm_params(role, algo_key)
     symmetry_params: dict = {}
     symmetry_params.update(getattr(GalileoDefaults.algorithm, "symmetry_base", {}))
     if role == "teacher":
@@ -58,8 +76,13 @@ def build_algorithm_cfg(role: RunnerRole) -> CRLRslRlPpoAlgorithmCfg | CRLRslRlF
     symmetry_cfg = build_symmetry_cfg(role, symmetry_params)
     if symmetry_cfg is not None:
         params["symmetry_cfg"] = symmetry_cfg
-    cfg_cls = CRLRslRlFppoAlgorithmCfg if algo_key == "fppo" else CRLRslRlPpoAlgorithmCfg
-    return cfg_cls(class_name=class_name, **params)
+    if algo_key == "fppo":
+        cfg_cls = CRLRslRlFppoAlgorithmCfg
+    elif algo_key == "dagger":
+        cfg_cls = CRLRslRlDAggerAlgorithmCfg
+    else:
+        cfg_cls = CRLRslRlPpoAlgorithmCfg
+    return cfg_cls(class_name=class_name, **_filter_supported_cfg_params(cfg_cls, params))
 
 
 def build_constraint_adapter_cfg(role: RunnerRole) -> CRLConstraintAdapterCfg:

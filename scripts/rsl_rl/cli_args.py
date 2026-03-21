@@ -15,6 +15,57 @@ if TYPE_CHECKING:
 from scripts.rsl_rl.algorithms.registry import get_algorithm_class_name, list_algorithm_names
 
 
+def _cfg_items(cfg) -> dict:
+    if cfg is None:
+        return {}
+    if isinstance(cfg, dict):
+        return dict(cfg)
+    if hasattr(cfg, "to_dict"):
+        return dict(cfg.to_dict())
+    if hasattr(cfg, "__dict__"):
+        return dict(vars(cfg))
+    return {}
+
+
+def _infer_runner_role(agent_cfg: "RslRlOnPolicyRunnerCfg") -> str | None:
+    cfg_name = type(agent_cfg).__name__.lower()
+    if "student" in cfg_name:
+        return "student"
+    if "teacher" in cfg_name:
+        return "teacher"
+    return None
+
+
+def _rebuild_galileo_algorithm_cfg_if_available(
+    agent_cfg: "RslRlOnPolicyRunnerCfg",
+    algo_name: str,
+    *,
+    preserve_values: bool,
+) -> bool:
+    try:
+        from crl_tasks.tasks.galileo.config.agents._shared_runner_cfg import build_algorithm_cfg
+    except Exception:
+        return False
+
+    role = _infer_runner_role(agent_cfg)
+    if role is None or not hasattr(agent_cfg, "algorithm"):
+        return False
+
+    current_algo_cfg = getattr(agent_cfg, "algorithm", None)
+    new_algo_cfg = build_algorithm_cfg(role, algo_name)
+
+    if preserve_values and current_algo_cfg is not None:
+        for key, value in _cfg_items(current_algo_cfg).items():
+            if key == "class_name":
+                continue
+            if hasattr(new_algo_cfg, key):
+                setattr(new_algo_cfg, key, value)
+
+    new_algo_cfg.class_name = get_algorithm_class_name(algo_name)
+    agent_cfg.algorithm = new_algo_cfg
+    return True
+
+
 def _apply_algo_profile_if_available(agent_cfg: "RslRlOnPolicyRunnerCfg", algo_name: str) -> None:
     """Apply task-level algorithm preset when available.
 
@@ -160,8 +211,14 @@ def apply_rsl_rl_algo_override(
 
     if hasattr(args_cli, "algo") and args_cli.algo is not None:
         algo_name = args_cli.algo.strip().lower()
-        agent_cfg.algorithm.class_name = get_algorithm_class_name(algo_name)
-        if apply_profile:
+        rebuilt = _rebuild_galileo_algorithm_cfg_if_available(
+            agent_cfg,
+            algo_name,
+            preserve_values=not apply_profile,
+        )
+        if not rebuilt:
+            agent_cfg.algorithm.class_name = get_algorithm_class_name(algo_name)
+        if apply_profile and not rebuilt:
             _apply_algo_profile_if_available(agent_cfg, algo_name)
 
     return agent_cfg

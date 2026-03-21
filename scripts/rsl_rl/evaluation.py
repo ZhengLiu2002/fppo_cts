@@ -143,6 +143,7 @@ def main():
         load_checkpoint=agent_cfg.load_checkpoint,
         checkpoint=args_cli.checkpoint,
         use_pretrained_checkpoint=args_cli.use_pretrained_checkpoint,
+        algo_name=getattr(args_cli, "algo", None),
     )
     if not resume_path:
         print(

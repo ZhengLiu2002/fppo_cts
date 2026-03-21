@@ -487,8 +487,8 @@ class PPOWithExtractor(PPO):
                     actions_mean_symm_batch.detach()[original_batch_size:],
                 )
                 # add the loss to the total loss
-                if self.symmetry["use_mirror_loss"]:
-                    loss += self.symmetry["mirror_loss_coeff"] * symmetry_loss
+                if self.symmetry.get("use_mirror_loss", False):
+                    loss += self.symmetry.get("mirror_loss_coeff", 0.0) * symmetry_loss
                 else:
                     symmetry_loss = symmetry_loss.detach()
 

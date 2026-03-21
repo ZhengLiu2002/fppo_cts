@@ -76,6 +76,7 @@ _RUNNER_ONLY_ALG_KEYS = {
 }
 
 _TERMINAL_LOSS_KEYS = (
+    "behavior",
     "value_function",
     "cost_value_function",
     "surrogate",
@@ -164,7 +165,7 @@ _KEY_CURVE_MIRROR_MAP = {
 
 
 class OnPolicyRunnerWithExtractor(OnPolicyRunner):
-    """纯算法训练 Runner，支持 PPO/FPPO/CPO/Distillation 等流程。"""
+    """Pure algorithm runner supporting RL and student DAgger training."""
 
     @staticmethod
     def _expected_obs_dim(policy_cfg: dict) -> int | None:
@@ -235,12 +236,48 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             return dict(cfg)
         raise TypeError(f"Unsupported config object type: {type(cfg).__name__}")
 
-    def _build_teacher_policy_for_distillation(self, num_teacher_obs: int) -> ActorCriticRMA:
+    @staticmethod
+    def _policy_mean_action_std(policy, device: str | torch.device) -> torch.Tensor:
+        """Return a safe mean action std tensor for logging.
+
+        DAgger rollouts can use deterministic inference, so a policy
+        distribution may not exist for the current step. Older policy classes may
+        also not expose the `action_std` convenience property. Logging should not
+        crash training in either case.
+        """
+
+        module = getattr(policy, "module", policy)
+
+        try:
+            action_std = getattr(module, "action_std")
+        except Exception:
+            action_std = None
+        if torch.is_tensor(action_std):
+            return action_std.detach().float().mean()
+
+        distribution = getattr(module, "distribution", None)
+        stddev = getattr(distribution, "stddev", None)
+        if torch.is_tensor(stddev):
+            return stddev.detach().float().mean()
+
+        noise_std_type = getattr(module, "noise_std_type", None)
+        std_floor = float(getattr(module, "_std_floor", 0.0) or 0.0)
+        if noise_std_type == "log" and hasattr(module, "log_std"):
+            return torch.exp(module.log_std.detach()).float().mean()
+        if hasattr(module, "std"):
+            std_param = module.std.detach().float()
+            if noise_std_type == "scalar":
+                return torch.nn.functional.softplus(std_param).mean() + std_floor
+            return std_param.mean()
+
+        return torch.zeros((), device=device, dtype=torch.float32)
+
+    def _build_teacher_policy_for_dagger(self, num_teacher_obs: int) -> ActorCriticRMA:
         try:
             from crl_tasks.tasks.galileo.config.agents._shared_runner_cfg import build_policy_cfg
         except Exception as exc:
             raise RuntimeError(
-                "Distillation for Galileo requires the shared teacher policy builder, "
+                "DAgger for Galileo requires the shared teacher policy builder, "
                 "but it could not be imported."
             ) from exc
 
@@ -322,12 +359,12 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 self.privileged_obs_type = "critic"  # actor-critic 强化学习模式（例如 PPO）
             else:
                 self.privileged_obs_type = None
-        if self.training_type == "distillation":
+        if self.training_type == "dagger":
             if "teacher" in extras["observations"]:
-                self.privileged_obs_type = "teacher"  # 策略蒸馏：教师观测
+                self.privileged_obs_type = "teacher"  # DAgger: teacher observations for labels
             else:
                 raise ValueError(
-                    "Distillation requires a 'teacher' observation group in the environment, "
+                    "DAgger requires a 'teacher' observation group in the environment, "
                     "but none was found."
                 )
 
@@ -388,8 +425,8 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             num_privileged_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
         teacher_policy = None
-        if self.training_type == "distillation":
-            teacher_policy = self._build_teacher_policy_for_distillation(
+        if self.training_type == "dagger":
+            teacher_policy = self._build_teacher_policy_for_dagger(
                 num_teacher_obs=num_privileged_obs
             )
 
@@ -445,7 +482,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         ):
             alg_kwargs["multi_gpu_cfg"] = self.multi_gpu_cfg
         if (
-            self.training_type == "distillation"
+            self.training_type == "dagger"
             and "teacher_policy" in inspect.signature(alg_class.__init__).parameters
         ):
             alg_kwargs["teacher_policy"] = teacher_policy
@@ -551,15 +588,39 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         # Start training
         start_iter = self.current_learning_iteration
         tot_iter = start_iter + num_learning_iterations
+        actor_module = getattr(getattr(self.alg, "policy", None), "actor", None)
+        # Student blind policies without privileged latents must use history on every rollout;
+        # otherwise the latent branch collapses to zeros for most iterations.
+        policy_requires_history_rollout = bool(
+            getattr(actor_module, "num_hist", 0) > 0
+            and int(getattr(actor_module, "num_priv_latent", 0) or 0) <= 0
+        )
         for it in range(start_iter, tot_iter):
             start = time.time()
-            hist_encoding = it % self.dagger_update_freq == 0
+            history_encoder_update_due = (
+                self.training_type == "rl" and it % self.dagger_update_freq == 0
+            )
+            dagger_policy_update_due = (
+                self.training_type == "dagger"
+                and (it - start_iter + 1) % self.dagger_update_freq == 0
+            )
+            dagger_iters_to_update = 0
+            if self.training_type == "dagger":
+                steps_since_last_update = (it - start_iter + 1) % self.dagger_update_freq
+                dagger_iters_to_update = (
+                    0
+                    if dagger_policy_update_due
+                    else self.dagger_update_freq - steps_since_last_update
+                )
+            policy_hist_encoding = history_encoder_update_due or policy_requires_history_rollout
+            if self.training_type == "dagger":
+                policy_hist_encoding = True
 
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     # Sample actions
-                    actions = self.alg.act(obs, privileged_obs, hist_encoding)
+                    actions = self.alg.act(obs, privileged_obs, policy_hist_encoding)
                     # Step the environment
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     # Move to device
@@ -635,12 +696,20 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                     self.alg.compute_returns(privileged_obs)
 
             # update policy
-            loss_dict = self.alg.update()
+            if (
+                self.training_type == "dagger"
+                and "do_policy_update" in inspect.signature(self.alg.update).parameters
+            ):
+                loss_dict = self.alg.update(do_policy_update=dagger_policy_update_due)
+            else:
+                loss_dict = self.alg.update()
             cost_metrics = getattr(self.alg, "train_metrics", None)
-            if hist_encoding and hasattr(self.alg, "update_dagger"):
-                print("Updating dagger...")
+            if history_encoder_update_due and hasattr(self.alg, "update_dagger"):
+                print("Updating history encoder...")
                 self.mean_hist_latent_loss = self.alg.update_dagger()
-            loss_dict["hist_latent"] = self.mean_hist_latent_loss
+                loss_dict["hist_latent"] = self.mean_hist_latent_loss
+            if self.training_type == "dagger":
+                loss_dict["dagger_update_freq"] = float(self.dagger_update_freq)
 
             stop = time.time()
             learn_time = stop - start
@@ -701,68 +770,81 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
     def load(self, path: str, load_optimizer: bool = True):
         loaded_dict = torch.load(path, weights_only=False)
         model_state = loaded_dict["model_state_dict"]
-        if self.training_type == "distillation" and hasattr(self.alg, "load_teacher_state_dict"):
-            self.alg.load_teacher_state_dict(model_state)
-            if self.empirical_normalization:
-                teacher_norm_state = loaded_dict.get("obs_norm_state_dict")
-                if teacher_norm_state is not None:
-                    self.privileged_obs_normalizer.load_state_dict(teacher_norm_state)
-            return loaded_dict.get("infos")
-        try:
-            resumed_training = self.alg.policy.load_state_dict(model_state)
-        except RuntimeError as exc:
-            # Backward compatibility: older checkpoints may use single-head cost critics,
-            # while current configs can infer multi-head critics from active constraints.
-            if "cost_critic" not in str(exc):
-                raise
-            policy_state = self.alg.policy.state_dict()
-            patched = False
-            for key, src_tensor in list(model_state.items()):
-                if not (key.startswith("cost_critic.") and key.endswith(".weight")):
-                    continue
-                if key not in policy_state:
-                    continue
-                tgt_tensor = policy_state[key]
-                if src_tensor.ndim != 2 or tgt_tensor.ndim != 2:
-                    continue
-                if src_tensor.shape[1] != tgt_tensor.shape[1]:
-                    continue
-                if src_tensor.shape[0] == tgt_tensor.shape[0]:
-                    continue
+        dagger_inference_load = self.training_type == "dagger" and self.log_dir is None
 
-                bias_key = key.replace(".weight", ".bias")
-                if bias_key not in model_state or bias_key not in policy_state:
-                    continue
-                src_bias = model_state[bias_key]
-                tgt_bias = policy_state[bias_key]
-                if src_bias.ndim != 1 or tgt_bias.ndim != 1:
-                    continue
+        def _load_policy_state(state_dict: dict):
+            try:
+                return self.alg.policy.load_state_dict(state_dict)
+            except RuntimeError as exc:
+                # Backward compatibility: older checkpoints may use single-head cost critics,
+                # while current configs can infer multi-head critics from active constraints.
+                if "cost_critic" not in str(exc):
+                    raise
+                policy_state = self.alg.policy.state_dict()
+                patched_state = dict(state_dict)
+                patched = False
+                for key, src_tensor in list(state_dict.items()):
+                    if not (key.startswith("cost_critic.") and key.endswith(".weight")):
+                        continue
+                    if key not in policy_state:
+                        continue
+                    tgt_tensor = policy_state[key]
+                    if src_tensor.ndim != 2 or tgt_tensor.ndim != 2:
+                        continue
+                    if src_tensor.shape[1] != tgt_tensor.shape[1]:
+                        continue
+                    if src_tensor.shape[0] == tgt_tensor.shape[0]:
+                        continue
 
-                # 1->N: replicate the single head. Otherwise copy overlapping heads.
-                if src_tensor.shape[0] == 1:
-                    new_weight = src_tensor.expand(tgt_tensor.shape[0], -1).clone()
-                else:
-                    new_weight = tgt_tensor.clone()
-                    rows = min(src_tensor.shape[0], tgt_tensor.shape[0])
-                    new_weight[:rows, :] = src_tensor[:rows, :]
-                if src_bias.shape[0] == 1:
-                    new_bias = src_bias.expand(tgt_bias.shape[0]).clone()
-                else:
-                    new_bias = tgt_bias.clone()
-                    rows = min(src_bias.shape[0], tgt_bias.shape[0])
-                    new_bias[:rows] = src_bias[:rows]
+                    bias_key = key.replace(".weight", ".bias")
+                    if bias_key not in state_dict or bias_key not in policy_state:
+                        continue
+                    src_bias = state_dict[bias_key]
+                    tgt_bias = policy_state[bias_key]
+                    if src_bias.ndim != 1 or tgt_bias.ndim != 1:
+                        continue
 
-                model_state[key] = new_weight
-                model_state[bias_key] = new_bias
-                patched = True
+                    # 1->N: replicate the single head. Otherwise copy overlapping heads.
+                    if src_tensor.shape[0] == 1:
+                        new_weight = src_tensor.expand(tgt_tensor.shape[0], -1).clone()
+                    else:
+                        new_weight = tgt_tensor.clone()
+                        rows = min(src_tensor.shape[0], tgt_tensor.shape[0])
+                        new_weight[:rows, :] = src_tensor[:rows, :]
+                    if src_bias.shape[0] == 1:
+                        new_bias = src_bias.expand(tgt_bias.shape[0]).clone()
+                    else:
+                        new_bias = tgt_bias.clone()
+                        rows = min(src_bias.shape[0], tgt_bias.shape[0])
+                        new_bias[:rows] = src_bias[:rows]
 
-            if not patched:
-                raise
-            print(
-                "[WARN] Checkpoint cost_critic head count mismatched current config; "
-                "auto-adapted output layer weights for compatibility."
-            )
-            resumed_training = self.alg.policy.load_state_dict(model_state)
+                    patched_state[key] = new_weight
+                    patched_state[bias_key] = new_bias
+                    patched = True
+
+                if not patched:
+                    raise
+                print(
+                    "[WARN] Checkpoint cost_critic head count mismatched current config; "
+                    "auto-adapted output layer weights for compatibility."
+                )
+                return self.alg.policy.load_state_dict(patched_state)
+
+        if self.training_type == "dagger" and hasattr(self.alg, "load_teacher_state_dict"):
+            if dagger_inference_load:
+                print(
+                    "[INFO] DAgger inference mode detected; loading checkpoint as student policy "
+                    "instead of teacher weights."
+                )
+            else:
+                self.alg.load_teacher_state_dict(model_state)
+                if self.empirical_normalization:
+                    teacher_norm_state = loaded_dict.get("obs_norm_state_dict")
+                    if teacher_norm_state is not None:
+                        self.privileged_obs_normalizer.load_state_dict(teacher_norm_state)
+                return loaded_dict.get("infos")
+
+        resumed_training = _load_policy_state(model_state)
         if getattr(self.alg, "rnd", None):
             self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
         if self.empirical_normalization:
@@ -840,7 +922,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 label, value_str = payload
                 ep_string += f"""{f"{label}:":>{pad}} {value_str}\n"""
 
-        mean_std = self.alg.policy.action_std.mean()
+        mean_std = self._policy_mean_action_std(self.alg.policy, self.device)
         fps = int(collection_size / (locs["collection_time"] + locs["learn_time"]))
         cost_metrics = locs.get("cost_metrics")
 
@@ -866,6 +948,36 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 _log_scalar(f"Cost/{key}", scalar, locs["it"])
                 if key in _TERMINAL_COST_KEYS:
                     cost_string += f"""{f"Cost/{key}:":>{pad}} {scalar:.4f}\n"""
+
+        dagger_string = ""
+        if "dagger_buffer_size" in locs["loss_dict"]:
+            dagger_due = bool(round(float(locs["loss_dict"].get("dagger_update_due", 0.0))))
+            dagger_updated = bool(round(float(locs["loss_dict"].get("dagger_updated", 0.0))))
+            dagger_warmup = bool(round(float(locs["loss_dict"].get("dagger_warmup", 0.0))))
+            dagger_num_batches = float(locs["loss_dict"].get("dagger_num_batches", 0.0))
+            dagger_batch_budget = float(locs["loss_dict"].get("dagger_batch_budget", 0.0))
+            dagger_buffer_size = float(locs["loss_dict"].get("dagger_buffer_size", 0.0))
+            dagger_buffer_fill = float(locs["loss_dict"].get("dagger_buffer_fill", 0.0))
+            dagger_samples_added = float(locs["loss_dict"].get("dagger_samples_added", 0.0))
+            dagger_teacher_ratio = float(locs["loss_dict"].get("teacher_action_ratio", 0.0))
+            dagger_update_freq = int(locs["loss_dict"].get("dagger_update_freq", self.dagger_update_freq))
+            dagger_status = "collect-only"
+            if dagger_updated:
+                dagger_status = "updated"
+            elif dagger_warmup:
+                dagger_status = "warmup"
+            elif dagger_due:
+                dagger_status = "due"
+            dagger_string += (
+                f"""{'DAgger status:':>{pad}} {dagger_status} """
+                f"""(freq={dagger_update_freq}, next={int(locs.get('dagger_iters_to_update', 0))})\n"""
+            )
+            dagger_string += (
+                f"""{'DAgger replay:':>{pad}} added={dagger_samples_added:.0f}, """
+                f"""buffer={dagger_buffer_size:.0f}, fill={dagger_buffer_fill:.1%}, """
+                f"""batches={dagger_num_batches:.0f}, budget={dagger_batch_budget:.0f}, """
+                f"""teacher_mix={dagger_teacher_ratio:.2f}\n"""
+            )
 
         # Log noise std
         _log_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
@@ -913,6 +1025,8 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             if value is None:
                 continue
             log_string += f"""{f"Mean {key} loss:":>{pad}} {value:.4f}\n"""
+        if dagger_string:
+            log_string += dagger_string
         if cost_string:
             log_string += cost_string
         if len(locs["rewbuffer"]) > 0:

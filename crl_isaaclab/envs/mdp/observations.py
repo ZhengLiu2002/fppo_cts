@@ -215,6 +215,18 @@ class PolicyHistory(ManagerTermBase):
         self.command_name = cfg.params.get("command_name", "base_velocity")
         self._obs_history_buffer = None
 
+    @staticmethod
+    def _apply_scale(
+        values: torch.Tensor,
+        scale: float | Sequence[float] | None,
+    ) -> torch.Tensor:
+        if scale is None:
+            return values
+        scale_tensor = torch.as_tensor(scale, device=values.device, dtype=values.dtype)
+        if scale_tensor.ndim == 0:
+            return values * scale_tensor
+        return values * scale_tensor.view(1, -1)
+
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         if self._obs_history_buffer is None:
             return
@@ -228,19 +240,28 @@ class PolicyHistory(ManagerTermBase):
         history_length: int,
         include_base_lin_vel: bool,
         command_name: str,
+        scales: dict | None = None,
     ) -> torch.Tensor:
         hist_len = int(history_length)
+        scale_cfg = dict(scales or {})
         prop_terms: list[torch.Tensor] = []
         if include_base_lin_vel:
-            prop_terms.append(mdp.base_lin_vel(env))
+            prop_terms.append(
+                self._apply_scale(mdp.base_lin_vel(env), scale_cfg.get("base_lin_vel", 1.0))
+            )
         prop_terms.extend(
             [
-                mdp.base_ang_vel(env),
-                mdp.projected_gravity(env),
-                mdp.joint_pos_rel(env),
-                mdp.joint_vel_rel(env),
-                mdp.last_action(env),
-                mdp.generated_commands(env, command_name=command_name),
+                self._apply_scale(mdp.base_ang_vel(env), scale_cfg.get("base_ang_vel", 1.0)),
+                self._apply_scale(
+                    mdp.projected_gravity(env), scale_cfg.get("projected_gravity", 1.0)
+                ),
+                self._apply_scale(mdp.joint_pos_rel(env), scale_cfg.get("joint_pos", 1.0)),
+                self._apply_scale(mdp.joint_vel_rel(env), scale_cfg.get("joint_vel", 1.0)),
+                self._apply_scale(mdp.last_action(env), scale_cfg.get("last_action", 1.0)),
+                self._apply_scale(
+                    mdp.generated_commands(env, command_name=command_name),
+                    scale_cfg.get("commands", 1.0),
+                ),
             ]
         )
         prop = torch.cat(prop_terms, dim=-1)

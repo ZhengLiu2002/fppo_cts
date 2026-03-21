@@ -13,6 +13,7 @@ from scripts.rsl_rl.runtime import (
     configure_safe_play_args,
     create_run_directory_name,
     dump_pickle,
+    resolve_checkpoint_path,
 )
 
 
@@ -109,6 +110,46 @@ class RuntimeUtilsTest(unittest.TestCase):
                 os.environ.pop("HEADLESS", None)
             else:
                 os.environ["HEADLESS"] = original_headless
+
+    def test_resolve_checkpoint_path_accepts_run_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            run_dir = Path(temp_dir) / "fppo_2026-03-18_teacher"
+            run_dir.mkdir(parents=True)
+            (run_dir / "model_100.pt").write_text("", encoding="utf-8")
+            (run_dir / "model_1200.pt").write_text("", encoding="utf-8")
+
+            resolved = resolve_checkpoint_path(
+                task_name="Isaac-Galileo-CRL-Teacher-Play-v0",
+                log_root_path=temp_dir,
+                load_run=".*",
+                load_checkpoint="model_.*.pt",
+                checkpoint=str(run_dir),
+                algo_name="fppo",
+            )
+
+        self.assertEqual(resolved, str(run_dir / "model_1200.pt"))
+
+    def test_resolve_checkpoint_path_filters_experiment_root_by_algo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            experiment_root = Path(temp_dir) / "galileo_algo_compare_teacher_fair"
+            fppo_run = experiment_root / "fppo_2026-03-14_teacher"
+            ppo_run = experiment_root / "ppo_2026-03-14_teacher"
+            fppo_run.mkdir(parents=True)
+            ppo_run.mkdir(parents=True)
+            (fppo_run / "model_500.pt").write_text("", encoding="utf-8")
+            (fppo_run / "model_1500.pt").write_text("", encoding="utf-8")
+            (ppo_run / "model_9000.pt").write_text("", encoding="utf-8")
+
+            resolved = resolve_checkpoint_path(
+                task_name="Isaac-Galileo-CRL-Teacher-Play-v0",
+                log_root_path=temp_dir,
+                load_run=".*",
+                load_checkpoint="model_.*.pt",
+                checkpoint=str(experiment_root),
+                algo_name="fppo",
+            )
+
+        self.assertEqual(resolved, str(fppo_run / "model_1500.pt"))
 
 
 if __name__ == "__main__":

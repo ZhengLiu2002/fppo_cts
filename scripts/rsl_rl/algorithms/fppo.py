@@ -48,14 +48,6 @@ class FPPO(PPO):
         device="cpu",
         normalize_advantage_per_mini_batch=False,
         symmetry_cfg: dict | None = None,
-        normalize_cost_advantage: bool = False,
-        cost_viol_loss_coef: float = 0.0,
-        k_value: float = 1.0,
-        k_growth: float = 1.0,
-        k_max: float = 1.0,
-        k_decay: float = 1.0,
-        k_min: float = 0.0,
-        k_violation_threshold: float = 0.02,
         reconstruction_loss_coef: float = 0.0,
         softproj_max_iters: int = 40,
         softproj_tol: float = 1.0e-6,
@@ -92,15 +84,7 @@ class FPPO(PPO):
             device=device,
             normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
             symmetry_cfg=symmetry_cfg,
-            normalize_cost_advantage=normalize_cost_advantage,
             cost_limit=cost_limit,
-            cost_viol_loss_coef=cost_viol_loss_coef,
-            k_value=k_value,
-            k_growth=k_growth,
-            k_max=k_max,
-            k_decay=k_decay,
-            k_min=k_min,
-            k_violation_threshold=k_violation_threshold,
             reconstruction_loss_coef=reconstruction_loss_coef,
             multi_gpu_cfg=multi_gpu_cfg,
         )
@@ -214,18 +198,6 @@ class FPPO(PPO):
         ).any(dim=1)
         mean_cost_violation = self._all_reduce_mean(sample_violation.float().mean()).item()
         current_max_violation = torch.max(projection_batch["j_cost"] - projection_batch["d_tight"]).item()
-        viol_loss = self._positive_cost_penalty(
-            cost_surrogate_mean,
-            torch.max(projection_batch["j_cost"] - projection_batch["d_tight"]),
-        )
-        viol_loss = self._sanitize_tensor(
-            viol_loss,
-            nan=0.0,
-            posinf=1.0e6,
-            neginf=0.0,
-            clamp=1.0e6,
-        )
-        self._step_constraint_scale(mean_cost_violation)
         self._adapt_corrector_step_size(
             accept_rate=correction_metrics["accept_rate"],
             mean_cost_margin=mean_cost_margin,
@@ -243,8 +215,6 @@ class FPPO(PPO):
             "reward_return_mean": reward_return_mean,
             "cost_limit_margin": mean_cost_margin,
             "cost_violation_rate": mean_cost_violation,
-            "viol_loss": viol_loss.item(),
-            "k_value": self.k_value,
             "step_size": correction_metrics["effective_step_size"],
             "base_step_size": self.step_size,
             "predictor_lr": self.predictor_lr,
@@ -274,7 +244,6 @@ class FPPO(PPO):
             "cost_value_function": mean_cost_value_loss,
             "surrogate": predictor_metrics["mean_surrogate"],
             "entropy": predictor_metrics["mean_entropy"],
-            "viol": viol_loss.item(),
             "reconstruction": predictor_metrics["mean_reconstruction"],
         }
 
@@ -1331,15 +1300,6 @@ class FPPO(PPO):
             self.step_size = max(self._corrector_step_min, self.step_size * self._corrector_step_down)
         else:
             self.step_size = min(max(self.step_size, self._corrector_step_min), self._corrector_step_max)
-
-    def _step_constraint_scale(self, cost_violation: float | None = None):
-        if cost_violation is None:
-            super()._step_constraint_scale()
-            return
-        if cost_violation > self.k_violation_threshold:
-            self.k_value = min(self.k_max, self.k_value * self.k_growth)
-        else:
-            self.k_value = max(self.k_min, self.k_value * self.k_decay)
 
     def _all_reduce_grads(self, grads: list[torch.Tensor]):
         for grad in grads:

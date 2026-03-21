@@ -133,15 +133,7 @@ class CRLRslRlFppoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     constraint_curriculum_alpha: float = 0.8
     constraint_curriculum_shrink: float = 0.97
     use_clipped_surrogate: bool = True
-    normalize_cost_advantage: bool = False
     step_size_adaptive: bool = True
-    cost_viol_loss_coef: float = 0.0
-    k_value: float = 1.0
-    k_growth: float = 1.0
-    k_max: float = 1.0
-    k_decay: float = 1.0
-    k_min: float = 0.0
-    k_violation_threshold: float = 0.02
 
 
 @configclass
@@ -158,14 +150,23 @@ class CRLConstraintAdapterCfg:
 
 
 @configclass
-class CRLRslRlDistillationAlgorithmCfg(RslRlPpoAlgorithmCfg):
-    class_name: str = "Distillation"
+class CRLRslRlDAggerAlgorithmCfg(CRLRslRlPpoAlgorithmCfg):
+    class_name: str = "DAgger"
+    dagger_update_freq: int = 10
+    dagger_buffer_size: int = 1_048_576
+    dagger_batch_size: int = 16_384
+    dagger_min_buffer_size: int = 262_144
+    dagger_batches_per_update: int = 32
+    teacher_action_ratio_start: float = 1.0
+    teacher_action_ratio_end: float = 0.0
+    teacher_action_ratio_decay_steps: int = 8000
+    deterministic_rollout: bool = True
 
 
 @configclass
 class CRLRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     policy: CRLRslRlPpoActorCriticCfg = MISSING
-    algorithm: CRLRslRlPpoAlgorithmCfg | CRLRslRlFppoAlgorithmCfg | CRLRslRlDistillationAlgorithmCfg = MISSING
+    algorithm: CRLRslRlPpoAlgorithmCfg | CRLRslRlFppoAlgorithmCfg | CRLRslRlDAggerAlgorithmCfg = MISSING
     constraint_adapter: CRLConstraintAdapterCfg = CRLConstraintAdapterCfg()
 
 
@@ -177,6 +178,6 @@ __all__ = [
     "CRLRslRlPpoAlgorithmCfg",
     "CRLRslRlFppoAlgorithmCfg",
     "CRLConstraintAdapterCfg",
-    "CRLRslRlDistillationAlgorithmCfg",
+    "CRLRslRlDAggerAlgorithmCfg",
     "CRLRslRlOnPolicyRunnerCfg",
 ]

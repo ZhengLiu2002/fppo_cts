@@ -11,7 +11,7 @@ Each algorithm declares:
 - `name`: canonical CLI name (e.g. `fppo`)
 - `module`: module path (e.g. `scripts.rsl_rl.algorithms.fppo`)
 - `class_name`: class to instantiate (e.g. `FPPO`)
-- `training_type`: `rl` or `distillation`
+- `training_type`: `rl` or `dagger`
 - `extra_cfg_keys`: optional keys allowed beyond the class `__init__` signature
 
 ## Validation

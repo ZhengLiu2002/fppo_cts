@@ -171,10 +171,10 @@ register_algorithm(
 )
 register_algorithm(
     AlgorithmSpec(
-        name="distillation",
-        module="scripts.rsl_rl.algorithms.distillation",
-        class_name="Distillation",
-        training_type="distillation",
+        name="dagger",
+        module="scripts.rsl_rl.algorithms.dagger",
+        class_name="DAgger",
+        training_type="dagger",
     )
 )
 

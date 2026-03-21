@@ -46,7 +46,7 @@ cd /home/lz/Project/IsaacLab/fppo_ts
 通过 `--algo` 覆盖默认算法（默认使用配置文件内的 `class_name`，当前 Teacher/Student 默认 FPPO）。
 
 可选值：
-- `fppo` / `np3o` / `ppo` / `ppo_lagrange` / `cpo` / `pcpo` / `focops` / `distillation`（使用 `scripts/rsl_rl/algorithms/` 里的实现）
+- `fppo` / `np3o` / `ppo` / `ppo_lagrange` / `cpo` / `pcpo` / `focops` / `dagger`（使用 `scripts/rsl_rl/algorithms/` 里的实现）
 
 示例：fppo
 ```bash
@@ -197,7 +197,7 @@ python scripts/rsl_rl/play.py \
 ```bash
 python scripts/rsl_rl/play.py \
   --task Isaac-Galileo-CRL-Student-Play-v0 \
-  --algo distillation \
+  --algo dagger \
   --exp galileo/studies/algo_compare_student_distill_tuned \
   --num_envs 16 \
   --checkpoint logs/rsl_rl/galileo_

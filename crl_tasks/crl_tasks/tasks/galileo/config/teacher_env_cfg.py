@@ -97,10 +97,6 @@ class GalileoTeacherCRLEnvCfg(CRLManagerBasedRLEnvCfg):
         # sensor update periods
         self.scene.height_scanner.update_period = self.sim.dt * self.decimation
         self.scene.contact_forces.update_period = self.sim.dt * self.decimation
-        self.events.randomize_base_mass = None
-        self.events.randomize_base_com = None
-        self.events.push_robot_vel = None
-        self.events.push_robot_torque = None
 
 
 @configclass
@@ -113,3 +109,7 @@ class GalileoTeacherCRLEnvCfg_PLAY(GalileoTeacherCRLEnvCfg):
         self.episode_length_s = 60.0
         self.scene.terrain.terrain_generator.curriculum = False
         self.scene.terrain.max_init_terrain_level = None
+        self.events.randomize_base_mass = None
+        self.events.randomize_base_com = None
+        self.events.push_robot_vel = None
+        self.events.push_robot_torque = None

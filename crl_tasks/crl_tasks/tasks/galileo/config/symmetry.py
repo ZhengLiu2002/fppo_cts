@@ -108,10 +108,12 @@ def build_symmetry_cfg(role: RunnerRole, params: dict) -> dict | None:
     if role != "teacher":
         raise ValueError("Galileo symmetry augmentation is currently implemented only for teacher training.")
 
-    cfg = {key: value for key, value in params.items() if key != "enabled"}
+    cfg = {
+        key: value
+        for key, value in params.items()
+        if key not in {"enabled", "use_mirror_loss", "mirror_loss_coeff"}
+    }
     cfg.setdefault("use_data_augmentation", True)
-    cfg.setdefault("use_mirror_loss", False)
-    cfg.setdefault("mirror_loss_coeff", 0.0)
     cfg["data_augmentation_func"] = _GALILEO_AUGMENTATION_ENTRY
     return cfg
 

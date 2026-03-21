@@ -1,7 +1,7 @@
 {
   "extends": "galileo/studies/algo_compare_student_fair",
   "meta": {
-    "description": "Student distillation tuning preset: lower distillation learning rate, stronger history reconstruction, and a wider student history latent for better command tracking.",
+    "description": "Student DAgger tuning preset: lower imitation learning rate, a wider proprio-history latent, and a moderated reconstruction weight for smoother teacher handoff on rough terrain.",
     "study": "algo_compare_student_distill_tuned",
     "parent": "galileo/studies/algo_compare_student_fair"
   },
@@ -17,7 +17,7 @@
     },
     "algorithm": {
       "learning_rate": 0.0003,
-      "reconstruction_loss_coef": 0.25
+      "reconstruction_loss_coef": 0.15
     }
   },
   "env": {}

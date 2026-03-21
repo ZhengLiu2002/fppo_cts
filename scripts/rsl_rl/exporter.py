@@ -100,27 +100,9 @@ EXPORT_PROFILE_GALILEO = {
         -1.5000,
         -1.5000,
     ],
-    "input_actor_obs_names": [
-        "base_ang_vel_nad",
-        "projected_gravity_nad",
-        "joint_pos_rel_nad",
-        "joint_vel_rel_nad",
-        "actions_gt",
-        "base_commands_gt",
-    ],
-    "input_actor_obs_scales": {
-        "base_ang_vel_nad": 0.25,
-        "projected_gravity_nad": 1.0,
-        "joint_pos_rel_nad": 1.0,
-        "joint_vel_rel_nad": 0.05,
-        "actions_gt": 0.25,
-        "base_commands_gt": [2.0, 2.0, 0.25],
-    },
-    "input_obs_size_map": {"actor_obs": 45},
     "action_scale": 0.25,
     "clip_actions": 100.0,
     "clip_obs": 100.0,
-    "obs_history_length": {"actor_obs": 1},
     "joint_kp": [70.0] * 12,
     "joint_kd": [3.5] * 12,
     "max_torques": [80.0] * 12,
@@ -194,6 +176,252 @@ def _extract_obs_scales(env):
             scale = 1.0
         scales[name] = scale
     return scales
+
+
+def _extract_obs_term_cfgs(env):
+    obs_mgr = env.unwrapped.observation_manager
+    group = _resolve_obs_group(obs_mgr)
+    if group is None:
+        return {}
+    term_names = list(getattr(obs_mgr, "_group_obs_term_names", {}).get(group, []))
+    term_cfgs = list(getattr(obs_mgr, "_group_obs_term_cfgs", {}).get(group, []))
+    return {name: cfg for name, cfg in zip(term_names, term_cfgs)}
+
+
+def _normalize_scale(val):
+    if isinstance(val, (list, tuple, np.ndarray)):
+        return [_safe_float(v, 1.0) for v in val]
+    return _safe_float(val, 1.0)
+
+
+_HISTORY_KEY_EXPORT_CANDIDATES = {
+    "base_lin_vel": ["base_lin_vel_nad", "base_lin_vel_gt", "base_lin_vel"],
+    "base_ang_vel": ["base_ang_vel_nad", "base_ang_vel_gt", "base_ang_vel"],
+    "projected_gravity": [
+        "projected_gravity_nad",
+        "projected_gravity_gt",
+        "projected_gravity",
+    ],
+    "joint_pos": ["joint_pos_rel_nad", "joint_pos_rel_gt", "joint_pos"],
+    "joint_vel": ["joint_vel_rel_nad", "joint_vel_rel_gt", "joint_vel"],
+    "last_action": ["actions_gt", "actions_nad", "actions"],
+    "commands": ["base_commands_gt", "base_commands_nad", "velocity_commands"],
+}
+
+_HISTORY_KEY_ORDER = [
+    "base_lin_vel",
+    "base_ang_vel",
+    "projected_gravity",
+    "joint_pos",
+    "joint_vel",
+    "last_action",
+    "commands",
+]
+
+
+def _resolve_history_export_name(current_obs_names: list[str], canonical_name: str) -> str:
+    candidates = _HISTORY_KEY_EXPORT_CANDIDATES.get(canonical_name, [canonical_name])
+    current_set = set(current_obs_names)
+    for candidate in candidates:
+        if candidate in current_set:
+            return candidate
+    return candidates[0]
+
+
+def _build_history_input_spec(
+    history_cfg,
+    current_obs_names: list[str],
+    current_obs_scales: dict[str, float | list[float]],
+    input_name: str = "proprio_history",
+) -> dict | None:
+    params = getattr(history_cfg, "params", None)
+    if not isinstance(params, dict):
+        return None
+
+    history_length = int(params.get("history_length", 1) or 1)
+    if history_length <= 0:
+        return None
+
+    include_base_lin_vel = bool(params.get("include_base_lin_vel", True))
+    scale_cfg = dict(params.get("scales", {}) or {})
+
+    obs_names: list[str] = []
+    obs_scales: dict[str, float | list[float]] = {}
+    for key in _HISTORY_KEY_ORDER:
+        if key == "base_lin_vel" and not include_base_lin_vel:
+            continue
+        export_name = _resolve_history_export_name(current_obs_names, key)
+        obs_names.append(export_name)
+        if key in scale_cfg:
+            obs_scales[export_name] = _normalize_scale(scale_cfg[key])
+        else:
+            obs_scales[export_name] = current_obs_scales.get(export_name, 1.0)
+
+    return {
+        "input_name": input_name,
+        "obs_names": obs_names,
+        "obs_scales": obs_scales,
+        "history_length": history_length,
+    }
+
+
+def _build_export_input_layout(
+    env,
+    env_cfg,
+    actor_critic: object | None = None,
+) -> dict:
+    raw_obs_names = _extract_obs_terms(env)
+    obs_scales = _extract_obs_scales(env)
+    obs_term_cfgs = _extract_obs_term_cfgs(env)
+
+    summary = getattr(env.unwrapped.cfg, "config_summary", None) or getattr(env_cfg, "config_summary", None)
+    obs_summary = getattr(summary, "observation", None)
+    obs_name_map = getattr(obs_summary, "export_name_map", None)
+    if not isinstance(obs_name_map, dict):
+        obs_name_map = {}
+
+    mapped_obs_names: list[str] = []
+    mapped_obs_scales: dict[str, float | list[float]] = {}
+    raw_to_mapped: dict[str, str] = {}
+    for raw_name in raw_obs_names:
+        mapped_name = obs_name_map.get(raw_name, raw_name)
+        raw_to_mapped[raw_name] = mapped_name
+        mapped_obs_names.append(mapped_name)
+        mapped_obs_scales[mapped_name] = _normalize_scale(obs_scales.get(raw_name, 1.0))
+
+    actor_module = getattr(actor_critic, "actor", None)
+    actor_num_prop = int(getattr(actor_module, "num_prop", 0) or 0)
+    actor_num_hist = int(getattr(actor_module, "num_hist", 0) or 0)
+    actor_num_scan = int(getattr(actor_module, "num_scan", 0) or 0)
+    actor_num_priv_explicit = int(getattr(actor_module, "num_priv_explicit", 0) or 0)
+    actor_num_priv_latent = int(getattr(actor_module, "num_priv_latent", 0) or 0)
+
+    history_raw_name = next((name for name in raw_obs_names if "history" in name.lower()), None)
+    history_cfg = obs_term_cfgs.get(history_raw_name) if history_raw_name is not None else None
+    can_split_history = bool(
+        history_raw_name is not None
+        and history_cfg is not None
+        and actor_num_hist > 0
+        and actor_num_prop > 0
+        and actor_num_scan == 0
+        and actor_num_priv_explicit == 0
+        and actor_num_priv_latent == 0
+    )
+
+    if can_split_history:
+        current_raw_names = [name for name in raw_obs_names if name != history_raw_name]
+        current_obs_names = [raw_to_mapped[name] for name in current_raw_names]
+        current_obs_scales = {
+            raw_to_mapped[name]: mapped_obs_scales[raw_to_mapped[name]] for name in current_raw_names
+        }
+        history_input_name = raw_to_mapped.get(history_raw_name, history_raw_name)
+        history_spec = _build_history_input_spec(
+            history_cfg,
+            current_obs_names=current_obs_names,
+            current_obs_scales=current_obs_scales,
+            input_name=history_input_name,
+        )
+        if history_spec is None:
+            raise RuntimeError(
+                f"Unable to infer history export spec for observation term '{history_raw_name}'."
+            )
+        return {
+            "input_names": ["actor_obs", history_spec["input_name"]],
+            "input_obs_names_map": {
+                "actor_obs": current_obs_names,
+                history_spec["input_name"]: history_spec["obs_names"],
+            },
+            "input_obs_scales_map": {
+                "actor_obs": current_obs_scales,
+                history_spec["input_name"]: history_spec["obs_scales"],
+            },
+            "input_obs_size_map": {
+                "actor_obs": actor_num_prop,
+                history_spec["input_name"]: actor_num_prop,
+            },
+            "obs_history_length": {
+                "actor_obs": 1,
+                history_spec["input_name"]: int(history_spec["history_length"]),
+            },
+            "export_input_order": ["actor_obs", history_spec["input_name"]],
+        }
+
+    if history_raw_name is not None and actor_num_hist > 0:
+        raise RuntimeError(
+            "History-based policy export is only implemented for proprio-history student actors "
+            "(no scan / no privileged inputs)."
+        )
+
+    actor_obs_names = mapped_obs_names
+    input_actor_obs_scales = {
+        name: mapped_obs_scales.get(name, 1.0) for name in actor_obs_names
+    }
+    obs_mgr = env.unwrapped.observation_manager
+    group = _resolve_obs_group(obs_mgr)
+    group_dims = getattr(obs_mgr, "group_obs_dim", {})
+    actor_obs_dim = None
+    if group is not None and group in group_dims:
+        dim = group_dims[group]
+        actor_obs_dim = int(dim[0] if isinstance(dim, (list, tuple)) else dim)
+    if actor_obs_dim is None or actor_obs_dim <= 0:
+        actor_obs_dim = int(actor_num_prop or len(actor_obs_names))
+
+    return {
+        "input_names": ["actor_obs"],
+        "input_obs_names_map": {"actor_obs": actor_obs_names},
+        "input_obs_scales_map": {"actor_obs": input_actor_obs_scales},
+        "input_obs_size_map": {"actor_obs": int(actor_obs_dim)},
+        "obs_history_length": {"actor_obs": 1},
+        "export_input_order": ["actor_obs"],
+    }
+
+
+def _synchronize_policy_export_cfg(policy_cfg_dict: dict) -> dict:
+    input_names = list(policy_cfg_dict.get("input_names") or [])
+    if not input_names:
+        input_names = ["actor_obs"]
+        policy_cfg_dict["input_names"] = input_names
+
+    input_obs_names_map = copy.deepcopy(policy_cfg_dict.get("input_obs_names_map") or {})
+    if not input_obs_names_map and "input_actor_obs_names" in policy_cfg_dict:
+        input_obs_names_map["actor_obs"] = copy.deepcopy(policy_cfg_dict["input_actor_obs_names"])
+    policy_cfg_dict["input_obs_names_map"] = input_obs_names_map
+
+    input_obs_scales_map = copy.deepcopy(policy_cfg_dict.get("input_obs_scales_map") or {})
+    if not input_obs_scales_map and "input_actor_obs_scales" in policy_cfg_dict:
+        input_obs_scales_map["actor_obs"] = copy.deepcopy(policy_cfg_dict["input_actor_obs_scales"])
+    policy_cfg_dict["input_obs_scales_map"] = input_obs_scales_map
+
+    input_obs_size_map = copy.deepcopy(policy_cfg_dict.get("input_obs_size_map") or {})
+    policy_cfg_dict["input_obs_size_map"] = input_obs_size_map
+
+    obs_history_length = copy.deepcopy(policy_cfg_dict.get("obs_history_length") or {})
+    if not obs_history_length:
+        obs_history_length = {name: 1 for name in input_names}
+    policy_cfg_dict["obs_history_length"] = obs_history_length
+
+    if "output_names" not in policy_cfg_dict or not policy_cfg_dict["output_names"]:
+        policy_cfg_dict["output_names"] = ["actions"]
+
+    export_input_dims = copy.deepcopy(policy_cfg_dict.get("export_input_dims") or {})
+    if not export_input_dims:
+        export_input_dims = {
+            name: int(input_obs_size_map[name] * obs_history_length.get(name, 1))
+            for name in input_names
+            if name in input_obs_size_map
+        }
+    policy_cfg_dict["export_input_dims"] = export_input_dims
+
+    policy_cfg_dict["input_actor_obs_names"] = copy.deepcopy(
+        policy_cfg_dict["input_obs_names_map"].get("actor_obs", [])
+    )
+    policy_cfg_dict["input_actor_obs_scales"] = copy.deepcopy(
+        policy_cfg_dict["input_obs_scales_map"].get("actor_obs", {})
+    )
+    policy_cfg_dict["export_input_order"] = list(
+        policy_cfg_dict.get("export_input_order") or input_names
+    )
+    return policy_cfg_dict
 
 
 def _infer_command_max_velocity(command_cfg):
@@ -328,6 +556,32 @@ def export_policy_as_onnx_dual_input(
     policy_exporter.export(path, filename)
 
 
+def export_policy_as_onnx_grouped_inputs(
+    actor_critic: object,
+    path: str,
+    input_groups: dict[str, int] | list[tuple[str, int]],
+    normalizer: object | None = None,
+    filename="policy.onnx",
+    verbose: bool = False,
+):
+    """Export policy into an ONNX file with explicit input groups.
+
+    The grouped inputs are concatenated in-order before normalizer / actor inference.
+    This is useful for deployment stacks that reconstruct current proprio and
+    history buffers separately but the training-time actor consumes a single
+    flattened observation vector.
+    """
+    if not os.path.exists(path):
+        os.makedirs(path, exist_ok=True)
+    policy_exporter = _OnnxPolicyExporterGroupedInputs(
+        actor_critic,
+        normalizer,
+        input_groups=input_groups,
+        verbose=verbose,
+    )
+    policy_exporter.export(path, filename)
+
+
 """
 Helper Classes - Private.
 """
@@ -443,57 +697,60 @@ class _OnnxPolicyExporter(torch.nn.Module):
             )
 
 
-class _OnnxPolicyExporterDualInput(torch.nn.Module):
-    """Exporter that exposes a single actor_obs input."""
+class _OnnxPolicyExporterGroupedInputs(torch.nn.Module):
+    """Exporter that exposes one or more named input groups."""
 
     def __init__(
         self,
         actor_critic: object,
         normalizer: object | None,
-        actor_obs_dim: int | None,
+        input_groups: dict[str, int] | list[tuple[str, int]],
         verbose: bool = False,
     ):
         super().__init__()
         self.verbose = verbose
         if getattr(actor_critic, "is_recurrent", False):
-            raise RuntimeError("Dual-input exporter does not support recurrent policies.")
+            raise RuntimeError("Grouped-input exporter does not support recurrent policies.")
         self.actor = copy.deepcopy(actor_critic.actor)
         if normalizer:
             self.normalizer = copy.deepcopy(normalizer)
         else:
             self.normalizer = torch.nn.Identity()
-        inferred = _infer_actor_input_dim(self.actor)
-        # resolve actor_obs_dim: prefer user-provided; fallback to inferred; ensure >= inferred if inferred is known
-        if actor_obs_dim is not None:
+
+        if isinstance(input_groups, dict):
+            input_groups = list(input_groups.items())
+        normalized_groups: list[tuple[str, int]] = []
+        for name, dim in input_groups:
             try:
-                actor_obs_dim = int(actor_obs_dim)
-            except Exception:
-                actor_obs_dim = None
-        if actor_obs_dim is None or actor_obs_dim <= 0:
-            actor_obs_dim = inferred
-        if actor_obs_dim is None or actor_obs_dim <= 0:
+                group_dim = int(dim)
+            except Exception as exc:
+                raise RuntimeError(f"Invalid input dim for group '{name}': {dim}") from exc
+            if group_dim <= 0:
+                raise RuntimeError(f"Invalid non-positive input dim for group '{name}': {group_dim}")
+            normalized_groups.append((str(name), group_dim))
+        if not normalized_groups:
+            raise RuntimeError("Grouped-input exporter requires at least one input group.")
+
+        inferred = _infer_actor_input_dim(self.actor)
+        total_input_dim = sum(dim for _name, dim in normalized_groups)
+        if inferred is None and total_input_dim <= 0:
             raise RuntimeError(
-                f"Unable to infer actor_obs_dim (provided={actor_obs_dim}, inferred={inferred}). "
-                "Please provide actor_obs_dim explicitly."
+                "Unable to infer grouped-input export size. Please provide explicit input_groups."
             )
-        if inferred is not None and actor_obs_dim < inferred:
-            actor_obs_dim = inferred
+        if inferred is not None and inferred != total_input_dim:
+            raise RuntimeError(
+                f"Grouped-input export dims {total_input_dim} do not match actor input dim {inferred}."
+            )
 
-        self.actor_obs_dim = actor_obs_dim
-        self.expected_obs_dim = inferred or self.actor_obs_dim
+        self.input_names = [name for name, _dim in normalized_groups]
+        self.input_dims = [dim for _name, dim in normalized_groups]
+        self.expected_obs_dim = inferred or total_input_dim
 
-    def _pad_or_trim(self, obs: torch.Tensor) -> torch.Tensor:
-        """Ensure obs has expected_obs_dim without tracing-time python branching.
-
-        During ONNX export / tracing, shape values may be Tensors; any python
-        branching on them triggers TracerWarning. In tracing, we simply slice to
-        the expected dimension (slicing is ONNX-friendly). Outside tracing, keep
-        the original pad/trim logic for robustness.
-        """
-        expected = self.actor_obs_dim or self.expected_obs_dim
-        if expected is None:
+    @staticmethod
+    def _pad_or_trim(obs: torch.Tensor, expected: int | None) -> torch.Tensor:
+        """Ensure obs has expected feature dim without tracing-time python branching."""
+        if expected is None or expected <= 0:
             return obs
-        # Avoid python bool on Tensor when tracing/onnx export
         if torch.jit.is_tracing() or torch.onnx.is_in_onnx_export():
             return obs[:, :expected]
 
@@ -508,31 +765,71 @@ class _OnnxPolicyExporterDualInput(torch.nn.Module):
         zeros = torch.zeros(obs.shape[0], pad, device=obs.device, dtype=obs.dtype)
         return torch.cat([obs, zeros], dim=1)
 
-    def forward(self, actor_obs):
-        obs = self._pad_or_trim(actor_obs)
+    def forward(self, *inputs):
+        if len(inputs) != len(self.input_dims):
+            raise RuntimeError(
+                f"Expected {len(self.input_dims)} grouped inputs, received {len(inputs)}."
+            )
+        obs_parts = [
+            self._pad_or_trim(obs, expected_dim)
+            for obs, expected_dim in zip(inputs, self.input_dims)
+        ]
+        obs = torch.cat(obs_parts, dim=1)
         return _call_actor(self.actor, self.normalizer(obs))
 
     def export(self, path, filename):
         self.to("cpu")
-        actor_dim = self.actor_obs_dim or self.expected_obs_dim
-        if actor_dim is None:
-            raise RuntimeError("Unable to infer actor_obs_dim for ONNX export.")
-        actor_obs = torch.zeros(1, actor_dim)
+        export_inputs = tuple(torch.zeros(1, dim) for dim in self.input_dims)
         torch.onnx.export(
             self,
-            actor_obs,
+            export_inputs,
             os.path.join(path, filename),
             export_params=True,
             opset_version=11,
             verbose=self.verbose,
-            input_names=["actor_obs"],
+            input_names=self.input_names,
             output_names=["actions"],
             dynamic_axes={},
         )
 
 
+class _OnnxPolicyExporterDualInput(_OnnxPolicyExporterGroupedInputs):
+    """Compatibility wrapper that exposes a single actor_obs input."""
+
+    def __init__(
+        self,
+        actor_critic: object,
+        normalizer: object | None,
+        actor_obs_dim: int | None,
+        verbose: bool = False,
+    ):
+        inferred = actor_obs_dim
+        if inferred is not None:
+            try:
+                inferred = int(inferred)
+            except Exception:
+                inferred = None
+        if inferred is None or inferred <= 0:
+            inferred = _infer_actor_input_dim(getattr(actor_critic, "actor", actor_critic))
+        if inferred is None or inferred <= 0:
+            raise RuntimeError("Unable to infer actor_obs_dim for ONNX export.")
+        super().__init__(
+            actor_critic,
+            normalizer,
+            input_groups=[("actor_obs", inferred)],
+            verbose=verbose,
+        )
+
+
 def export_inference_cfg(
-    env, env_cfg, path, load_run, checkpoint, agent_cfg=None, export_overrides: dict | None = None
+    env,
+    env_cfg,
+    path,
+    load_run,
+    checkpoint,
+    agent_cfg=None,
+    actor_critic: object | None = None,
+    export_overrides: dict | None = None,
 ):
     policy_cfg_dict = {}
     physics_dt = getattr(env.unwrapped, "physics_dt", None)
@@ -553,61 +850,25 @@ def export_inference_cfg(
     policy_cfg_dict["joint_names"] = joint_names
     policy_cfg_dict["default_joint_pos"] = _extract_joint_defaults(env, joint_names)
 
-    policy_cfg_dict["input_names"] = ["actor_obs"]
     policy_cfg_dict["output_names"] = ["actions"]
 
-    actor_obs_names = _extract_obs_terms(env)
     summary = getattr(env.unwrapped.cfg, "config_summary", None) or getattr(env_cfg, "config_summary", None)
     env_summary = getattr(summary, "env", None)
-    obs_summary = getattr(summary, "observation", None)
     action_summary = getattr(summary, "action", None)
+    export_layout = _build_export_input_layout(env, env_cfg, actor_critic=actor_critic)
+    policy_cfg_dict["input_names"] = list(export_layout["input_names"])
+    policy_cfg_dict["input_obs_names_map"] = copy.deepcopy(export_layout["input_obs_names_map"])
+    policy_cfg_dict["input_obs_scales_map"] = copy.deepcopy(export_layout["input_obs_scales_map"])
+    policy_cfg_dict["input_obs_size_map"] = copy.deepcopy(export_layout["input_obs_size_map"])
+    policy_cfg_dict["obs_history_length"] = copy.deepcopy(export_layout["obs_history_length"])
+    policy_cfg_dict["export_input_order"] = list(export_layout["export_input_order"])
+    policy_cfg_dict["input_actor_obs_names"] = copy.deepcopy(
+        policy_cfg_dict["input_obs_names_map"].get("actor_obs", [])
+    )
+    policy_cfg_dict["input_actor_obs_scales"] = copy.deepcopy(
+        policy_cfg_dict["input_obs_scales_map"].get("actor_obs", {})
+    )
 
-    action_history_length = getattr(env_summary, "action_history_length", None)
-    if action_history_length is None:
-        action_history_length = getattr(
-            getattr(getattr(env_cfg, "actions", None), "joint_pos", None), "history_length", 1
-        )
-    include_action_hist = getattr(env_summary, "include_action_hist", None)
-    if include_action_hist is None:
-        include_action_hist = action_history_length > 1
-    if include_action_hist and "action_hist" not in actor_obs_names:
-        actor_obs_names.append("action_hist")
-    policy_cfg_dict["input_actor_obs_names"] = actor_obs_names
-
-    obs_scales = _extract_obs_scales(env)
-    obs_name_map = getattr(obs_summary, "export_name_map", None)
-    if isinstance(obs_name_map, dict) and obs_name_map:
-        mapped_names = []
-        mapped_scales = {}
-        for name in actor_obs_names:
-            mapped = obs_name_map.get(name, name)
-            mapped_names.append(mapped)
-            if name in obs_scales:
-                mapped_scales[mapped] = obs_scales[name]
-        actor_obs_names = mapped_names
-        obs_scales = mapped_scales
-        policy_cfg_dict["input_actor_obs_names"] = actor_obs_names
-    for name in actor_obs_names:
-        if name not in obs_scales:
-            obs_scales[name] = 1.0
-
-    def _normalize_scale(val):
-        if isinstance(val, (list, tuple, np.ndarray)):
-            return [_safe_float(v, 1.0) for v in val]
-        return _safe_float(val, 1.0)
-
-    input_actor_obs_scales = {name: _normalize_scale(obs_scales[name]) for name in actor_obs_names}
-    policy_cfg_dict["input_actor_obs_scales"] = input_actor_obs_scales
-    obs_mgr = env.unwrapped.observation_manager
-    group = _resolve_obs_group(obs_mgr)
-    group_dims = getattr(obs_mgr, "group_obs_dim", {})
-    actor_obs_dim = None
-    if group is not None and group in group_dims:
-        dim = group_dims[group]
-        actor_obs_dim = int(dim[0] if isinstance(dim, (list, tuple)) else dim)
-    if actor_obs_dim is None:
-        actor_obs_dim = int(len(actor_obs_names))
-    policy_cfg_dict["input_obs_size_map"] = {"actor_obs": int(actor_obs_dim)}
     action_scale = getattr(action_summary, "scale", None)
     if action_scale is None:
         action_scale = getattr(getattr(env_cfg, "actions", None), "joint_pos", None)
@@ -625,10 +886,6 @@ def export_inference_cfg(
     if clip_obs is None:
         clip_obs = 100.0
     policy_cfg_dict["clip_obs"] = _safe_float(clip_obs, 100.0)
-    obs_history_length = getattr(env_summary, "obs_history_length", None)
-    if obs_history_length is None:
-        obs_history_length = getattr(getattr(env_cfg, "obs", None), "obs_history_length", 1)
-    policy_cfg_dict["obs_history_length"] = {"actor_obs": int(obs_history_length)}
 
     kp, kd, max_torques = _extract_actuator_vectors(env, joint_names)
     policy_cfg_dict["joint_kp"] = [float(f"{x:.4f}") for x in kp]
@@ -661,13 +918,14 @@ def export_inference_cfg(
     if export_overrides is None:
         export_overrides = EXPORT_PROFILE_GALILEO
     policy_cfg_dict = _apply_export_overrides(policy_cfg_dict, export_overrides)
+    policy_cfg_dict = _synchronize_policy_export_cfg(policy_cfg_dict)
 
     print("joint_names:", policy_cfg_dict["joint_names"])
     print("default_joint_pos:", policy_cfg_dict["default_joint_pos"])
     print("input_names:", policy_cfg_dict["input_names"])
     print("output_names:", policy_cfg_dict["output_names"])
-    print("input_actor_obs_names:", policy_cfg_dict["input_actor_obs_names"])
-    print("input_actor_obs_scales:", policy_cfg_dict["input_actor_obs_scales"])
+    print("input_obs_names_map:", policy_cfg_dict["input_obs_names_map"])
+    print("input_obs_scales_map:", policy_cfg_dict["input_obs_scales_map"])
     print("input_obs_size_map:", policy_cfg_dict["input_obs_size_map"])
     print("action_scale:", policy_cfg_dict["action_scale"])
     print("clip_actions:", policy_cfg_dict["clip_actions"])
@@ -691,6 +949,7 @@ def export_inference_cfg(
 def export_inference_cfg_to_yaml(config_dict, path, load_run, checkpoint):
     if not os.path.exists(path):
         os.makedirs(path, exist_ok=True)
+    config_dict = _synchronize_policy_export_cfg(copy.deepcopy(config_dict))
     readme_file_path = os.path.join(path, "policy.yaml")
     content = f'load_run: "{load_run}"\n'
     content += f'checkpoint: "{checkpoint}"\n'
@@ -717,28 +976,35 @@ def export_inference_cfg_to_yaml(config_dict, path, load_run, checkpoint):
 
     # input_obs_names_map 多行缩进
     content += "input_obs_names_map:\n  {\n"
-    content += "    actor_obs: ["
-    content += ", ".join(f'"{o}"' for o in config_dict["input_actor_obs_names"])
-    content += "],\n  }\n"
+    for input_name in config_dict["input_names"]:
+        obs_names = config_dict["input_obs_names_map"].get(input_name, [])
+        content += f"    {input_name}: ["
+        content += ", ".join(f'"{o}"' for o in obs_names)
+        content += "],\n"
+    content += "  }\n"
 
     # input_obs_scales_map 多行缩进，并区分标量／列表
-    scales = config_dict["input_actor_obs_scales"]
-    obs_list = config_dict["input_actor_obs_names"]
-    content += "input_obs_scales_map:\n  {\n    actor_obs: { "
-    parts = []
-    for obs in obs_list:
-        val = scales.get(obs, 1.0)
-        if isinstance(val, list):
-            sval = "[" + ", ".join(f"{x}" for x in val) + "]"
-        else:
-            sval = f"{val}"
-        parts.append(f"{obs}: {sval}")
-    content += ", ".join(parts)
-    content += " },\n  }\n"
+    content += "input_obs_scales_map:\n  {\n"
+    for input_name in config_dict["input_names"]:
+        scales = config_dict["input_obs_scales_map"].get(input_name, {})
+        obs_list = config_dict["input_obs_names_map"].get(input_name, [])
+        parts = []
+        for obs in obs_list:
+            val = scales.get(obs, 1.0)
+            if isinstance(val, (list, tuple, np.ndarray)):
+                sval = "[" + ", ".join(f"{x}" for x in val) + "]"
+            else:
+                sval = f"{val}"
+            parts.append(f"{obs}: {sval}")
+        content += f"    {input_name}: {{ "
+        content += ", ".join(parts)
+        content += " },\n"
+    content += "  }\n"
 
     content += "input_obs_size_map:\n  {\n"
-    for key, dim in config_dict["input_obs_size_map"].items():
-        content += f"    {key}: {dim},\n"
+    for input_name in config_dict["input_names"]:
+        dim = config_dict["input_obs_size_map"][input_name]
+        content += f"    {input_name}: {dim},\n"
     content += "  }\n"
 
     # 其余字段
@@ -748,7 +1014,10 @@ def export_inference_cfg_to_yaml(config_dict, path, load_run, checkpoint):
 
     # obs_history_length
     content += "obs_history_length: { "
-    content += ", ".join(f"{k}: {v}" for k, v in config_dict["obs_history_length"].items())
+    content += ", ".join(
+        f"{input_name}: {config_dict['obs_history_length'][input_name]}"
+        for input_name in config_dict["input_names"]
+    )
     content += " }\n"
     content += f"joint_kp: {config_dict['joint_kp']}\n"
     content += f"joint_kd: {config_dict['joint_kd']}\n"

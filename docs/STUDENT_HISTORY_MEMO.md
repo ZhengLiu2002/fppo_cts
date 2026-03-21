@@ -78,7 +78,7 @@ Relevant files:
 ### Distillation warning
 When we return to student training, also verify the **distillation** path uses history encoding.
 Relevant file:
-- `scripts/rsl_rl/algorithms/distillation.py`
+- `scripts/rsl_rl/algorithms/dagger.py`
 
 This is important because our actual workflow is:
 1. train teacher

@@ -174,6 +174,15 @@ class StudentObservationsCfg:
                 "history_length": GalileoDefaults.obs.student.actor_num_hist,
                 "include_base_lin_vel": False,
                 "command_name": "base_velocity",
+                "scales": {
+                    "base_lin_vel": 1.0,
+                    "base_ang_vel": 0.25,
+                    "projected_gravity": 1.0,
+                    "joint_pos": 1.0,
+                    "joint_vel": 0.05,
+                    "last_action": 0.25,
+                    "commands": (2.0, 2.0, 0.25),
+                },
             },
         )
 
@@ -183,7 +192,7 @@ class StudentObservationsCfg:
 
     @configclass
     class TeacherCfg(_PrivilegedObsGroupCfg):
-        """Teacher-policy observations exposed during distillation."""
+        """Teacher-policy observations exposed during DAgger training."""
 
         pass
 
@@ -244,7 +253,7 @@ class StudentRewardsCfg:
 
     track_lin_vel_xy_exp = RewTerm(
         func=rewards.track_lin_vel_xy_exp,
-        weight=1.0,
+        weight=0.5,
         params={
             "command_name": "base_velocity",
             "std": 0.25,
@@ -262,7 +271,7 @@ class StudentRewardsCfg:
     )
     joint_torques_l2 = RewTerm(
         func=rewards.joint_torque_l2,
-        weight=-2.5e-7,
+        weight=-2.0e-7,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     joint_acc_l2 = RewTerm(
@@ -283,10 +292,6 @@ class StudentRewardsCfg:
         func=rewards.action_rate_l2,
         weight=-1.0e-4,
     )
-    action_smoothness_l2 = RewTerm(
-        func=rewards.action_smoothness_l2,
-        weight=-0.0, # -5.0e-5
-    )
     lin_vel_z_l2 = RewTerm(
         func=rewards.lin_vel_z_l2,
         weight=-2.0,
@@ -294,6 +299,14 @@ class StudentRewardsCfg:
     ang_vel_xy_l2 = RewTerm(
         func=rewards.ang_vel_xy_l2,
         weight=-0.1,
+    )
+    flat_orientation_l2 = RewTerm(
+        func=rewards.flat_orientation_l2,
+        weight=-0.5,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "flat_terrain_name": "crl_flat",
+        },
     )
     feet_air_time = RewTerm(
         func=rewards.feet_air_time,
@@ -315,7 +328,7 @@ class StudentRewardsCfg:
     )
     trot_phase_reward = RewTerm(
         func=rewards.trot_phase_reward,
-        weight=0.35,
+        weight=0.1,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,
@@ -330,7 +343,7 @@ class StudentRewardsCfg:
     )
     undesired_contacts = RewTerm(
         func=rewards.undesired_contacts,
-        weight=-0.8,
+        weight=-1.0,
         params={
             "sensor_cfg": SceneEntityCfg(
                 "contact_forces", body_names=[".*_thigh", ".*_calf"]
@@ -351,7 +364,7 @@ class TeacherRewardsCfg:
         params={
             "command_name": "base_velocity",
             "std": 0.25,
-            "min_command_speed": 0.05,
+            "min_command_speed": 0.1,
         },
     )
     track_ang_vel_z_exp = RewTerm(
@@ -360,22 +373,22 @@ class TeacherRewardsCfg:
         params={
             "command_name": "base_velocity",
             "std": 0.25,
-            "min_command_speed": 0.05,
+            "min_command_speed": 0.1,
         },
     )
     joint_torques_l2 = RewTerm(
         func=rewards.joint_torque_l2,
-        weight=-2.0e-7,
+        weight=-5.0e-7,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
     joint_acc_l2 = RewTerm(
         func=rewards.joint_acc_l2, 
-        weight=-2.5e-9,
+        weight=-6.0e-9,
     )
     dof_error_l2 = RewTerm(
         func=rewards.dof_error_l2,
-        weight=-0.1,
+        weight=-0.2,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
     hip_pos_l2 = RewTerm(
@@ -385,7 +398,7 @@ class TeacherRewardsCfg:
     )
     action_rate_l2 = RewTerm(
         func=rewards.action_rate_l2,
-        weight=-1.0e-4,
+        weight=-1.0e-3,
     )
     lin_vel_z_l2 = RewTerm(
         func=rewards.lin_vel_z_l2, 
@@ -393,15 +406,24 @@ class TeacherRewardsCfg:
     )
     ang_vel_xy_l2 = RewTerm(
         func=rewards.ang_vel_xy_l2, 
-        weight=-0.1
+        weight=-0.5
+    )
+    flat_orientation_l2 = RewTerm(
+        func=rewards.flat_orientation_l2,
+        weight=-1.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "flat_terrain_name": "crl_flat",
+        },
     )
     feet_air_time = RewTerm(
         func=rewards.feet_air_time,
-        weight=1.0,
+        weight=3.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.25,
+            "threshold": 0.35,
+            "low_speed_threshold": 0.1,
         },
     )
     feet_slide = RewTerm(
@@ -415,7 +437,7 @@ class TeacherRewardsCfg:
     )
     trot_phase_reward = RewTerm(
         func=rewards.trot_phase_reward,
-        weight=0.5,
+        weight=0.2,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,
@@ -671,7 +693,7 @@ class StudentCurriculumCfg:
             "error_threshold": GalileoDefaults.curriculum.ang_tracking_error_threshold,
             "min_command_speed": GalileoDefaults.curriculum.ang_eval_min_command_speed,
             "min_active_ratio": GalileoDefaults.curriculum.command_min_active_ratio,
-            "min_lin_x_level": max(float(GalileoDefaults.curriculum.ang_min_lin_x_level), 0.4),
+            "min_lin_x_level": max(float(GalileoDefaults.curriculum.ang_min_lin_x_level), 0.45),
         },
     )
 

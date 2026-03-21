@@ -71,8 +71,8 @@ class RolloutStorage:
         )
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
-        # for distillation
-        if training_type == "distillation":
+        # for DAgger
+        if training_type == "dagger":
             self.privileged_actions = torch.zeros(
                 num_transitions_per_env, num_envs, *actions_shape, device=self.device
             )
@@ -168,8 +168,8 @@ class RolloutStorage:
                     )
                 self.cost_term_values[self.step].copy_(cost_term_values)
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
-        # for distillation
-        if self.training_type == "distillation":
+        # for DAgger
+        if self.training_type == "dagger":
             self.privileged_actions[self.step].copy_(transition.privileged_actions)
 
         # for reinforcement learning
@@ -328,10 +328,10 @@ class RolloutStorage:
                     std = self.cost_term_advantages.std(dim=(0, 1), keepdim=True, unbiased=False)
                     self.cost_term_advantages = (self.cost_term_advantages - mean) / (std + 1e-8)
 
-    # for distillation
+    # for DAgger
     def generator(self):
-        if self.training_type != "distillation":
-            raise ValueError("This function is only available for distillation training.")
+        if self.training_type != "dagger":
+            raise ValueError("This function is only available for DAgger training.")
 
         for i in range(self.num_transitions_per_env):
             if self.privileged_observations is not None:

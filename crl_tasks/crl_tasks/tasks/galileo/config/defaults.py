@@ -355,7 +355,7 @@ class GalileoDefaults:
 
         # 默认配置（用于 CommandsCfg 的初始化，不在地形特定配置中）
         class default:
-            standing_command_prob: float = 0.05
+            standing_command_prob: float = 0.10
             lin_vel_x = (-0.5, 1.0)
             lin_vel_y = (-0.5, 0.5)
             ang_vel_z = (-0.5, 0.5)
@@ -369,7 +369,7 @@ class GalileoDefaults:
                 lin_vel_x=(-0.5, 1.0),
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.5, 0.5),
-                standing_command_prob=0.0,
+                standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
                 max_curriculum_lin_x=(-0.5, 1.0),
@@ -379,7 +379,7 @@ class GalileoDefaults:
                 lin_vel_x=(-0.5, 1.0),
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.5, 0.5),
-                standing_command_prob=0.0,
+                standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.12, 0.25),
                 start_curriculum_ang_z=(-0.08, 0.08),
                 max_curriculum_lin_x=(-0.5, 1.0),
@@ -389,7 +389,7 @@ class GalileoDefaults:
                 lin_vel_x=(-0.5, 1.0),
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.5, 0.5),
-                standing_command_prob=0.0,
+                standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
                 max_curriculum_lin_x=(-0.5, 1.0),
@@ -399,7 +399,7 @@ class GalileoDefaults:
                 lin_vel_x=(-0.5, 1.0),
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.5, 0.5),
-                standing_command_prob=0.0,
+                standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
                 max_curriculum_lin_x=(-0.5, 1.0),
@@ -409,7 +409,7 @@ class GalileoDefaults:
                 lin_vel_x=(-0.5, 1.0),
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.5, 0.5),
-                standing_command_prob=0.0,
+                standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
                 max_curriculum_lin_x=(-0.5, 1.0),
@@ -419,7 +419,7 @@ class GalileoDefaults:
                 lin_vel_x=(-0.5, 1.0),
                 lin_vel_y=(-0.5, 0.5),
                 ang_vel_z=(-0.5, 0.5),
-                standing_command_prob=0.0,
+                standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
                 max_curriculum_lin_x=(-0.5, 1.0),
@@ -429,7 +429,7 @@ class GalileoDefaults:
                 lin_vel_x=(-0.5, 1.5),
                 lin_vel_y=(-1.0, 1.0),
                 ang_vel_z=(-0.5, 0.5),
-                standing_command_prob=0.0,
+                standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.2, 0.5),
                 start_curriculum_ang_z=(-0.12, 0.12),
                 max_curriculum_lin_x=(-0.5, 1.5),
@@ -534,7 +534,7 @@ class GalileoDefaults:
         - 其他算法继续复用通用 constrained-RL 配置；未用到的字段会在 runner 中过滤。
         """
 
-        # 与 CLI `--algo` 对齐：{"fppo","np3o","ppo","ppo_lagrange","cpo","pcpo","focops","distillation"}
+        # 与 CLI `--algo` 对齐：{"fppo","np3o","ppo","ppo_lagrange","cpo","pcpo","focops","dagger"}
         name: str = "fppo"
 
         # CLI/代码中的 class_name 映射（最终写入 agent_cfg.algorithm.class_name）
@@ -546,7 +546,7 @@ class GalileoDefaults:
             "cpo": "CPO",
             "pcpo": "PCPO",
             "focops": "FOCOPS",
-            "distillation": "Distillation",
+            "dagger": "DAgger",
         }
 
         # 共享默认值（两边都通用）
@@ -607,13 +607,9 @@ class GalileoDefaults:
         symmetry_base = dict(
             enabled=False,
             use_data_augmentation=True,
-            use_mirror_loss=False,
-            mirror_loss_coeff=0.0,
         )
         symmetry_teacher_override = dict(
             enabled=True,
-            use_mirror_loss=True,
-            mirror_loss_coeff=0.02,
         )
         symmetry_student_override = dict()
 
@@ -651,15 +647,7 @@ class GalileoDefaults:
                 constraint_curriculum_check_interval=40,
                 constraint_curriculum_alpha=0.7,
                 constraint_curriculum_shrink=0.985,
-                normalize_cost_advantage=False,
                 step_size_adaptive=True,
-                cost_viol_loss_coef=0.05,
-                k_value=0.1,
-                k_growth=1.00005,
-                k_max=0.5,
-                k_decay=0.9998,
-                k_min=0.02,
-                k_violation_threshold=0.02,
                 dagger_update_freq=20,
                 priv_reg_coef_schedual=[0.0, 0.1, 2000.0, 3000.0],
             ),
@@ -738,7 +726,16 @@ class GalileoDefaults:
                 focops_eta=0.02,
                 focops_lambda=1.0,
             ),
-            "distillation": dict(),
+            "dagger": dict(
+                dagger_update_freq=10,
+                dagger_buffer_size=1_048_576,
+                dagger_batch_size=16_384,
+                dagger_min_buffer_size=262_144,
+                dagger_batches_per_update=32,
+                teacher_action_ratio_start=1.0,
+                teacher_action_ratio_end=0.0,
+                teacher_action_ratio_decay_steps=8000,
+            ),
         }
 
         # Teacher/Student 差异
@@ -749,6 +746,10 @@ class GalileoDefaults:
 
         teacher_override = dict(
             entropy_coef=0.005,
+            # Ablation: relax predictor hard stop only for teacher runs to test whether
+            # current KL protection is overly conservative.
+            # baseline: predictor_kl_hard_limit=0.02
+            predictor_kl_hard_limit=0.04,
             constraint_curriculum_names=[
                 "prob_joint_pos",
                 "prob_joint_vel",
@@ -757,7 +758,6 @@ class GalileoDefaults:
         )
         student_override = dict(
             entropy_coef=0.01,
-            dagger_update_freq=1,  # Student stage-2: always use history latent (DAgger)
             reconstruction_loss_coef=0.1,
             constraint_curriculum_names=[
                 "prob_joint_pos",

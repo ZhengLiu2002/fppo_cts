@@ -16,6 +16,7 @@ try:
         load_experiment_preset,
         write_experiment_metadata,
     )
+    from scripts.rsl_rl.algorithms.registry import get_algorithm_spec
     from scripts.rsl_rl.runtime import (
         bootstrap_repo_paths,
         build_log_root_path,
@@ -32,6 +33,7 @@ except ImportError:
         load_experiment_preset,
         write_experiment_metadata,
     )
+    from algorithms.registry import get_algorithm_spec  # type: ignore
     from runtime import (  # type: ignore
         bootstrap_repo_paths,
         build_log_root_path,
@@ -153,6 +155,7 @@ def main(
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
+    algorithm_training_type = get_algorithm_spec(agent_cfg.algorithm.class_name).training_type
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -189,13 +192,14 @@ def main(
         env = multi_agent_to_single_agent(env)
 
     # save resume path before creating a new log_dir
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+    if agent_cfg.resume or algorithm_training_type == "dagger":
         resume_path = resolve_checkpoint_path(
             task_name=args_cli.task,
             log_root_path=log_root_path,
             load_run=agent_cfg.load_run,
             load_checkpoint=agent_cfg.load_checkpoint,
             checkpoint=args_cli.checkpoint,
+            algo_name=getattr(args_cli, "algo", None),
         )
 
     # # wrap for video recording
@@ -219,7 +223,7 @@ def main(
     # # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
-    if agent_cfg.resume or agent_cfg.algorithm.class_name == "Distillation":
+    if agent_cfg.resume or algorithm_training_type == "dagger":
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)

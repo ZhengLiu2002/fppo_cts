@@ -8,6 +8,7 @@ try:
         export_policy_as_jit,
         export_policy_as_onnx,
         export_policy_as_onnx_dual_input,
+        export_policy_as_onnx_grouped_inputs,
     )
 except Exception:
     # Keep imports lazy to avoid requiring Isaac Sim outside runtime.

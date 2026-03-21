@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import pickle
 import platform
+import re
 import sys
 from typing import Any
 
@@ -132,8 +133,9 @@ def resolve_checkpoint_path(
     load_checkpoint: str | None,
     checkpoint: str | None = None,
     use_pretrained_checkpoint: bool = False,
+    algo_name: str | None = None,
 ) -> str | None:
-    """Resolve an explicit, pretrained, or latest checkpoint path."""
+    """Resolve an explicit file, directory, pretrained, or latest checkpoint path."""
 
     if use_pretrained_checkpoint:
         from isaaclab.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
@@ -141,13 +143,85 @@ def resolve_checkpoint_path(
         return get_published_pretrained_checkpoint(_PRETRAINED_CHECKPOINT_NAMESPACE, task_name)
 
     if checkpoint:
+        checkpoint_path = os.path.abspath(os.path.expanduser(os.fspath(checkpoint)))
+        checkpoint_pattern = load_checkpoint
+        if checkpoint_pattern is not None:
+            normalized_pattern = os.path.abspath(os.path.expanduser(os.fspath(checkpoint_pattern)))
+            if normalized_pattern == checkpoint_path:
+                checkpoint_pattern = None
+
+        if os.path.isfile(checkpoint_path):
+            return checkpoint_path
+        if os.path.isdir(checkpoint_path):
+            return _resolve_checkpoint_from_directory(
+                checkpoint_path,
+                load_run=load_run,
+                load_checkpoint=checkpoint_pattern,
+                algo_name=algo_name,
+            )
+
         from isaaclab.utils.assets import retrieve_file_path
 
-        return retrieve_file_path(checkpoint)
+        retrieved_path = retrieve_file_path(checkpoint)
+        if os.path.isdir(retrieved_path):
+            return _resolve_checkpoint_from_directory(
+                retrieved_path,
+                load_run=load_run,
+                load_checkpoint=checkpoint_pattern,
+                algo_name=algo_name,
+            )
+        return retrieved_path
 
     from isaaclab_tasks.utils import get_checkpoint_path
 
     return get_checkpoint_path(os.fspath(log_root_path), load_run, load_checkpoint)
+
+
+def _resolve_checkpoint_from_directory(
+    directory: str | os.PathLike[str],
+    *,
+    load_run: str | None,
+    load_checkpoint: str | None,
+    algo_name: str | None,
+) -> str:
+    """Resolve the newest checkpoint from either a run directory or an experiment root."""
+
+    directory_path = os.path.abspath(os.fspath(directory))
+    checkpoint_pattern = load_checkpoint or r"model_.*\.pt"
+    direct_files = [
+        entry.name
+        for entry in os.scandir(directory_path)
+        if entry.is_file() and re.match(checkpoint_pattern, entry.name)
+    ]
+    if direct_files:
+        direct_files.sort(key=lambda name: f"{name:0>15}")
+        return os.path.join(directory_path, direct_files[-1])
+
+    run_pattern = load_run or ".*"
+    if run_pattern == ".*" and algo_name:
+        run_pattern = rf"{re.escape(algo_name)}_.*"
+
+    run_dirs = [
+        entry.path for entry in os.scandir(directory_path) if entry.is_dir() and re.match(run_pattern, entry.name)
+    ]
+    run_dirs.sort()
+    if not run_dirs:
+        raise ValueError(
+            f"No runs present in the directory: '{directory_path}' match: '{run_pattern}'."
+        )
+
+    run_path = run_dirs[-1]
+    model_checkpoints = [
+        entry.name
+        for entry in os.scandir(run_path)
+        if entry.is_file() and re.match(checkpoint_pattern, entry.name)
+    ]
+    if not model_checkpoints:
+        raise ValueError(
+            f"No checkpoints in the directory: '{run_path}' match '{checkpoint_pattern}'."
+        )
+    model_checkpoints.sort(key=lambda name: f"{name:0>15}")
+    return os.path.join(run_path, model_checkpoints[-1])
 
 
 def display_available() -> bool:

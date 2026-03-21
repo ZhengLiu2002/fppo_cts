@@ -11,6 +11,13 @@ STUDENT_ENV_FILE = (
     REPO_ROOT / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "student_env_cfg.py"
 )
 REWARDS_FILE = REPO_ROOT / "crl_isaaclab" / "envs" / "mdp" / "rewards.py"
+OBSERVATIONS_FILE = REPO_ROOT / "crl_isaaclab" / "envs" / "mdp" / "observations.py"
+RSL_CFG_FILE = (
+    REPO_ROOT / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "agents" / "rsl_rl_cfg.py"
+)
+RUNNER_FILE = (
+    REPO_ROOT / "scripts" / "rsl_rl" / "modules" / "on_policy_runner_with_extractor.py"
+)
 
 
 def _module_and_source(path: Path) -> tuple[ast.Module, str]:
@@ -70,7 +77,6 @@ def test_student_and_teacher_rewards_keep_only_nonzero_weight_terms() -> None:
     student_terms = {name for name in student.keys() if name != "only_positive_rewards"}
     teacher_terms = {name for name in teacher.keys() if name != "only_positive_rewards"}
     removed_zero_weight_terms = {
-        "flat_orientation_l2",
         "base_height_l2_fix",
         "joint_vel_l2",
         "joint_power_distribution",
@@ -84,10 +90,16 @@ def test_student_and_teacher_rewards_keep_only_nonzero_weight_terms() -> None:
     assert removed_zero_weight_terms.isdisjoint(teacher_terms)
     assert student_terms == teacher_terms | {"action_smoothness_l2"}
     assert "action_smoothness_l2" not in teacher_terms
+    assert "flat_orientation_l2" in student_terms
+    assert "flat_orientation_l2" in teacher_terms
     assert _source_segment(source, student["only_positive_rewards"]) == "True"
-    assert "weight=0.35" in _source_segment(source, student["trot_phase_reward"])
-    assert "weight=0.5" in _source_segment(source, teacher["trot_phase_reward"])
-    assert "weight=-5.0e-5" in _source_segment(source, student["action_smoothness_l2"])
+    assert "weight=-0.5" in _source_segment(source, student["flat_orientation_l2"])
+    assert '"flat_terrain_name": "crl_flat"' in _source_segment(source, student["flat_orientation_l2"])
+    assert "weight=-1.0" in _source_segment(source, teacher["flat_orientation_l2"])
+    assert '"flat_terrain_name": "crl_flat"' in _source_segment(source, teacher["flat_orientation_l2"])
+    assert "weight=0.1" in _source_segment(source, student["trot_phase_reward"])
+    assert "weight=0.35" in _source_segment(source, teacher["trot_phase_reward"])
+    assert "weight=-0.0" in _source_segment(source, student["action_smoothness_l2"])
     assert '"asset_cfg": SceneEntityCfg("robot", body_names=".*_foot")' in _source_segment(
         source, student["feet_slide"]
     )
@@ -105,7 +117,7 @@ def test_student_curriculum_is_teacher_aligned_but_more_conservative() -> None:
     assert "command_min_progress_steps * 1.25" in _source_segment(
         source, student_curriculum["lin_vel_x_command_threshold"]
     )
-    assert "max(float(GalileoDefaults.curriculum.ang_min_lin_x_level), 0.4)" in _source_segment(
+    assert "max(float(GalileoDefaults.curriculum.ang_min_lin_x_level), 0.45)" in _source_segment(
         source, student_curriculum["ang_vel_z_command_threshold"]
     )
 
@@ -124,3 +136,61 @@ def test_student_constraint_curriculum_names_are_joint_feasibility_terms() -> No
     assert '"prob_joint_pos"' in student_override_segment
     assert '"prob_joint_vel"' in student_override_segment
     assert '"prob_joint_torque"' in student_override_segment
+
+
+def test_student_proprio_history_scales_match_policy_observation_terms() -> None:
+    module, source = _module_and_source(MDP_CFG_FILE)
+    student_observations = _class_node(module, "StudentObservationsCfg")
+    policy_cfg = _class_node(student_observations, "PolicyCfg")
+    policy_assignments = _class_assignments(policy_cfg)
+    history_segment = _source_segment(source, policy_assignments["proprio_history"])
+
+    assert '"scales"' in history_segment
+    assert '"base_ang_vel": 0.25' in history_segment
+    assert '"projected_gravity": 1.0' in history_segment
+    assert '"joint_vel": 0.05' in history_segment
+    assert '"last_action": 0.25' in history_segment
+    assert '"commands": (2.0, 2.0, 0.25)' in history_segment
+
+
+def test_dagger_teacher_action_schedule_defaults_are_teacher_guided() -> None:
+    rsl_module, rsl_source = _module_and_source(RSL_CFG_FILE)
+    dagger_cfg = _class_assignments(_class_node(rsl_module, "CRLRslRlDAggerAlgorithmCfg"))
+
+    assert _source_segment(rsl_source, dagger_cfg["teacher_action_ratio_start"]) == "1.0"
+    assert _source_segment(rsl_source, dagger_cfg["teacher_action_ratio_end"]) == "0.0"
+    assert _source_segment(rsl_source, dagger_cfg["teacher_action_ratio_decay_steps"]) == "8000"
+    assert _source_segment(rsl_source, dagger_cfg["dagger_buffer_size"]) == "1_048_576"
+    assert _source_segment(rsl_source, dagger_cfg["dagger_min_buffer_size"]) == "262_144"
+
+    defaults_module, defaults_source = _module_and_source(DEFAULTS_FILE)
+    defaults_cls = _class_node(defaults_module, "GalileoDefaults")
+    algorithm_cls = _class_node(defaults_cls, "algorithm")
+    algorithm_assignments = _class_assignments(algorithm_cls)
+    per_algo_segment = _source_segment(defaults_source, algorithm_assignments["per_algo"])
+
+    assert 'teacher_action_ratio_start=1.0' in per_algo_segment
+    assert 'teacher_action_ratio_end=0.0' in per_algo_segment
+    assert 'teacher_action_ratio_decay_steps=8000' in per_algo_segment
+    assert 'dagger_buffer_size=1_048_576' in per_algo_segment
+    assert 'dagger_min_buffer_size=262_144' in per_algo_segment
+
+
+def test_runner_keeps_history_enabled_for_history_only_student_rollouts() -> None:
+    source = RUNNER_FILE.read_text(encoding="utf-8")
+
+    assert "policy_requires_history_rollout" in source
+    assert 'getattr(actor_module, "num_hist", 0) > 0' in source
+    assert 'getattr(actor_module, "num_priv_latent", 0) or 0) <= 0' in source
+    assert "policy_hist_encoding = history_encoder_update_due or policy_requires_history_rollout" in source
+
+
+def test_policy_history_supports_per_term_scaling() -> None:
+    module, source = _module_and_source(OBSERVATIONS_FILE)
+    policy_history = _class_node(module, "PolicyHistory")
+    segment = _source_segment(source, policy_history)
+
+    assert "def _apply_scale" in segment
+    assert 'scale_cfg = dict(scales or {})' in segment
+    assert 'scale_cfg.get("base_ang_vel", 1.0)' in segment
+    assert 'scale_cfg.get("commands", 1.0)' in segment

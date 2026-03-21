@@ -7,6 +7,7 @@
 
 import argparse
 import os
+import sys
 import warnings
 
 try:
@@ -76,6 +77,18 @@ parser.add_argument(
     default=False,
     help="Force GUI mode and skip auto headless fallback.",
 )
+parser.add_argument(
+    "--export_only",
+    action="store_true",
+    default=False,
+    help="Export deployment artifacts and exit without running the playback loop.",
+)
+parser.add_argument(
+    "--export_dir",
+    type=str,
+    default=None,
+    help="Directory to store exported deployment artifacts. Defaults to <checkpoint_dir>/exported_policy.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -123,7 +136,11 @@ from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
 from crl_tasks.tasks.galileo.config.agents.rsl_rl_cfg import CRLRslRlOnPolicyRunnerCfg
 
-from scripts.rsl_rl.exporter import export_inference_cfg, export_policy_as_onnx_dual_input
+from scripts.rsl_rl.exporter import (
+    export_inference_cfg,
+    export_policy_as_onnx_dual_input,
+    export_policy_as_onnx_grouped_inputs,
+)
 from scripts.rsl_rl.vecenv_wrapper import CRLRslRlVecEnvWrapper
 
 import isaaclab_tasks  # noqa: F401
@@ -189,6 +206,7 @@ def main():
         load_checkpoint=agent_cfg.load_checkpoint,
         checkpoint=args_cli.checkpoint,
         use_pretrained_checkpoint=args_cli.use_pretrained_checkpoint,
+        algo_name=getattr(args_cli, "algo", None),
     )
     if not resume_path:
         print(
@@ -252,22 +270,50 @@ def main():
 
     policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
     policy_nn = ppo_runner.alg.policy
-    export_model_dir = os.path.join(os.path.dirname(resume_path), "exported_policy")
-    export_cfg = export_inference_cfg(
-        env,
-        env_cfg,
-        export_model_dir,
-        load_run=agent_cfg.load_run or ".*",
-        checkpoint=resume_path,
-        agent_cfg=agent_cfg,
-    )
-    export_policy_as_onnx_dual_input(
-        policy_nn,
-        normalizer=ppo_runner.obs_normalizer,
-        path=export_model_dir,
-        filename="policy.onnx",
-        actor_obs_dim=export_cfg["input_obs_size_map"]["actor_obs"],
-    )
+    should_export = args_cli.export_only or args_cli.export_dir is not None
+    if should_export:
+        export_model_dir = args_cli.export_dir or os.path.join(
+            os.path.dirname(resume_path), "exported_policy"
+        )
+        export_cfg = export_inference_cfg(
+            env,
+            env_cfg,
+            export_model_dir,
+            load_run=agent_cfg.load_run or ".*",
+            checkpoint=resume_path,
+            agent_cfg=agent_cfg,
+            actor_critic=policy_nn,
+        )
+        export_input_order = list(export_cfg.get("export_input_order") or export_cfg["input_names"])
+        export_input_dims = {
+            name: int(export_cfg["export_input_dims"][name]) for name in export_input_order
+        }
+        if len(export_input_order) == 1:
+            export_policy_as_onnx_dual_input(
+                policy_nn,
+                normalizer=ppo_runner.obs_normalizer,
+                path=export_model_dir,
+                filename="policy.onnx",
+                actor_obs_dim=export_input_dims[export_input_order[0]],
+            )
+        else:
+            export_policy_as_onnx_grouped_inputs(
+                policy_nn,
+                normalizer=ppo_runner.obs_normalizer,
+                path=export_model_dir,
+                filename="policy.onnx",
+                input_groups=[(name, export_input_dims[name]) for name in export_input_order],
+            )
+        print(f"[INFO] Exported deployment artifacts to: {export_model_dir}")
+
+    if args_cli.export_only:
+        env.close()
+        # Omniverse teardown can hang after export-only headless runs even though
+        # the artifacts are already written. Flush logs and terminate cleanly
+        # from the CLI user's perspective instead of waiting on the viewer stack.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
     dt = env.unwrapped.step_dt
     # reset environment

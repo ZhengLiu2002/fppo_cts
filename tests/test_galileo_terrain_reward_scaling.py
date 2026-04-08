@@ -1,0 +1,74 @@
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+MDP_CFG_FILE = REPO_ROOT / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "mdp_cfg.py"
+REWARDS_FILE = REPO_ROOT / "crl_isaaclab" / "envs" / "mdp" / "rewards.py"
+
+
+def _module_and_source(path: Path) -> tuple[ast.Module, str]:
+    source = path.read_text(encoding="utf-8")
+    return ast.parse(source), source
+
+
+def _class_node(container: ast.Module | ast.ClassDef, name: str) -> ast.ClassDef:
+    for node in container.body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node
+    raise AssertionError(f"Class {name} not found in {container}.")
+
+
+def _function_node(module: ast.Module, name: str) -> ast.FunctionDef:
+    for node in module.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f"Function {name} not found in {module}.")
+
+
+def _class_assignments(node: ast.ClassDef) -> dict[str, ast.AST]:
+    assignments: dict[str, ast.AST] = {}
+    for stmt in node.body:
+        if isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = stmt.value
+        elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            assignments[stmt.target.id] = stmt.value
+    return assignments
+
+
+def _source_segment(source: str, node: ast.AST) -> str:
+    segment = ast.get_source_segment(source, node)
+    if segment is None:
+        raise AssertionError("Failed to recover source segment.")
+    return segment
+
+
+def test_dof_error_l2_supports_terrain_aware_scaling() -> None:
+    module, source = _module_and_source(REWARDS_FILE)
+    dof_error = _function_node(module, "dof_error_l2")
+    segment = _source_segment(source, dof_error)
+
+    assert "flat_terrain_name: str = \"crl_flat\"" in segment
+    assert "flat_scale: float = 1.0" in segment
+    assert "rough_scale: float = 1.0" in segment
+    assert "_flat_terrain_scale(" in segment
+    assert "return reward * terrain_scale" in segment
+
+
+def test_galileo_dof_error_reward_is_more_strict_on_flat_than_rough() -> None:
+    module, source = _module_and_source(MDP_CFG_FILE)
+    student = _class_assignments(_class_node(module, "StudentRewardsCfg"))
+    teacher = _class_assignments(_class_node(module, "TeacherRewardsCfg"))
+
+    student_segment = _source_segment(source, student["dof_error_l2"])
+    teacher_segment = _source_segment(source, teacher["dof_error_l2"])
+
+    for segment in (student_segment, teacher_segment):
+        assert '"flat_terrain_name": "crl_flat"' in segment
+        assert '"flat_scale": 1.5' in segment
+        assert '"rough_scale": 0.5' in segment
+

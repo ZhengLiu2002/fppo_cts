@@ -207,7 +207,7 @@ GALILEO_ROUGH_TERRAIN_CFG = TerrainGeneratorCfg(
             platform_width=2.0,
             border_width=0.25,
         ),
-        "plane_run": terrain_gen.MeshPlaneTerrainCfg(
+        "crl_flat": terrain_gen.MeshPlaneTerrainCfg(
             proportion=0.10,
         ),
     },
@@ -425,7 +425,7 @@ class GalileoDefaults:
                 max_curriculum_lin_x=(-0.5, 1.0),
                 max_curriculum_ang_z=(-0.5, 0.5),
             ),
-            "plane_run": dict(
+            "crl_flat": dict(
                 lin_vel_x=(-0.5, 1.5),
                 lin_vel_y=(-1.0, 1.0),
                 ang_vel_z=(-0.5, 0.5),

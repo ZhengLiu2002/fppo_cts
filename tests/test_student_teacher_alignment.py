@@ -105,6 +105,15 @@ def test_student_and_teacher_rewards_keep_only_nonzero_weight_terms() -> None:
     )
 
 
+def test_flat_terrain_name_is_defined_consistently_in_defaults() -> None:
+    source = DEFAULTS_FILE.read_text(encoding="utf-8")
+
+    assert '"crl_flat": terrain_gen.MeshPlaneTerrainCfg(' in source
+    assert '"crl_flat": dict(' in source
+    assert '"plane_run": terrain_gen.MeshPlaneTerrainCfg(' not in source
+    assert '"plane_run": dict(' not in source
+
+
 def test_student_curriculum_is_teacher_aligned_but_more_conservative() -> None:
     module, source = _module_and_source(MDP_CFG_FILE)
     student_curriculum = _class_assignments(_class_node(module, "StudentCurriculumCfg"))

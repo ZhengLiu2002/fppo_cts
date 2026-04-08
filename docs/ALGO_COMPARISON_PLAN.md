@@ -67,13 +67,14 @@ LOG_RUN_NAME=<algo> python scripts/rsl_rl/train.py \
 ```
 
 Teacher: fppo
+
 ```bash
 LOG_RUN_NAME=fppo python scripts/rsl_rl/train.py \
   --task Isaac-Galileo-CRL-Teacher-v0 \
   --algo fppo \
   --exp galileo/studies/algo_compare_teacher_fair \
   --num_envs 4096 \
-  --max_iterations 15000 \
+  --max_iterations 20000 \
   --run_name teacher \
   --headless \
   --logger wandb \
@@ -81,6 +82,7 @@ LOG_RUN_NAME=fppo python scripts/rsl_rl/train.py \
 ```
 
 Teacher: ppo
+
 ```bash
 LOG_RUN_NAME=ppo python scripts/rsl_rl/train.py \
   --task Isaac-Galileo-CRL-Teacher-v0 \
@@ -95,6 +97,7 @@ LOG_RUN_NAME=ppo python scripts/rsl_rl/train.py \
 ```
 
 Teacher: pcpo
+
 ```bash
 LOG_RUN_NAME=pcpo python scripts/rsl_rl/train.py \
   --task Isaac-Galileo-CRL-Teacher-v0 \
@@ -109,6 +112,7 @@ LOG_RUN_NAME=pcpo python scripts/rsl_rl/train.py \
 ```
 
 Teacher: np3o
+
 ```bash
 LOG_RUN_NAME=np3o python scripts/rsl_rl/train.py \
   --task Isaac-Galileo-CRL-Teacher-v0 \
@@ -121,8 +125,6 @@ LOG_RUN_NAME=np3o python scripts/rsl_rl/train.py \
   --logger wandb \
   --log_project_name galileo_teacher
 ```
-
-
 
 NP3O baseline：
 
@@ -255,8 +257,6 @@ LOG_RUN_NAME=fppo_student_dagger python scripts/rsl_rl/train.py \
 
 ```
 
-
-
 ### 3.4 Student 可视化命令
 
 Student 可视化模板：
@@ -349,6 +349,7 @@ python scripts/rsl_rl/play.py \
 ## 4. 遥控可视化
 
 ### 4.1 教师
+
 ```bash
 python scripts/rsl_rl/play_keyboard.py \
   --task Isaac-Galileo-CRL-Teacher-Play-v0 \
@@ -361,6 +362,7 @@ python scripts/rsl_rl/play_keyboard.py \
 ```
 
 ### 4.2 学生
+
 ```bash
 python scripts/rsl_rl/play_keyboard.py \
   --task Isaac-Galileo-CRL-Student-Play-v0 \
@@ -371,9 +373,11 @@ python scripts/rsl_rl/play_keyboard.py \
 ```
 
 如果想调台阶强度，可以加：
+
 ```bash
 --step-height 0.18 --stair-steps 10
 ```
+
 W/S 或 方向键上/下：前进/后退
 A/D：左/右平移
 Q/E 或 方向键左/右：左/右转
@@ -436,22 +440,22 @@ Esc：退出
 
 ### 6.1 最值得先做的消融表
 
-| 优先级 | 组件 / trick | 范围 | 为什么值得做 | 推荐消融方式 | 现有 WandB 是否基本够用 | 主要判据 |
-| --- | --- | --- | --- | --- | --- | --- |
-| P0 | FPPO 投影修正本体 | Teacher / Student FPPO | 这是 FPPO 和 PPO 的核心区别，最先要证明 | 先做 `fppo vs ppo`；若想更纯粹，再补“predictor-only, no corrector”开关 | 部分够用 | `reward`、`cost_violation_rate`、`current_max_violation`、`accept_rate`、`active_constraints` |
-| P0 | 自适应步长 `step_size_adaptive` | FPPO | 这是典型可能“复杂但未必必要”的模块 | `step_size_adaptive=False` | 够用 | `step_size`、`effective_step_ratio`、`accept_rate`、`infeasible_batch_rate` 是否明显变化 |
-| P0 | 约束 curriculum `adaptive_constraint_curriculum` | FPPO | 如果几乎从不 tighten，就很可能是冗余逻辑 | 关闭 curriculum，并令起始/最终 limit 相同 | 够用 | `curriculum_progress`、`curriculum_tighten_count`、`curriculum_gate_*`、reward/cost 曲线 |
-| P0 | Teacher 对称增强 `symmetry_cfg` | Teacher | Teacher 已启用左-右镜像增强，可能和 gait reward 存在功能重叠 | 关闭 symmetry augmentation | 基本够用 | `reward`、`error_vel_xy`、`prob_joint_*`、步态相关 cost/reward、最终动作观感 |
-| P0 | Student 重构辅助损失 `reconstruction_loss_coef` | Student RL / DAgger | 当前 student 默认带 reconstruction，很可能是“有损失下降但不提性能”的典型 | `reconstruction_loss_coef=0` | 够用 | `Loss/reconstruction` 下降是否真的带来 reward / tracking / behavior 改善 |
-| P0 | 奖励项裁剪 / 删除 | Teacher / Student | 最容易藏冗余，尤其是权重很小的 shaping 项 | 把单个 reward 项权重置 0，逐项筛 | 基本够用 | 该 reward 项的 episodic 曲线量级、移除后 reward/cost/稳定性是否几乎不变 |
-| P1 | Predictor KL 控制 | FPPO | 包括 predictor 自适应 lr 和 hard stop，可能过于保守 | 放宽 `predictor_kl_hard_limit`，或关掉自适应 KL 调度 | 够用 | `predictor_kl`、`predictor_stop_rate`、`predictor_lr` 是否长期接近“未触发” |
-| P1 | `use_clipped_surrogate` | FPPO | predictor 里再做 PPO clip 可能是重复稳健化 | `use_clipped_surrogate=False` | 够用 | `predictor_kl`、reward、cost violation 是否明显恶化 |
-| P1 | 多 cost-head critic | 所有 constrained 算法 | 当前会按 active cost term 自动推成多头，未必一定比单头更值 | 显式固定 `num_cost_heads=1` 对比当前多头 | 不完全够用 | reward/cost 能看大方向，但最好再补每个 cost head 的拟合误差 |
-| P1 | Student 的 constraint adapter | Student FPPO | Student 侧会启用 cost 归一化/聚合，复杂度不低 | 关闭 `constraint_adapter` | 不完全够用 | 需要看 reward/cost，也建议补 raw vs normalized cost 曲线 |
-| P1 | Student 动作延迟与动作历史 | Student | 真实部署有意义，但训练里可能和 history encoder / reconstruction 重叠 | 关闭 `use_delay`，或把 `history_length` 从 8 降到 1 | 不够 | 需要补 action smoothness / slip / 恢复能力评测 |
-| P1 | Student 域随机化与 push 扰动 | Student | 对鲁棒性可能有帮助，但对训练曲线不一定体现 | 分组关掉 mass/com/material/push | 不够 | 训练曲线不够，必须补鲁棒性评测 |
-| P2 | 命令 curriculum 节流逻辑 | Teacher / Student | 可能只是“让训练更平滑”，也可能拖慢上限 | 关掉 gated progression 或放宽 gate | 不完全够用 | 最好补 command level 曲线；只看 reward 容易误判 |
-| P2 | DAgger 的 teacher mixing schedule | Student DAgger | 有可能 handoff 过程过长，造成冗余 teacher 依赖 | 缩短或取消 `teacher_action_ratio` 衰减 | 部分够用 | `teacher_action_ratio`、behavior loss、student reward、最终 student 独立表现 |
+| 优先级 | 组件 / trick                                       | 范围                   | 为什么值得做                                                               | 推荐消融方式                                                               | 现有 WandB 是否基本够用 | 主要判据                                                                                                |
+| ------ | -------------------------------------------------- | ---------------------- | -------------------------------------------------------------------------- | -------------------------------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------- |
+| P0     | FPPO 投影修正本体                                  | Teacher / Student FPPO | 这是 FPPO 和 PPO 的核心区别，最先要证明                                    | 先做 `fppo vs ppo`；若想更纯粹，再补“predictor-only, no corrector”开关 | 部分够用                | `reward`、`cost_violation_rate`、`current_max_violation`、`accept_rate`、`active_constraints` |
+| P0     | 自适应步长 `step_size_adaptive`                  | FPPO                   | 这是典型可能“复杂但未必必要”的模块                                       | `step_size_adaptive=False`                                               | 够用                    | `step_size`、`effective_step_ratio`、`accept_rate`、`infeasible_batch_rate` 是否明显变化        |
+| P0     | 约束 curriculum `adaptive_constraint_curriculum` | FPPO                   | 如果几乎从不 tighten，就很可能是冗余逻辑                                   | 关闭 curriculum，并令起始/最终 limit 相同                                  | 够用                    | `curriculum_progress`、`curriculum_tighten_count`、`curriculum_gate_*`、reward/cost 曲线          |
+| P0     | Teacher 对称增强 `symmetry_cfg`                  | Teacher                | Teacher 已启用左-右镜像增强，可能和 gait reward 存在功能重叠               | 关闭 symmetry augmentation                                                 | 基本够用                | `reward`、`error_vel_xy`、`prob_joint_*`、步态相关 cost/reward、最终动作观感                      |
+| P0     | Student 重构辅助损失 `reconstruction_loss_coef`  | Student RL / DAgger    | 当前 student 默认带 reconstruction，很可能是“有损失下降但不提性能”的典型 | `reconstruction_loss_coef=0`                                             | 够用                    | `Loss/reconstruction` 下降是否真的带来 reward / tracking / behavior 改善                              |
+| P0     | 奖励项裁剪 / 删除                                  | Teacher / Student      | 最容易藏冗余，尤其是权重很小的 shaping 项                                  | 把单个 reward 项权重置 0，逐项筛                                           | 基本够用                | 该 reward 项的 episodic 曲线量级、移除后 reward/cost/稳定性是否几乎不变                                 |
+| P1     | Predictor KL 控制                                  | FPPO                   | 包括 predictor 自适应 lr 和 hard stop，可能过于保守                        | 放宽 `predictor_kl_hard_limit`，或关掉自适应 KL 调度                     | 够用                    | `predictor_kl`、`predictor_stop_rate`、`predictor_lr` 是否长期接近“未触发”                      |
+| P1     | `use_clipped_surrogate`                          | FPPO                   | predictor 里再做 PPO clip 可能是重复稳健化                                 | `use_clipped_surrogate=False`                                            | 够用                    | `predictor_kl`、reward、cost violation 是否明显恶化                                                   |
+| P1     | 多 cost-head critic                                | 所有 constrained 算法  | 当前会按 active cost term 自动推成多头，未必一定比单头更值                 | 显式固定 `num_cost_heads=1` 对比当前多头                                 | 不完全够用              | reward/cost 能看大方向，但最好再补每个 cost head 的拟合误差                                             |
+| P1     | Student 的 constraint adapter                      | Student FPPO           | Student 侧会启用 cost 归一化/聚合，复杂度不低                              | 关闭 `constraint_adapter`                                                | 不完全够用              | 需要看 reward/cost，也建议补 raw vs normalized cost 曲线                                                |
+| P1     | Student 动作延迟与动作历史                         | Student                | 真实部署有意义，但训练里可能和 history encoder / reconstruction 重叠       | 关闭 `use_delay`，或把 `history_length` 从 8 降到 1                    | 不够                    | 需要补 action smoothness / slip / 恢复能力评测                                                          |
+| P1     | Student 域随机化与 push 扰动                       | Student                | 对鲁棒性可能有帮助，但对训练曲线不一定体现                                 | 分组关掉 mass/com/material/push                                            | 不够                    | 训练曲线不够，必须补鲁棒性评测                                                                          |
+| P2     | 命令 curriculum 节流逻辑                           | Teacher / Student      | 可能只是“让训练更平滑”，也可能拖慢上限                                   | 关掉 gated progression 或放宽 gate                                         | 不完全够用              | 最好补 command level 曲线；只看 reward 容易误判                                                         |
+| P2     | DAgger 的 teacher mixing schedule                  | Student DAgger         | 有可能 handoff 过程过长，造成冗余 teacher 依赖                             | 缩短或取消 `teacher_action_ratio` 衰减                                   | 部分够用                | `teacher_action_ratio`、behavior loss、student reward、最终 student 独立表现                          |
 
 ### 6.2 先验上可以降优先级的项
 

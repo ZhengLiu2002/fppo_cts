@@ -281,7 +281,12 @@ class StudentRewardsCfg:
     dof_error_l2 = RewTerm(
         func=rewards.dof_error_l2,
         weight=-0.1,
-        params={"asset_cfg": SceneEntityCfg("robot")},
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "flat_terrain_name": "crl_flat",
+            "flat_scale": 1.5,
+            "rough_scale": 0.5,
+        },
     )
     hip_pos_l2 = RewTerm(
         func=rewards.hip_pos_l2,
@@ -389,7 +394,12 @@ class TeacherRewardsCfg:
     dof_error_l2 = RewTerm(
         func=rewards.dof_error_l2,
         weight=-0.2,
-        params={"asset_cfg": SceneEntityCfg("robot")},
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "flat_terrain_name": "crl_flat",
+            "flat_scale": 1.5,
+            "rough_scale": 0.5,
+        },
     )
     hip_pos_l2 = RewTerm(
         func=rewards.hip_pos_l2,
@@ -410,7 +420,7 @@ class TeacherRewardsCfg:
     )
     flat_orientation_l2 = RewTerm(
         func=rewards.flat_orientation_l2,
-        weight=-1.0,
+        weight=-2.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "flat_terrain_name": "crl_flat",
@@ -437,7 +447,7 @@ class TeacherRewardsCfg:
     )
     trot_phase_reward = RewTerm(
         func=rewards.trot_phase_reward,
-        weight=0.2,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,

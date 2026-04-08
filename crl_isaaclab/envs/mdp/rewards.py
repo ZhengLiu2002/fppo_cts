@@ -778,6 +778,21 @@ def _flat_terrain_mask(
     return torch.zeros(env.num_envs, device=device, dtype=dtype)
 
 
+def _flat_terrain_scale(
+    env: ManagerBasedRLEnv,
+    flat_terrain_name: str,
+    flat_scale: float,
+    rough_scale: float,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Return a per-environment scale that differs between flat and rough terrain."""
+    flat_mask = _flat_terrain_mask(env, flat_terrain_name, device, dtype)
+    flat_scale_t = torch.as_tensor(flat_scale, device=device, dtype=dtype)
+    rough_scale_t = torch.as_tensor(rough_scale, device=device, dtype=dtype)
+    return rough_scale_t + (flat_scale_t - rough_scale_t) * flat_mask
+
+
 def flat_base_height_l2_fix(
     env: ManagerBasedRLEnv,
     target_height: float,
@@ -970,9 +985,13 @@ def hip_pos_l2(
 
 
 def dof_error_l2(
-    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    flat_terrain_name: str = "crl_flat",
+    flat_scale: float = 1.0,
+    rough_scale: float = 1.0,
 ) -> torch.Tensor:
-    """Penalize all joint positions that deviate from default pose using L2 squared kernel."""
+    """Penalize joint pose errors, with optional terrain-dependent shaping strength."""
     asset: Articulation = env.scene[asset_cfg.name]
     joint_ids = asset_cfg.joint_ids
     if joint_ids is None:
@@ -980,7 +999,16 @@ def dof_error_l2(
     if not isinstance(joint_ids, slice) and len(joint_ids) == 0:
         return torch.zeros(env.scene.num_envs, device=env.device)
     diff = asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
-    return torch.sum(torch.square(diff), dim=1)
+    reward = torch.sum(torch.square(diff), dim=1)
+    terrain_scale = _flat_terrain_scale(
+        env,
+        flat_terrain_name=flat_terrain_name,
+        flat_scale=flat_scale,
+        rough_scale=rough_scale,
+        device=reward.device,
+        dtype=reward.dtype,
+    )
+    return reward * terrain_scale
 
 
 def foot_clearance(

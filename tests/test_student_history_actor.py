@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 
 from scripts.rsl_rl.modules.actor_critic_with_encoder import ActorCriticRMA
 

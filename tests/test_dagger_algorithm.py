@@ -4,7 +4,9 @@ import argparse
 import sys
 import types
 
-import torch
+import pytest
+
+torch = pytest.importorskip("torch")
 import torch.nn as nn
 
 from scripts.rsl_rl import cli_args

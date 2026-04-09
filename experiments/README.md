@@ -6,6 +6,15 @@
 - 代码逻辑试验：新建 git 分支，必要时配合 `git worktree`。
 - 推荐把每个 preset 都写成“相对基线的差异”，避免复制整份大配置。
 
+## Benchmark Presets
+
+论文主实验建议直接从下面两份 preset 开始：
+
+- `galileo/benchmark/teacher_main`
+- `galileo/benchmark/student_main`
+
+它们会继承公平对比 study preset，并固定主实验的 `experiment_name`、保存频率和 benchmark 元信息。
+
 ## 文件格式
 
 - 支持 `json`

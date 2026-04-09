@@ -47,19 +47,20 @@ def _source_segment(source: str, node: ast.AST) -> str:
     return segment
 
 
-def test_dof_error_l2_supports_terrain_aware_scaling() -> None:
+def test_dof_error_l2_supports_command_speed_scaling() -> None:
     module, source = _module_and_source(REWARDS_FILE)
     dof_error = _function_node(module, "dof_error_l2")
     segment = _source_segment(source, dof_error)
 
-    assert "flat_terrain_name: str = \"crl_flat\"" in segment
-    assert "flat_scale: float = 1.0" in segment
-    assert "rough_scale: float = 1.0" in segment
-    assert "_flat_terrain_scale(" in segment
-    assert "return reward * terrain_scale" in segment
+    assert "low_speed_threshold: float = 0.1" in segment
+    assert "high_speed_threshold: float = 0.8" in segment
+    assert "low_speed_scale: float = 1.0" in segment
+    assert "high_speed_scale: float = 1.0" in segment
+    assert "_command_speed_scale(" in segment
+    assert "return reward * speed_scale" in segment
 
 
-def test_galileo_dof_error_reward_is_more_strict_on_flat_than_rough() -> None:
+def test_galileo_dof_error_reward_uses_speed_scaling_params() -> None:
     module, source = _module_and_source(MDP_CFG_FILE)
     student = _class_assignments(_class_node(module, "StudentRewardsCfg"))
     teacher = _class_assignments(_class_node(module, "TeacherRewardsCfg"))
@@ -68,7 +69,8 @@ def test_galileo_dof_error_reward_is_more_strict_on_flat_than_rough() -> None:
     teacher_segment = _source_segment(source, teacher["dof_error_l2"])
 
     for segment in (student_segment, teacher_segment):
-        assert '"flat_terrain_name": "crl_flat"' in segment
-        assert '"flat_scale": 1.5' in segment
-        assert '"rough_scale": 0.5' in segment
-
+        assert '"command_name": "base_velocity"' in segment
+        assert '"low_speed_threshold": 0.1' in segment
+        assert '"high_speed_threshold": 0.8' in segment
+        assert '"low_speed_scale": 1.5' in segment
+        assert '"high_speed_scale": 0.5' in segment

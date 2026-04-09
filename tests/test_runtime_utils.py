@@ -10,9 +10,11 @@ import unittest
 
 from scripts.rsl_rl.runtime import (
     bootstrap_repo_paths,
+    build_evaluation_output_path,
     configure_safe_play_args,
     create_run_directory_name,
     dump_pickle,
+    resolve_task_variant,
     resolve_checkpoint_path,
 )
 
@@ -150,6 +152,44 @@ class RuntimeUtilsTest(unittest.TestCase):
             )
 
         self.assertEqual(resolved, str(fppo_run / "model_1500.pt"))
+
+    def test_resolve_task_variant_prefers_registered_eval_task(self) -> None:
+        registered = {
+            "Isaac-Galileo-CRL-Teacher-v0",
+            "Isaac-Galileo-CRL-Teacher-Eval-v0",
+        }
+
+        resolved = resolve_task_variant(
+            "Isaac-Galileo-CRL-Teacher-v0",
+            variant="eval",
+            registered_tasks=registered,
+        )
+
+        self.assertEqual(resolved, "Isaac-Galileo-CRL-Teacher-Eval-v0")
+
+    def test_resolve_task_variant_keeps_original_when_no_match_exists(self) -> None:
+        registered = {"Isaac-Galileo-CRL-Teacher-v0"}
+
+        resolved = resolve_task_variant(
+            "Isaac-Galileo-CRL-Teacher-v0",
+            variant="eval",
+            registered_tasks=registered,
+        )
+
+        self.assertEqual(resolved, "Isaac-Galileo-CRL-Teacher-v0")
+
+    def test_build_evaluation_output_path_nests_task_checkpoint_and_tag(self) -> None:
+        path = build_evaluation_output_path(
+            "/tmp/run",
+            "Isaac-Galileo-CRL-Teacher-Eval-v0",
+            "/tmp/run/model_100.pt",
+            summary_tag="seed-1",
+        )
+
+        self.assertEqual(
+            path,
+            Path("/tmp/run/evaluations/isaac_galileo_crl_teacher_eval_v0/model_100/seed_1/summary.json"),
+        )
 
 
 if __name__ == "__main__":

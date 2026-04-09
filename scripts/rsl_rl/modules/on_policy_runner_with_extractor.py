@@ -73,6 +73,7 @@ from scripts.rsl_rl.algorithms.registry import (
     validate_algorithm_cfg,
 )
 from scripts.rsl_rl.constraint_utils import ConstraintNormalizer
+from scripts.rsl_rl.runtime import capture_rng_state, restore_rng_state
 
 _RUNNER_ONLY_ALG_KEYS = {
     "class_name",
@@ -757,6 +758,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             "optimizer_state_dict": self._serialize_optimizer(self.alg.optimizer),
             "iter": self.current_learning_iteration,
             "infos": infos,
+            "rng_state": capture_rng_state(torch),
         }
         if algorithm_state:
             saved_dict["algorithm_state_dict"] = algorithm_state
@@ -871,6 +873,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             # -- RND optimizer if used
             if getattr(self.alg, "rnd", None):
                 self.alg.rnd_optimizer.load_state_dict(loaded_dict["rnd_optimizer_state_dict"])
+            restore_rng_state(torch, loaded_dict.get("rng_state"))
         algorithm_state = loaded_dict.get("algorithm_state_dict")
         if resumed_training and algorithm_state and hasattr(self.alg, "load_state_dict"):
             self.alg.load_state_dict(algorithm_state)

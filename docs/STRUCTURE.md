@@ -8,6 +8,7 @@ This repo follows a task-centric layout similar to production RL frameworks (tas
 - `crl_tasks/`: Task registration and task-specific configuration package.
 - `scripts/rsl_rl/`: Training, evaluation, play, and export scripts.
 - `tests/`: Functional tests and sanity checks.
+- `tools/sim/`: Isaac Sim / GUI-only demo scripts kept out of automated tests.
 - `docs/`: Structure and style guidance.
 
 ## Task Configuration Layout

@@ -35,7 +35,7 @@ python -m black .
 - Prefer adding small unit tests for utility helpers before touching simulator-heavy flows.
 - For lightweight checks introduced in this repo, run:
 ```bash
-python -m unittest tests.test_runtime_utils -v
+./scripts/run_tests.sh -q
 ```
 
 ## Compatibility

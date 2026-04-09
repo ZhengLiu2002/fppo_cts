@@ -246,6 +246,7 @@ class GalileoDefaults:
         teacher_num_envs = 4096
         student_num_envs = 1024
         teacher_play_num_envs = 32
+        teacher_eval_num_envs = 128
         student_eval_num_envs = 128
         student_play_num_envs = 16
 

@@ -220,7 +220,7 @@ git reset --hard origin/master
 推荐在提交前执行：
 
 ```bash
-python -m unittest tests.test_runtime_utils -v
+./scripts/run_tests.sh -q
 python -m black scripts/rsl_rl/runtime.py scripts/rsl_rl/train.py scripts/rsl_rl/play.py \
   scripts/rsl_rl/evaluation.py scripts/rsl_rl/demo.py list_envs.py tests/test_runtime_utils.py
 ```

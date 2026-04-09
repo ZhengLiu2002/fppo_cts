@@ -1,1 +1,0 @@
-from .test_terrain_config import SAFELOCOMOTION_TERRAINS_CFG

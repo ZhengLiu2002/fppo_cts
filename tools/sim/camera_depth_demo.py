@@ -33,7 +33,7 @@ from isaaclab.utils import configclass
 
 from isaaclab.terrains import TerrainImporterCfg
 from crl_isaaclab.terrains.crl_terrain_importer import CRLTerrainImporter
-from tests.utils.test_terrain_config import SAFELOCOMOTION_TERRAINS_CFG
+from tools.sim.safelocomotion_terrain_config import SAFELOCOMOTION_TERRAINS_CFG
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from pathlib import Path
 from isaaclab.utils.math import quat_from_euler_xyz
@@ -94,7 +94,7 @@ CAMERA_CFG = CameraCfg(
 )
 
 _DEFAULT_D435_USD = (
-    Path(__file__).resolve().parents[1] / "crl_tasks/crl_tasks/tasks/galileo/config/assets/d435.usd"
+    Path(__file__).resolve().parents[2] / "crl_tasks/crl_tasks/tasks/galileo/config/assets/d435.usd"
 )
 CAMERA_USD_CFG = AssetBaseCfg(
     prim_path="{ENV_REGEX_NS}/Robot/base/d435",

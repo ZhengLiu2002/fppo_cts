@@ -29,6 +29,12 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
 ]
+test = [
+    "pytest>=8.0",
+]
+sim = [
+    "trimesh>=4.0",
+]
 
 [tool.setuptools]
 include-package-data = true
@@ -50,3 +56,4 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-p no:launch_testing -p no:launch_testing_ros_pytest_entrypoint"

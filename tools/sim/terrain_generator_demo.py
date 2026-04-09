@@ -37,7 +37,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 
 from crl_tasks.tasks.galileo.config.defaults import _galileo_robot_cfg
 from crl_isaaclab.terrains.crl_terrain_importer import CRLTerrainImporter
-from tests.utils.test_terrain_config import SAFELOCOMOTION_TERRAINS_CFG
+from tools.sim.safelocomotion_terrain_config import SAFELOCOMOTION_TERRAINS_CFG
 
 
 @configclass

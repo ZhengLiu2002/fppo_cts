@@ -113,3 +113,19 @@ class GalileoTeacherCRLEnvCfg_PLAY(GalileoTeacherCRLEnvCfg):
         self.events.randomize_base_com = None
         self.events.push_robot_vel = None
         self.events.push_robot_torque = None
+
+
+@configclass
+class GalileoTeacherCRLEnvCfg_EVAL(GalileoTeacherCRLEnvCfg):
+    viewer = VIEWER_CFG
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = GalileoDefaults.env.teacher_eval_num_envs
+        self.scene.terrain.max_init_terrain_level = None
+        self.commands.base_velocity.resampling_time_range = (60.0, 60.0)
+        self.scene.terrain.terrain_generator.difficulty_range = (0.0, 1.0)
+        self.events.random_camera_position = None
+        self.events.randomize_base_mass = None
+        self.events.randomize_base_com = None
+        self.events.push_robot_vel.interval_range_s = (6.0, 6.0)

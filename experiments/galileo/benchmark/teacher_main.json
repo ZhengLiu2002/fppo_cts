@@ -1,0 +1,27 @@
+{
+  "extends": "galileo/studies/algo_compare_teacher_fair",
+  "meta": {
+    "description": "Main teacher benchmark preset for paper-grade algorithm comparison.",
+    "benchmark": "teacher_main",
+    "role": "teacher",
+    "recommended_seeds": [
+      11,
+      22,
+      33,
+      44,
+      55
+    ],
+    "primary_metrics": [
+      "reward",
+      "constraint_violation",
+      "sample_efficiency",
+      "wall_clock_efficiency"
+    ]
+  },
+  "agent": {
+    "experiment_name": "galileo_benchmark_teacher_main",
+    "save_interval": 100,
+    "max_iterations": 100000
+  },
+  "env": {}
+}

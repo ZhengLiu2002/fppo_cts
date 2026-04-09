@@ -6,14 +6,18 @@ import time so they stay lightweight and easy to unit-test.
 
 from __future__ import annotations
 
+from dataclasses import asdict, is_dataclass
 from datetime import datetime
+import json
 import os
 from pathlib import Path
 import pickle
 import platform
+import random
 import re
+import subprocess
 import sys
-from typing import Any
+from typing import Any, Mapping
 
 from packaging import version
 
@@ -74,6 +78,38 @@ def create_run_directory_name(
     return directory_name, not bool(log_run_prefix)
 
 
+def _json_safe(value: Any) -> Any:
+    """Convert common config/runtime objects into JSON-serializable values."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    if is_dataclass(value):
+        return _json_safe(asdict(value))
+    if hasattr(value, "to_dict"):
+        return _json_safe(value.to_dict())
+    if hasattr(value, "__dict__"):
+        return _json_safe(vars(value))
+    return str(value)
+
+
+def write_json_artifact(
+    file_path: str | os.PathLike[str],
+    data: Mapping[str, Any] | dict[str, Any],
+) -> Path:
+    """Write a JSON artifact, creating parent directories if needed."""
+
+    target_path = Path(file_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(json.dumps(_json_safe(dict(data)), indent=2, sort_keys=True), encoding="utf-8")
+    return target_path
+
+
 def dump_pickle(file_path: str | os.PathLike[str], data: Any) -> Path:
     """Serialize data to a pickle file, creating parent directories if needed."""
 
@@ -88,6 +124,61 @@ def dump_pickle(file_path: str | os.PathLike[str], data: Any) -> Path:
     return target_path
 
 
+def capture_rng_state(torch_module: Any) -> dict[str, Any]:
+    """Capture Python, NumPy, and torch RNG state for exact resume support."""
+
+    state: dict[str, Any] = {"python": random.getstate()}
+    try:
+        import numpy as np
+
+        state["numpy"] = np.random.get_state()
+    except Exception:
+        pass
+
+    try:
+        state["torch"] = torch_module.get_rng_state()
+        if torch_module.cuda.is_available():
+            state["torch_cuda"] = torch_module.cuda.get_rng_state_all()
+    except Exception:
+        pass
+
+    return state
+
+
+def restore_rng_state(torch_module: Any, state: dict[str, Any] | None) -> None:
+    """Restore previously captured RNG state when resuming training."""
+
+    if not state:
+        return
+
+    python_state = state.get("python")
+    if python_state is not None:
+        random.setstate(python_state)
+
+    numpy_state = state.get("numpy")
+    if numpy_state is not None:
+        try:
+            import numpy as np
+
+            np.random.set_state(numpy_state)
+        except Exception:
+            pass
+
+    torch_state = state.get("torch")
+    if torch_state is not None:
+        try:
+            torch_module.set_rng_state(torch_state)
+        except Exception:
+            pass
+
+    torch_cuda_state = state.get("torch_cuda")
+    if torch_cuda_state is not None and torch_module.cuda.is_available():
+        try:
+            torch_module.cuda.set_rng_state_all(torch_cuda_state)
+        except Exception:
+            pass
+
+
 def configure_torch_backends(torch_module: Any) -> None:
     """Apply the repo's preferred CUDA backend settings."""
 
@@ -95,6 +186,179 @@ def configure_torch_backends(torch_module: Any) -> None:
     torch_module.backends.cudnn.allow_tf32 = True
     torch_module.backends.cudnn.deterministic = False
     torch_module.backends.cudnn.benchmark = False
+
+
+def collect_git_metadata(repo_root: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+    """Collect a lightweight git snapshot for run manifests."""
+
+    root_path = Path(repo_root).resolve() if repo_root is not None else Path.cwd().resolve()
+
+    def _run_git(*args: str) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", *args],
+                cwd=root_path,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return None
+        return result.stdout.strip()
+
+    commit = _run_git("rev-parse", "HEAD")
+    branch = _run_git("rev-parse", "--abbrev-ref", "HEAD")
+    status = _run_git("status", "--short")
+    if commit is None:
+        return {"available": False, "repo_root": str(root_path)}
+
+    return {
+        "available": True,
+        "repo_root": str(root_path),
+        "commit": commit,
+        "branch": branch,
+        "dirty": bool(status),
+        "status": status.splitlines() if status else [],
+    }
+
+
+def iter_task_variant_candidates(task_name: str, *, variant: str) -> list[str]:
+    """Return candidate task ids for a requested task variant.
+
+    Example:
+        ``Isaac-Galileo-CRL-Teacher-v0`` + ``variant="eval"`` yields
+        ``Isaac-Galileo-CRL-Teacher-Eval-v0`` before falling back to the original
+        task name.
+    """
+
+    normalized_variant = variant.strip().lower()
+    variant_token = normalized_variant.capitalize()
+    candidates = [task_name]
+
+    if f"-{variant_token}-" not in task_name:
+        if "-Play-" in task_name:
+            candidates.insert(0, task_name.replace("-Play-", f"-{variant_token}-"))
+        elif task_name.endswith("-v0"):
+            candidates.insert(0, task_name.replace("-v0", f"-{variant_token}-v0"))
+
+    if normalized_variant == "play" and "-Eval-" in task_name:
+        candidates.insert(0, task_name.replace("-Eval-", "-Play-"))
+    elif normalized_variant == "eval" and "-Play-" not in task_name and "-Eval-" not in task_name:
+        if task_name.endswith("-v0"):
+            candidates.insert(0, task_name.replace("-v0", "-Eval-v0"))
+
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
+
+
+def resolve_task_variant(
+    task_name: str,
+    *,
+    variant: str,
+    registered_tasks: set[str] | list[str] | tuple[str, ...],
+) -> str:
+    """Resolve the best matching task id for a target variant."""
+
+    registered = set(registered_tasks)
+    for candidate in iter_task_variant_candidates(task_name, variant=variant):
+        if candidate in registered:
+            return candidate
+    return task_name
+
+
+def build_evaluation_output_path(
+    log_dir: str | os.PathLike[str],
+    task_name: str,
+    checkpoint_path: str | os.PathLike[str],
+    *,
+    summary_tag: str | None = None,
+    filename: str = "summary.json",
+) -> Path:
+    """Create a stable evaluation artifact path under the run directory."""
+
+    task_slug = re.sub(r"[^a-zA-Z0-9]+", "_", task_name).strip("_").lower() or "task"
+    checkpoint_slug = Path(checkpoint_path).stem
+    output_dir = Path(log_dir) / "evaluations" / task_slug / checkpoint_slug
+    if summary_tag:
+        tag_slug = re.sub(r"[^a-zA-Z0-9]+", "_", summary_tag).strip("_").lower() or "tag"
+        output_dir = output_dir / tag_slug
+    return output_dir / filename
+
+
+def build_run_manifest(
+    *,
+    stage: str,
+    task_name: str,
+    log_dir: str | os.PathLike[str],
+    agent_cfg: Any,
+    env_cfg: Any | None = None,
+    args: Any | None = None,
+    preset: Any | None = None,
+    training_type: str | None = None,
+    checkpoint_path: str | os.PathLike[str] | None = None,
+    repo_root: str | os.PathLike[str] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a compact, JSON-safe manifest describing a train/eval run."""
+
+    algorithm_cfg = getattr(agent_cfg, "algorithm", None)
+    scene_cfg = getattr(env_cfg, "scene", None) if env_cfg is not None else None
+
+    manifest: dict[str, Any] = {
+        "stage": stage,
+        "task_name": task_name,
+        "log_dir": str(Path(log_dir).resolve()),
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "training_type": training_type,
+        "checkpoint_path": (
+            str(Path(checkpoint_path).resolve()) if checkpoint_path is not None else None
+        ),
+        "seed": getattr(agent_cfg, "seed", None),
+        "device": getattr(agent_cfg, "device", None),
+        "experiment_name": getattr(agent_cfg, "experiment_name", None),
+        "run_name": getattr(agent_cfg, "run_name", None),
+        "max_iterations": getattr(agent_cfg, "max_iterations", None),
+        "num_steps_per_env": getattr(agent_cfg, "num_steps_per_env", None),
+        "num_envs": getattr(scene_cfg, "num_envs", None),
+        "algorithm": {
+            "class_name": getattr(algorithm_cfg, "class_name", None),
+        },
+        "git": collect_git_metadata(repo_root),
+    }
+    if algorithm_cfg is not None and hasattr(algorithm_cfg, "to_dict"):
+        algorithm_dict = algorithm_cfg.to_dict()
+        manifest["algorithm"]["cfg_keys"] = sorted(str(key) for key in algorithm_dict.keys())
+
+    if preset is not None:
+        manifest["preset"] = {
+            "name": getattr(preset, "name", None),
+            "slug": getattr(preset, "slug", None),
+            "path": str(getattr(preset, "path", "")),
+            "source_chain": [str(path) for path in getattr(preset, "source_chain", ())],
+            "meta": getattr(preset, "meta", {}),
+        }
+
+    if args is not None:
+        manifest["cli_args"] = {key: _json_safe(value) for key, value in vars(args).items()}
+
+    if extra:
+        manifest["extra"] = _json_safe(extra)
+
+    return _json_safe(manifest)
+
+
+def write_run_manifest(
+    log_dir: str | os.PathLike[str],
+    manifest: Mapping[str, Any] | dict[str, Any],
+    *,
+    filename: str = "run_manifest.json",
+) -> Path:
+    """Persist a run manifest alongside params and evaluation artifacts."""
+
+    return write_json_artifact(Path(log_dir) / "params" / filename, dict(manifest))
 
 
 def ensure_min_rsl_rl_version(

@@ -20,11 +20,13 @@ try:
     from scripts.rsl_rl.runtime import (
         bootstrap_repo_paths,
         build_log_root_path,
+        build_run_manifest,
         configure_torch_backends,
         create_run_directory_name,
         dump_pickle,
         ensure_min_rsl_rl_version,
         resolve_checkpoint_path,
+        write_run_manifest,
     )
 except ImportError:
     from experiment_manager import (  # type: ignore
@@ -37,14 +39,16 @@ except ImportError:
     from runtime import (  # type: ignore
         bootstrap_repo_paths,
         build_log_root_path,
+        build_run_manifest,
         configure_torch_backends,
         create_run_directory_name,
         dump_pickle,
         ensure_min_rsl_rl_version,
         resolve_checkpoint_path,
+        write_run_manifest,
     )
 
-bootstrap_repo_paths(__file__)
+REPO_ROOT = bootstrap_repo_paths(__file__)
 
 from isaaclab.app import AppLauncher
 
@@ -234,6 +238,25 @@ def main(
     dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
     if experiment_preset is not None:
         write_experiment_metadata(log_dir, experiment_preset, args=args_cli)
+    write_run_manifest(
+        log_dir,
+        build_run_manifest(
+            stage="train",
+            task_name=args_cli.task,
+            log_dir=log_dir,
+            agent_cfg=agent_cfg,
+            env_cfg=env_cfg,
+            args=args_cli,
+            preset=experiment_preset,
+            training_type=algorithm_training_type,
+            repo_root=REPO_ROOT,
+            extra={
+                "run_dir_name": run_dir_name,
+                "distributed": bool(args_cli.distributed),
+                "resume_path": resume_path if agent_cfg.resume or algorithm_training_type == "dagger" else None,
+            },
+        ),
+    )
 
     # # # run training
     runner.learn(num_learning_iterations=agent_cfg.max_iterations, init_at_random_ep_len=True)

@@ -778,19 +778,32 @@ def _flat_terrain_mask(
     return torch.zeros(env.num_envs, device=device, dtype=dtype)
 
 
-def _flat_terrain_scale(
+def _command_speed_scale(
     env: ManagerBasedRLEnv,
-    flat_terrain_name: str,
-    flat_scale: float,
-    rough_scale: float,
+    command_name: str | None,
+    low_speed_threshold: float,
+    high_speed_threshold: float,
+    low_speed_scale: float,
+    high_speed_scale: float,
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
-    """Return a per-environment scale that differs between flat and rough terrain."""
-    flat_mask = _flat_terrain_mask(env, flat_terrain_name, device, dtype)
-    flat_scale_t = torch.as_tensor(flat_scale, device=device, dtype=dtype)
-    rough_scale_t = torch.as_tensor(rough_scale, device=device, dtype=dtype)
-    return rough_scale_t + (flat_scale_t - rough_scale_t) * flat_mask
+    """Return a per-environment shaping scale that is stronger at low speeds."""
+    if command_name is None or not hasattr(env, "command_manager"):
+        return torch.ones(env.scene.num_envs, device=device, dtype=dtype)
+
+    command = env.command_manager.get_command(command_name)
+    if command is None or command.ndim != 2 or command.shape[1] == 0:
+        return torch.ones(env.scene.num_envs, device=device, dtype=dtype)
+
+    cmd_speed = torch.norm(command[:, : min(command.shape[1], 3)], dim=1)
+    low_threshold = float(low_speed_threshold)
+    high_threshold = max(float(high_speed_threshold), low_threshold + 1.0e-6)
+    alpha = torch.clamp((cmd_speed - low_threshold) / (high_threshold - low_threshold), min=0.0, max=1.0)
+
+    low_scale_t = torch.as_tensor(low_speed_scale, device=device, dtype=dtype)
+    high_scale_t = torch.as_tensor(high_speed_scale, device=device, dtype=dtype)
+    return low_scale_t + alpha * (high_scale_t - low_scale_t)
 
 
 def flat_base_height_l2_fix(
@@ -971,27 +984,15 @@ def applied_torque_limits(
 
 
 def hip_pos_l2(
-    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
-) -> torch.Tensor:
-    """Penalize hip joint positions that deviate from default pose using L2 squared kernel."""
-    asset: Articulation = env.scene[asset_cfg.name]
-    joint_ids = asset_cfg.joint_ids
-    if joint_ids is None:
-        return torch.zeros(env.scene.num_envs, device=env.device)
-    if not isinstance(joint_ids, slice) and len(joint_ids) == 0:
-        return torch.zeros(env.scene.num_envs, device=env.device)
-    diff = asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
-    return torch.sum(torch.square(diff), dim=1)
-
-
-def dof_error_l2(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    flat_terrain_name: str = "crl_flat",
-    flat_scale: float = 1.0,
-    rough_scale: float = 1.0,
+    command_name: str | None = None,
+    low_speed_threshold: float = 0.1,
+    high_speed_threshold: float = 0.8,
+    low_speed_scale: float = 1.0,
+    high_speed_scale: float = 1.0,
 ) -> torch.Tensor:
-    """Penalize joint pose errors, with optional terrain-dependent shaping strength."""
+    """Penalize hip joint errors, optionally more strongly when command speeds are low."""
     asset: Articulation = env.scene[asset_cfg.name]
     joint_ids = asset_cfg.joint_ids
     if joint_ids is None:
@@ -1000,15 +1001,48 @@ def dof_error_l2(
         return torch.zeros(env.scene.num_envs, device=env.device)
     diff = asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
     reward = torch.sum(torch.square(diff), dim=1)
-    terrain_scale = _flat_terrain_scale(
+    speed_scale = _command_speed_scale(
         env,
-        flat_terrain_name=flat_terrain_name,
-        flat_scale=flat_scale,
-        rough_scale=rough_scale,
+        command_name=command_name,
+        low_speed_threshold=low_speed_threshold,
+        high_speed_threshold=high_speed_threshold,
+        low_speed_scale=low_speed_scale,
+        high_speed_scale=high_speed_scale,
         device=reward.device,
         dtype=reward.dtype,
     )
-    return reward * terrain_scale
+    return reward * speed_scale
+
+
+def dof_error_l2(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_name: str | None = None,
+    low_speed_threshold: float = 0.1,
+    high_speed_threshold: float = 0.8,
+    low_speed_scale: float = 1.0,
+    high_speed_scale: float = 1.0,
+) -> torch.Tensor:
+    """Penalize joint pose errors, optionally more strongly when command speeds are low."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_ids = asset_cfg.joint_ids
+    if joint_ids is None:
+        return torch.zeros(env.scene.num_envs, device=env.device)
+    if not isinstance(joint_ids, slice) and len(joint_ids) == 0:
+        return torch.zeros(env.scene.num_envs, device=env.device)
+    diff = asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
+    reward = torch.sum(torch.square(diff), dim=1)
+    speed_scale = _command_speed_scale(
+        env,
+        command_name=command_name,
+        low_speed_threshold=low_speed_threshold,
+        high_speed_threshold=high_speed_threshold,
+        low_speed_scale=low_speed_scale,
+        high_speed_scale=high_speed_scale,
+        device=reward.device,
+        dtype=reward.dtype,
+    )
+    return reward * speed_scale
 
 
 def foot_clearance(

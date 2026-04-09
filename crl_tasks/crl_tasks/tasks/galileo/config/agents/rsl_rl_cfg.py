@@ -71,7 +71,6 @@ class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     dagger_update_freq: int = 1
     priv_reg_coef_schedual: list[float] = [0, 0.1, 2000, 3000]
     reconstruction_loss_coef: float = 0.0
-    symmetry_cfg: dict | None = None
 
     # Constrained RL extensions shared by non-FPPO algorithms.
     cost_value_loss_coef: float = 1.0
@@ -107,7 +106,6 @@ class CRLRslRlFppoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     dagger_update_freq: int = 1
     priv_reg_coef_schedual: list[float] = [0, 0.1, 2000, 3000]
     reconstruction_loss_coef: float = 0.0
-    symmetry_cfg: dict | None = None
 
     cost_value_loss_coef: float = 1.0
     step_size: float = 1e-3

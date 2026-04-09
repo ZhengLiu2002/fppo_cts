@@ -5,9 +5,6 @@
 
 from __future__ import annotations
 
-from importlib import import_module
-from importlib import util as importlib_util
-from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -42,7 +39,6 @@ class PPO:
         desired_kl=0.01,
         device="cpu",
         normalize_advantage_per_mini_batch=False,
-        symmetry_cfg: dict | None = None,
         # Distributed training parameters
         multi_gpu_cfg: dict | None = None,
         # Cost advantage normalization
@@ -100,7 +96,6 @@ class PPO:
         self.schedule = schedule
         self.learning_rate = learning_rate
         self.normalize_advantage_per_mini_batch = normalize_advantage_per_mini_batch
-        self.symmetry = symmetry_cfg
         self.normalize_cost_advantage = normalize_cost_advantage
         self.cost_limit = cost_limit
         self.cost_viol_loss_coef = cost_viol_loss_coef
@@ -281,57 +276,6 @@ class PPO:
             reconstruction_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
         )
         return reconstruction_loss, reconstruction_loss * reconstruction_loss_coef
-
-    @staticmethod
-    def _resolve_data_augmentation_func(func_spec):
-        if callable(func_spec):
-            return func_spec
-        if not isinstance(func_spec, str):
-            raise TypeError(
-                f"Expected symmetry data_augmentation_func to be callable or str, got {type(func_spec).__name__}."
-            )
-
-        spec = func_spec
-        if spec in {
-            "galileo_teacher_left_right_augmentation",
-            "crl_tasks.tasks.galileo.config.symmetry:galileo_teacher_left_right_augmentation",
-        }:
-            module_name = "crl_tasks.tasks.galileo.config.symmetry"
-            func_name = "galileo_teacher_left_right_augmentation"
-            try:
-                module = import_module(module_name)
-                func = getattr(module, func_name, None)
-                if callable(func):
-                    return func
-            except Exception:
-                pass
-
-            repo_root = Path(__file__).resolve().parents[3]
-            symmetry_file = repo_root / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "symmetry.py"
-            module_spec = importlib_util.spec_from_file_location("galileo_symmetry_runtime", symmetry_file)
-            if module_spec is None or module_spec.loader is None:
-                raise ImportError(f"Failed to load symmetry module from: {symmetry_file}")
-            module = importlib_util.module_from_spec(module_spec)
-            module_spec.loader.exec_module(module)
-            func = getattr(module, func_name, None)
-            if not callable(func):
-                raise TypeError(
-                    f"Resolved symmetry augmentation target is not callable from file: {symmetry_file}"
-                )
-            return func
-
-        if ":" not in spec:
-            raise ValueError(
-                "String symmetry data_augmentation_func must be a known augmentation id "
-                "or use 'module:function' format. "
-                f"Got: {func_spec!r}"
-            )
-        module_name, func_name = spec.split(":", 1)
-        module = import_module(module_name)
-        func = getattr(module, func_name, None)
-        if not callable(func):
-            raise TypeError(f"Resolved symmetry augmentation target is not callable: {spec!r}")
-        return func
 
     def _split_cost_value_heads(
         self, cost_values: torch.Tensor
@@ -669,11 +613,6 @@ class PPO:
                 self.num_mini_batches, self.num_learning_epochs
             )
 
-        def _repeat_batch(tensor: torch.Tensor | None, num_aug: int) -> torch.Tensor | None:
-            if tensor is None:
-                return None
-            return tensor.repeat((num_aug,) + (1,) * (tensor.ndim - 1))
-
         for (
             obs_batch,
             critic_obs_batch,
@@ -691,54 +630,9 @@ class PPO:
             masks_batch,
             *extra_batch,
         ) in generator:
-            original_batch_size = obs_batch.shape[0]
             cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
             cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
             cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
-
-            if self.symmetry and self.symmetry.get("use_data_augmentation", False):
-                if self.policy.is_recurrent:
-                    raise NotImplementedError("Symmetry augmentation is not implemented for recurrent PPO policies.")
-                data_augmentation_func = self._resolve_data_augmentation_func(
-                    self.symmetry["data_augmentation_func"]
-                )
-                self.symmetry["data_augmentation_func"] = data_augmentation_func
-                obs_batch, actions_batch = data_augmentation_func(
-                    obs=obs_batch,
-                    actions=actions_batch,
-                    env=self.symmetry.get("_env"),
-                    obs_type="policy",
-                )
-                critic_obs_batch, _ = data_augmentation_func(
-                    obs=critic_obs_batch,
-                    actions=None,
-                    env=self.symmetry.get("_env"),
-                    obs_type="critic",
-                )
-                _, old_mu_batch = data_augmentation_func(
-                    obs=None,
-                    actions=old_mu_batch,
-                    env=self.symmetry.get("_env"),
-                    obs_type="policy",
-                )
-                _, old_sigma_batch = data_augmentation_func(
-                    obs=None,
-                    actions=old_sigma_batch,
-                    env=self.symmetry.get("_env"),
-                    obs_type="policy",
-                    is_std=True,
-                )
-                num_aug = int(obs_batch.shape[0] / original_batch_size)
-                target_values_batch = _repeat_batch(target_values_batch, num_aug)
-                advantages_batch = _repeat_batch(advantages_batch, num_aug)
-                returns_batch = _repeat_batch(returns_batch, num_aug)
-                cost_values_batch = _repeat_batch(cost_values_batch, num_aug)
-                cost_returns_batch = _repeat_batch(cost_returns_batch, num_aug)
-                cost_advantages_batch = _repeat_batch(cost_advantages_batch, num_aug)
-                old_actions_log_prob_batch = _repeat_batch(old_actions_log_prob_batch, num_aug)
-                cost_term_returns_batch = _repeat_batch(cost_term_returns_batch, num_aug)
-                cost_term_advantages_batch = _repeat_batch(cost_term_advantages_batch, num_aug)
-                cost_term_values_batch = _repeat_batch(cost_term_values_batch, num_aug)
 
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():

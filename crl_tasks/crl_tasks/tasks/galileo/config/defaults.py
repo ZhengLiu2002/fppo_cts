@@ -604,15 +604,6 @@ class GalileoDefaults:
                 cost_scale=None,
             ),
         }
-        symmetry_base = dict(
-            enabled=False,
-            use_data_augmentation=True,
-        )
-        symmetry_teacher_override = dict(
-            enabled=True,
-        )
-        symmetry_student_override = dict()
-
         # 各算法差异化字段（只写需要的即可）
         per_algo = {
             # FPPO（更激进参数：更大步长、更松约束、更少回溯）

@@ -10,6 +10,20 @@ from collections import deque
 import rsl_rl
 from rsl_rl.env import VecEnv
 
+
+def _sync_cuda_for_timing(device) -> None:
+    """Synchronize CUDA work so wall-clock timing matches actual GPU execution."""
+    if not torch.cuda.is_available():
+        return
+    if isinstance(device, torch.device):
+        if device.type != "cuda":
+            return
+        torch.cuda.synchronize(device)
+        return
+    if isinstance(device, str) and device.startswith("cuda"):
+        torch.cuda.synchronize(device)
+
+
 try:
     from rsl_rl.modules import EmpiricalNormalization  # type: ignore
 except ImportError:
@@ -70,7 +84,6 @@ _RUNNER_ONLY_ALG_KEYS = {
     "constraint_curriculum_names",
     "constraint_curriculum_shrink",
     "rnd_cfg",
-    "symmetry_cfg",
     "constraint_limits_final",
     "constraint_limits_start",
 }
@@ -83,7 +96,6 @@ _TERMINAL_LOSS_KEYS = (
     "viol",
     "reconstruction",
     "entropy",
-    "symmetry",
 )
 
 _TERMINAL_COST_KEYS = (
@@ -444,11 +456,6 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             # scale down the rnd weight with timestep (similar to how rewards are scaled down in legged_gym envs)
             self.alg_cfg["rnd_cfg"]["weight"] *= env.unwrapped.step_dt
 
-        # if using symmetry then pass the environment config object
-        if "symmetry_cfg" in self.alg_cfg and self.alg_cfg["symmetry_cfg"] is not None:
-            # this is used by the symmetry function for handling different observation terms
-            self.alg_cfg["symmetry_cfg"]["_env"] = env
-
         # initialize algorithm
         def _filter_kwargs(klass, cfg_dict: dict) -> dict:
             sig = inspect.signature(klass.__init__)
@@ -596,6 +603,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             and int(getattr(actor_module, "num_priv_latent", 0) or 0) <= 0
         )
         for it in range(start_iter, tot_iter):
+            _sync_cuda_for_timing(self.device)
             start = time.time()
             history_encoder_update_due = (
                 self.training_type == "rl" and it % self.dagger_update_freq == 0
@@ -688,6 +696,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                             cur_ereward_sum[new_ids] = 0
                             cur_ireward_sum[new_ids] = 0
 
+                _sync_cuda_for_timing(self.device)
                 stop = time.time()
                 collection_time = stop - start
                 start = stop
@@ -711,6 +720,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             if self.training_type == "dagger":
                 loss_dict["dagger_update_freq"] = float(self.dagger_update_freq)
 
+            _sync_cuda_for_timing(self.device)
             stop = time.time()
             learn_time = stop - start
             self.current_learning_iteration = it

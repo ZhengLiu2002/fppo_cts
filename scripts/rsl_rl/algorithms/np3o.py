@@ -34,7 +34,6 @@ class NP3O(PPO):
         desired_kl=0.01,
         device="cpu",
         normalize_advantage_per_mini_batch=False,
-        symmetry_cfg: dict | None = None,
         normalize_cost_advantage: bool = False,
         # NP3O parameters
         cost_limit=0.0,
@@ -73,7 +72,6 @@ class NP3O(PPO):
             desired_kl=desired_kl,
             device=device,
             normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
-            symmetry_cfg=symmetry_cfg,
             normalize_cost_advantage=normalize_cost_advantage,
             cost_limit=cost_limit,
             cost_viol_loss_coef=cost_viol_loss_coef,

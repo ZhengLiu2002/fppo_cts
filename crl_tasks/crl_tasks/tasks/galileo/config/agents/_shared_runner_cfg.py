@@ -6,7 +6,6 @@ import inspect
 from typing import Literal
 
 from ..defaults import GalileoDefaults
-from ..symmetry import build_symmetry_cfg
 from .rsl_rl_cfg import (
     CRLConstraintAdapterCfg,
     CRLRslRlActorCfg,
@@ -67,15 +66,6 @@ def build_algorithm_cfg(
 ) -> CRLRslRlPpoAlgorithmCfg | CRLRslRlFppoAlgorithmCfg | CRLRslRlDAggerAlgorithmCfg:
     """Build algorithm config from ``GalileoDefaults`` for the given role."""
     algo_key, class_name, params = _merged_algorithm_params(role, algo_key)
-    symmetry_params: dict = {}
-    symmetry_params.update(getattr(GalileoDefaults.algorithm, "symmetry_base", {}))
-    if role == "teacher":
-        symmetry_params.update(getattr(GalileoDefaults.algorithm, "symmetry_teacher_override", {}))
-    else:
-        symmetry_params.update(getattr(GalileoDefaults.algorithm, "symmetry_student_override", {}))
-    symmetry_cfg = build_symmetry_cfg(role, symmetry_params)
-    if symmetry_cfg is not None:
-        params["symmetry_cfg"] = symmetry_cfg
     if algo_key == "fppo":
         cfg_cls = CRLRslRlFppoAlgorithmCfg
     elif algo_key == "dagger":

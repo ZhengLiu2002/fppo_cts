@@ -283,15 +283,24 @@ class StudentRewardsCfg:
         weight=-0.1,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "flat_terrain_name": "crl_flat",
-            "flat_scale": 1.5,
-            "rough_scale": 0.5,
+            "command_name": "base_velocity",
+            "low_speed_threshold": 0.1,
+            "high_speed_threshold": 0.8,
+            "low_speed_scale": 1.5,
+            "high_speed_scale": 0.5,
         },
     )
     hip_pos_l2 = RewTerm(
         func=rewards.hip_pos_l2,
         weight=-0.1,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint")},
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint"),
+            "command_name": "base_velocity",
+            "low_speed_threshold": 0.1,
+            "high_speed_threshold": 0.8,
+            "low_speed_scale": 1.5,
+            "high_speed_scale": 0.5,
+        },
     )
     action_rate_l2 = RewTerm(
         func=rewards.action_rate_l2,
@@ -333,7 +342,7 @@ class StudentRewardsCfg:
     )
     trot_phase_reward = RewTerm(
         func=rewards.trot_phase_reward,
-        weight=0.1,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,
@@ -393,18 +402,27 @@ class TeacherRewardsCfg:
     )
     dof_error_l2 = RewTerm(
         func=rewards.dof_error_l2,
-        weight=-0.2,
+        weight=-0.5,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "flat_terrain_name": "crl_flat",
-            "flat_scale": 1.5,
-            "rough_scale": 0.5,
+            "command_name": "base_velocity",
+            "low_speed_threshold": 0.1,
+            "high_speed_threshold": 0.8,
+            "low_speed_scale": 1.5,
+            "high_speed_scale": 0.5,
         },
     )
     hip_pos_l2 = RewTerm(
         func=rewards.hip_pos_l2,
         weight=-0.1,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint")},
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint"),
+            "command_name": "base_velocity",
+            "low_speed_threshold": 0.1,
+            "high_speed_threshold": 0.8,
+            "low_speed_scale": 1.5,
+            "high_speed_scale": 0.5,
+        },
     )
     action_rate_l2 = RewTerm(
         func=rewards.action_rate_l2,
@@ -432,7 +450,7 @@ class TeacherRewardsCfg:
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.35,
+            "threshold": 0.5,
             "low_speed_threshold": 0.1,
         },
     )
@@ -447,7 +465,7 @@ class TeacherRewardsCfg:
     )
     trot_phase_reward = RewTerm(
         func=rewards.trot_phase_reward,
-        weight=0.0,
+        weight=0.1,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,
@@ -455,7 +473,7 @@ class TeacherRewardsCfg:
             "contact_smoothing": 1.5,
             "ema_decay": 0.9,
             "command_name": "base_velocity",
-            "min_command_speed": 0.1,
+            "min_command_speed": 0.2,
             "low_speed_threshold": 0.45,
             "max_abs_yaw_cmd": 0.2,
         },

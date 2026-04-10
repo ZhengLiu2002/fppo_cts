@@ -442,9 +442,9 @@ class KeyboardCommandController:
         )
         self._command_step = torch.tensor(
             [[
-                max(self.forward_speed / 5.0, 0.05),
-                max(self.lateral_speed / 5.0, 0.05),
-                max(self.yaw_speed / 5.0, 0.05),
+                max(self.forward_speed / 10.0, 0.05),
+                max(self.lateral_speed / 10.0, 0.05),
+                max(self.yaw_speed / 10.0, 0.05),
             ]],
             device=self.device,
         )

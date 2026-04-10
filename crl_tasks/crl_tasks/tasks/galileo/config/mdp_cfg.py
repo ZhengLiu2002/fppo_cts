@@ -50,6 +50,8 @@ LEG_JOINT_NAMES = [
 LEG_JOINT_CFG = SceneEntityCfg("robot", joint_names=LEG_JOINT_NAMES, preserve_order=True)
 
 FOOT_BODY_NAMES = ["FL_foot", "FR_foot", "RL_foot", "RR_foot"]
+LEFT_FOOT_BODY_NAMES = ["FL_foot", "RL_foot"]
+RIGHT_FOOT_BODY_NAMES = ["FR_foot", "RR_foot"]
 BASE_BODY_NAMES = ["base_link"]
 
 # Joint-position feasibility cost uses the articulation soft limits directly.
@@ -340,6 +342,18 @@ class StudentRewardsCfg:
             "contact_threshold": 5.0,
         },
     )
+    gait_contact_symmetry = RewTerm(
+        func=rewards.gait_contact_symmetry,
+        weight=0.2,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces"),
+            "left_foot_names": LEFT_FOOT_BODY_NAMES,
+            "right_foot_names": RIGHT_FOOT_BODY_NAMES,
+            "contact_threshold": 5.0,
+            "command_name": "base_velocity",
+            "min_command_speed": 0.1,
+        },
+    )
     trot_phase_reward = RewTerm(
         func=rewards.trot_phase_reward,
         weight=0.0,
@@ -378,7 +392,7 @@ class TeacherRewardsCfg:
         params={
             "command_name": "base_velocity",
             "std": 0.25,
-            "min_command_speed": 0.1,
+            "min_command_speed": None,
         },
     )
     track_ang_vel_z_exp = RewTerm(
@@ -387,7 +401,7 @@ class TeacherRewardsCfg:
         params={
             "command_name": "base_velocity",
             "std": 0.25,
-            "min_command_speed": 0.1,
+            "min_command_speed": None,
         },
     )
     joint_torques_l2 = RewTerm(
@@ -463,9 +477,21 @@ class TeacherRewardsCfg:
             "contact_threshold": 5.0,
         },
     )
+    gait_contact_symmetry = RewTerm(
+        func=rewards.gait_contact_symmetry,
+        weight=0.2,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces"),
+            "left_foot_names": LEFT_FOOT_BODY_NAMES,
+            "right_foot_names": RIGHT_FOOT_BODY_NAMES,
+            "contact_threshold": 5.0,
+            "command_name": "base_velocity",
+            "min_command_speed": 0.1,
+        },
+    )
     trot_phase_reward = RewTerm(
         func=rewards.trot_phase_reward,
-        weight=0.1,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,

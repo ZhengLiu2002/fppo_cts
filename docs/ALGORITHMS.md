@@ -1,6 +1,6 @@
 # Algorithms
 
-This repo standardizes algorithm integration via a registry and config validation.
+This repo standardizes constrained-RL algorithm integration for the Galileo CTS benchmark.
 
 ## Registry
 
@@ -11,7 +11,7 @@ Each algorithm declares:
 - `name`: canonical CLI name (e.g. `fppo`)
 - `module`: module path (e.g. `scripts.rsl_rl.algorithms.fppo`)
 - `class_name`: class to instantiate (e.g. `FPPO`)
-- `training_type`: `rl` or `dagger`
+- `training_type`: `rl` or `cts`
 - `extra_cfg_keys`: optional keys allowed beyond the class `__init__` signature
 
 ## Validation
@@ -29,6 +29,6 @@ export CRL_ALGO_STRICT=1
 2. Register it in `scripts/rsl_rl/algorithms/registry.py` via `register_algorithm`.
 3. Add default hyperparameters in
    `crl_tasks/crl_tasks/tasks/galileo/config/defaults.py` under `GalileoDefaults.algorithm`.
-4. Use `--algo <name>` or set `GalileoDefaults.algorithm.name` to select it.
+4. Use `--algo <name>` on `Isaac-Galileo-CTS-v0` or set `GalileoDefaults.algorithm.name`.
 
 This keeps CLI choices, config validation, and runner behavior in sync.

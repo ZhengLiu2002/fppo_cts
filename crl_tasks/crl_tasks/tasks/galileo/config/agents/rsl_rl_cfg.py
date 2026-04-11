@@ -51,11 +51,13 @@ class CRLRslRlPpoActorCriticCfg(RslRlPpoActorCriticCfg):
     num_priv_latent: int = 0
     history_latent_dim: int = 0
     num_hist: int = 0
+    normalize_latent: bool = False
     tanh_encoder_output: bool = False
     scan_encoder_dims: list[int] = MISSING
     priv_encoder_dims: list[int] = MISSING
     cost_critic_hidden_dims: list[int] | None = None
     encode_scan_for_critic: bool = False
+    critic_use_latent: bool = False
     critic_scan_encoder_dims: list[int] | None = None
     critic_num_prop: int | None = None
     critic_num_scan: int | None = None
@@ -68,8 +70,6 @@ class CRLRslRlPpoActorCriticCfg(RslRlPpoActorCriticCfg):
 @configclass
 class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     class_name: str = "PPO"
-    dagger_update_freq: int = 1
-    priv_reg_coef_schedual: list[float] = [0, 0.1, 2000, 3000]
     reconstruction_loss_coef: float = 0.0
 
     # Constrained RL extensions shared by non-FPPO algorithms.
@@ -103,8 +103,6 @@ class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 @configclass
 class CRLRslRlFppoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     class_name: str = "FPPO"
-    dagger_update_freq: int = 1
-    priv_reg_coef_schedual: list[float] = [0, 0.1, 2000, 3000]
     reconstruction_loss_coef: float = 0.0
 
     cost_value_loss_coef: float = 1.0
@@ -148,24 +146,22 @@ class CRLConstraintAdapterCfg:
 
 
 @configclass
-class CRLRslRlDAggerAlgorithmCfg(CRLRslRlPpoAlgorithmCfg):
-    class_name: str = "DAgger"
-    dagger_update_freq: int = 10
-    dagger_buffer_size: int = 1_048_576
-    dagger_batch_size: int = 16_384
-    dagger_min_buffer_size: int = 262_144
-    dagger_batches_per_update: int = 32
-    teacher_action_ratio_start: float = 1.0
-    teacher_action_ratio_end: float = 0.0
-    teacher_action_ratio_decay_steps: int = 8000
-    deterministic_rollout: bool = True
+class CRLRslRlCTSAlgorithmCfg(CRLRslRlPpoAlgorithmCfg):
+    class_name: str = "CTS"
+    student_group_ratio: float = 0.25
+    reconstruction_learning_rate: float = 1e-3
+    num_reconstruction_epochs: int = 2
+    detach_student_encoder_during_rl: bool = True
 
 
 @configclass
 class CRLRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     policy: CRLRslRlPpoActorCriticCfg = MISSING
-    algorithm: CRLRslRlPpoAlgorithmCfg | CRLRslRlFppoAlgorithmCfg | CRLRslRlDAggerAlgorithmCfg = MISSING
+    algorithm: CRLRslRlPpoAlgorithmCfg | CRLRslRlFppoAlgorithmCfg | CRLRslRlCTSAlgorithmCfg = (
+        MISSING
+    )
     constraint_adapter: CRLConstraintAdapterCfg = CRLConstraintAdapterCfg()
+    force_student_history_rollout: bool = False
 
 
 __all__ = [
@@ -176,6 +172,6 @@ __all__ = [
     "CRLRslRlPpoAlgorithmCfg",
     "CRLRslRlFppoAlgorithmCfg",
     "CRLConstraintAdapterCfg",
-    "CRLRslRlDAggerAlgorithmCfg",
+    "CRLRslRlCTSAlgorithmCfg",
     "CRLRslRlOnPolicyRunnerCfg",
 ]

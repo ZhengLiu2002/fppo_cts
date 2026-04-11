@@ -246,7 +246,9 @@ class FOCOPS(PPOLagrange):
                 surrogate_terms = surrogate_terms * (kl.detach() <= self.focops_eta).float()
             surrogate_loss = surrogate_terms.mean()
             cost_surrogates = self._constraint_surrogate_terms(cost_terms_adv, ratio)
-            viol_loss = self._positive_cost_penalty_per_constraint(cost_surrogates, constraint_stats["c_hat"])
+            viol_loss = self._positive_cost_penalty_per_constraint(
+                cost_surrogates, constraint_stats["c_hat"]
+            )
             surrogate_loss = self._sanitize_tensor(
                 surrogate_loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6
             )
@@ -268,9 +270,9 @@ class FOCOPS(PPOLagrange):
             )
 
             if self.use_clipped_value_loss:
-                cost_value_clipped = old_cost_terms + (
-                    pred_cost_terms - old_cost_terms
-                ).clamp(-self.clip_param, self.clip_param)
+                cost_value_clipped = old_cost_terms + (pred_cost_terms - old_cost_terms).clamp(
+                    -self.clip_param, self.clip_param
+                )
                 cost_value_losses = (pred_cost_terms - cost_terms_ret).pow(2)
                 cost_value_losses_clipped = (cost_value_clipped - cost_terms_ret).pow(2)
                 cost_value_loss = torch.max(cost_value_losses, cost_value_losses_clipped).mean()

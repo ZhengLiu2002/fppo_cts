@@ -4,8 +4,8 @@ This guide standardizes code style across task configs and scripts.
 
 ## Naming
 
-- Modules: `snake_case.py` (e.g. `teacher_env_cfg.py`).
-- Classes: `PascalCase` (e.g. `GalileoTeacherCRLEnvCfg`).
+- Modules: `snake_case.py` (e.g. `cts_env_cfg.py`).
+- Classes: `PascalCase` (e.g. `GalileoCTSCRLEnvCfg`).
 - Constants: `UPPER_SNAKE_CASE` (e.g. `GALILEO_USD_PATH`).
 - Config containers: keep stable public names and provide aliases when renaming.
 

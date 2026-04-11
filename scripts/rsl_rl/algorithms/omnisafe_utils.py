@@ -49,7 +49,9 @@ def flatten_tensor_sequence(
     flat_tensors: list[torch.Tensor] = []
     for tensor, reference in zip(tensors, references, strict=True):
         if tensor is None:
-            flat_tensors.append(torch.zeros_like(reference, memory_format=torch.contiguous_format).view(-1))
+            flat_tensors.append(
+                torch.zeros_like(reference, memory_format=torch.contiguous_format).view(-1)
+            )
         else:
             flat_tensors.append(tensor.contiguous().view(-1))
     if not flat_tensors:

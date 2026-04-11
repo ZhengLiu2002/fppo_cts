@@ -20,7 +20,7 @@ _ALGORITHM_EXPORTS = {
     "CPO": "cpo",
     "PCPO": "pcpo",
     "FOCOPS": "focops",
-    "DAgger": "dagger",
+    "CTS": "cts",
 }
 
 
@@ -46,7 +46,7 @@ __all__ = [
     "CPO",
     "PCPO",
     "FOCOPS",
-    "DAgger",
+    "CTS",
     "ALGORITHM_REGISTRY",
     "get_algorithm_class",
     "list_algorithm_names",

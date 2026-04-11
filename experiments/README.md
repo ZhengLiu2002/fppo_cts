@@ -8,12 +8,12 @@
 
 ## Benchmark Presets
 
-论文主实验建议直接从下面两份 preset 开始：
+论文主实验建议从下面两份 preset 开始：
 
-- `galileo/benchmark/teacher_main`
-- `galileo/benchmark/student_main`
+- `galileo/studies/algo_compare_cts_fair`
+- `galileo/benchmark/cts_main`
 
-它们会继承公平对比 study preset，并固定主实验的 `experiment_name`、保存频率和 benchmark 元信息。
+它们统一基于 CTS blind-locomotion task，不再区分 teacher/student 两套实验树。
 
 ## 文件格式
 
@@ -58,9 +58,10 @@ python scripts/rsl_rl/train.py --list-exp
 
 ```bash
 python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Teacher-v0 \
+  --task Isaac-Galileo-CTS-v0 \
+  --algo fppo \
   --exp galileo/fppo_smoke \
-  --run_name teacher \
+  --run_name smoke \
   --headless
 ```
 

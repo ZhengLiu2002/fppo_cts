@@ -1,0 +1,22 @@
+{
+  "extends": "galileo/base",
+  "meta": {
+    "description": "CTS-only fair-comparison preset for constrained RL algorithms on Galileo blind omni-directional locomotion.",
+    "study": "algo_compare_cts",
+    "task_profile": "cts_blind_omnidirectional_locomotion",
+    "constraint_profile": "joint_feasibility_constraints",
+    "algorithms": [
+      "ppo",
+      "fppo",
+      "np3o",
+      "ppo_lagrange",
+      "cpo",
+      "pcpo",
+      "focops"
+    ]
+  },
+  "agent": {
+    "experiment_name": "galileo_algo_compare_cts_fair"
+  },
+  "env": {}
+}

@@ -77,7 +77,6 @@ from scripts.rsl_rl.runtime import capture_rng_state, restore_rng_state
 
 _RUNNER_ONLY_ALG_KEYS = {
     "class_name",
-    "dagger_update_freq",
     "adaptive_constraint_curriculum",
     "constraint_curriculum_alpha",
     "constraint_curriculum_check_interval",
@@ -178,7 +177,7 @@ _KEY_CURVE_MIRROR_MAP = {
 
 
 class OnPolicyRunnerWithExtractor(OnPolicyRunner):
-    """Pure algorithm runner supporting RL and student DAgger training."""
+    """Pure algorithm runner for CTS benchmark training and evaluation."""
 
     @staticmethod
     def _expected_obs_dim(policy_cfg: dict) -> int | None:
@@ -250,13 +249,23 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         raise TypeError(f"Unsupported config object type: {type(cfg).__name__}")
 
     @staticmethod
+    def _build_cts_student_mask(num_envs: int, student_group_ratio: float, device) -> torch.Tensor:
+        ratio = float(student_group_ratio)
+        if num_envs <= 1:
+            return torch.ones(num_envs, device=device, dtype=torch.bool)
+        num_student = int(round(num_envs * ratio))
+        num_student = max(1, min(num_envs - 1, num_student))
+        mask = torch.zeros(num_envs, device=device, dtype=torch.bool)
+        mask[-num_student:] = True
+        return mask
+
+    @staticmethod
     def _policy_mean_action_std(policy, device: str | torch.device) -> torch.Tensor:
         """Return a safe mean action std tensor for logging.
 
-        DAgger rollouts can use deterministic inference, so a policy
-        distribution may not exist for the current step. Older policy classes may
-        also not expose the `action_std` convenience property. Logging should not
-        crash training in either case.
+        Some inference paths can skip building a distribution for the current
+        step. Older policy classes may also not expose the `action_std`
+        convenience property. Logging should not crash in either case.
         """
 
         module = getattr(policy, "module", policy)
@@ -285,29 +294,6 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
 
         return torch.zeros((), device=device, dtype=torch.float32)
 
-    def _build_teacher_policy_for_dagger(self, num_teacher_obs: int) -> ActorCriticRMA:
-        try:
-            from crl_tasks.tasks.galileo.config.agents._shared_runner_cfg import build_policy_cfg
-        except Exception as exc:
-            raise RuntimeError(
-                "DAgger for Galileo requires the shared teacher policy builder, "
-                "but it could not be imported."
-            ) from exc
-
-        teacher_policy_cfg = self._cfg_to_dict(build_policy_cfg("teacher"))
-        inferred_teacher_cost_heads = self._infer_num_cost_terms(self.env)
-        if inferred_teacher_cost_heads is not None and inferred_teacher_cost_heads > 0:
-            teacher_policy_cfg["num_cost_heads"] = int(inferred_teacher_cost_heads)
-        teacher_policy_class_name = teacher_policy_cfg.pop("class_name")
-        teacher_policy_class = eval(teacher_policy_class_name)
-        teacher_policy: ActorCriticRMA = teacher_policy_class(
-            num_teacher_obs, self.env.num_actions, **teacher_policy_cfg
-        ).to(self.device)
-        teacher_policy.eval()
-        for param in teacher_policy.parameters():
-            param.requires_grad_(False)
-        return teacher_policy
-
     def __init__(self, env: VecEnv, train_cfg: dict, log_dir: str | None = None, device="cpu"):
         self.cfg = train_cfg
         self.alg_cfg = train_cfg["algorithm"]
@@ -324,9 +310,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         self._configure_multi_gpu()
         self._constraint_normalizer = None
         constraint_cfg = dict(self.constraint_cfg)
-        self._constraint_scale_by_gamma = bool(
-            constraint_cfg.get("scale_by_gamma", False)
-        )
+        self._constraint_scale_by_gamma = bool(constraint_cfg.get("scale_by_gamma", False))
         self._constraint_scale = constraint_cfg.get("cost_scale", None)
         self._constraint_gamma = self.alg_cfg_full.get("cost_gamma")
         if self._constraint_gamma is None:
@@ -336,6 +320,9 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 constraint_cfg, device=self.device
             )
         self._constraint_term_names = self._infer_cost_term_names(self.env)
+        self.force_student_history_rollout = bool(
+            train_cfg.get("force_student_history_rollout", False)
+        )
         alg_class_name = self.alg_cfg["class_name"]
         ordered_constraint_names = self._constraint_term_names
         if ordered_constraint_names is None:
@@ -353,7 +340,8 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 if not isinstance(named_limits, dict):
                     continue
                 ordered_limits = [
-                    float(named_limits.get(name, default_limit)) for name in ordered_constraint_names
+                    float(named_limits.get(name, default_limit))
+                    for name in ordered_constraint_names
                 ]
                 self.alg_cfg[key] = ordered_limits
                 self.alg_cfg_full[key] = ordered_limits
@@ -367,19 +355,15 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         obs, extras = self.env.get_observations()
         num_obs = obs.shape[1]
 
-        if self.training_type == "rl":
-            if "critic" in extras["observations"]:
-                self.privileged_obs_type = "critic"  # actor-critic 强化学习模式（例如 PPO）
-            else:
-                self.privileged_obs_type = None
-        if self.training_type == "dagger":
-            if "teacher" in extras["observations"]:
-                self.privileged_obs_type = "teacher"  # DAgger: teacher observations for labels
-            else:
-                raise ValueError(
-                    "DAgger requires a 'teacher' observation group in the environment, "
-                    "but none was found."
-                )
+        if self.training_type not in ("rl", "cts"):
+            raise ValueError(
+                f"Unsupported training type '{self.training_type}'. "
+                "CTS benchmark only supports reinforcement-learning algorithms."
+            )
+        if "critic" in extras["observations"]:
+            self.privileged_obs_type = "critic"
+        else:
+            self.privileged_obs_type = None
 
         if self.privileged_obs_type is not None:
             num_privileged_obs = extras["observations"][self.privileged_obs_type].shape[1]
@@ -388,7 +372,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         # Multi-constraint fairness baseline: for RL algorithms, set the number
         # of cost-value heads to the number of active cost terms unless user
         # explicitly overrides it.
-        if self.training_type == "rl":
+        if self.training_type in ("rl", "cts"):
             inferred_heads = self._infer_num_cost_terms(self.env)
             if inferred_heads is None:
                 limits = self.alg_cfg_full.get("constraint_limits", None)
@@ -437,12 +421,6 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         policy: ActorCriticRMA = policy_class(
             num_privileged_obs, self.env.num_actions, **self.policy_cfg
         ).to(self.device)
-        teacher_policy = None
-        if self.training_type == "dagger":
-            teacher_policy = self._build_teacher_policy_for_dagger(
-                num_teacher_obs=num_privileged_obs
-            )
-
         if "rnd_cfg" in self.alg_cfg and self.alg_cfg["rnd_cfg"] is not None:
             # check if rnd gated state is present
             rnd_state = extras["observations"].get("rnd_state")
@@ -473,7 +451,6 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         # 纯算法训练
         alg_cfg = dict(self.alg_cfg)
         alg_cfg.pop("class_name", None)
-        self.dagger_update_freq = alg_cfg.pop("dagger_update_freq", 1)
         alg_class = get_algorithm_class(alg_class_name)
         validate_algorithm_cfg(
             alg_class,
@@ -489,11 +466,6 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             and "multi_gpu_cfg" not in alg_kwargs
         ):
             alg_kwargs["multi_gpu_cfg"] = self.multi_gpu_cfg
-        if (
-            self.training_type == "dagger"
-            and "teacher_policy" in inspect.signature(alg_class.__init__).parameters
-        ):
-            alg_kwargs["teacher_policy"] = teacher_policy
         self.alg = alg_class(policy=policy, **alg_kwargs)
 
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
@@ -518,6 +490,19 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             (num_privileged_obs,),
             (self.env.num_actions,),
         )
+        self._cts_student_mask = None
+        if self.training_type == "cts":
+            self._cts_student_mask = self._build_cts_student_mask(
+                self.env.num_envs,
+                float(self.alg_cfg_full.get("student_group_ratio", 0.25) or 0.25),
+                self.device,
+            )
+            num_student = int(self._cts_student_mask.sum().item())
+            num_teacher = int(self.env.num_envs - num_student)
+            print(
+                "[INFO] CTS env partition:"
+                f" teacher={num_teacher}, student={num_student}, total={self.env.num_envs}"
+            )
 
         self.disable_logs = self.is_distributed and self.gpu_global_rank != 0
         # Logging
@@ -597,39 +582,29 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         start_iter = self.current_learning_iteration
         tot_iter = start_iter + num_learning_iterations
         actor_module = getattr(getattr(self.alg, "policy", None), "actor", None)
-        # Student blind policies without privileged latents must use history on every rollout;
+        cts_mode = self.training_type == "cts"
+        # Blind history policies must use history encoding on every rollout;
         # otherwise the latent branch collapses to zeros for most iterations.
         policy_requires_history_rollout = bool(
-            getattr(actor_module, "num_hist", 0) > 0
-            and int(getattr(actor_module, "num_priv_latent", 0) or 0) <= 0
+            self.force_student_history_rollout
+            or (
+                getattr(actor_module, "num_hist", 0) > 0
+                and int(getattr(actor_module, "num_priv_latent", 0) or 0) <= 0
+            )
         )
         for it in range(start_iter, tot_iter):
             _sync_cuda_for_timing(self.device)
             start = time.time()
-            history_encoder_update_due = (
-                self.training_type == "rl" and it % self.dagger_update_freq == 0
-            )
-            dagger_policy_update_due = (
-                self.training_type == "dagger"
-                and (it - start_iter + 1) % self.dagger_update_freq == 0
-            )
-            dagger_iters_to_update = 0
-            if self.training_type == "dagger":
-                steps_since_last_update = (it - start_iter + 1) % self.dagger_update_freq
-                dagger_iters_to_update = (
-                    0
-                    if dagger_policy_update_due
-                    else self.dagger_update_freq - steps_since_last_update
-                )
-            policy_hist_encoding = history_encoder_update_due or policy_requires_history_rollout
-            if self.training_type == "dagger":
-                policy_hist_encoding = True
+            policy_hist_encoding = policy_requires_history_rollout
 
             # Rollout
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     # Sample actions
-                    actions = self.alg.act(obs, privileged_obs, policy_hist_encoding)
+                    if cts_mode:
+                        actions = self.alg.act(obs, privileged_obs, self._cts_student_mask)
+                    else:
+                        actions = self.alg.act(obs, privileged_obs, policy_hist_encoding)
                     # Step the environment
                     obs, rewards, dones, infos = self.env.step(actions.to(self.env.device))
                     # Move to device
@@ -702,24 +677,14 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 collection_time = stop - start
                 start = stop
                 # compute returns
-                if self.training_type == "rl":
+                if self.training_type == "cts":
+                    self.alg.compute_returns(obs, privileged_obs, self._cts_student_mask)
+                elif self.training_type == "rl":
                     self.alg.compute_returns(privileged_obs)
 
             # update policy
-            if (
-                self.training_type == "dagger"
-                and "do_policy_update" in inspect.signature(self.alg.update).parameters
-            ):
-                loss_dict = self.alg.update(do_policy_update=dagger_policy_update_due)
-            else:
-                loss_dict = self.alg.update()
+            loss_dict = self.alg.update()
             cost_metrics = getattr(self.alg, "train_metrics", None)
-            if history_encoder_update_due and hasattr(self.alg, "update_dagger"):
-                print("Updating history encoder...")
-                self.mean_hist_latent_loss = self.alg.update_dagger()
-                loss_dict["hist_latent"] = self.mean_hist_latent_loss
-            if self.training_type == "dagger":
-                loss_dict["dagger_update_freq"] = float(self.dagger_update_freq)
 
             _sync_cuda_for_timing(self.device)
             stop = time.time()
@@ -782,7 +747,6 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
     def load(self, path: str, load_optimizer: bool = True):
         loaded_dict = torch.load(path, weights_only=False)
         model_state = loaded_dict["model_state_dict"]
-        dagger_inference_load = self.training_type == "dagger" and self.log_dir is None
 
         def _load_policy_state(state_dict: dict):
             try:
@@ -842,20 +806,6 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 )
                 return self.alg.policy.load_state_dict(patched_state)
 
-        if self.training_type == "dagger" and hasattr(self.alg, "load_teacher_state_dict"):
-            if dagger_inference_load:
-                print(
-                    "[INFO] DAgger inference mode detected; loading checkpoint as student policy "
-                    "instead of teacher weights."
-                )
-            else:
-                self.alg.load_teacher_state_dict(model_state)
-                if self.empirical_normalization:
-                    teacher_norm_state = loaded_dict.get("obs_norm_state_dict")
-                    if teacher_norm_state is not None:
-                        self.privileged_obs_normalizer.load_state_dict(teacher_norm_state)
-                return loaded_dict.get("infos")
-
         resumed_training = _load_policy_state(model_state)
         if getattr(self.alg, "rnd", None):
             self.alg.rnd.load_state_dict(loaded_dict["rnd_state_dict"])
@@ -884,6 +834,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
 
     def log(self, locs: dict, width: int = 80, pad: int = 35) -> None:  # noqa: C901
         """Custom logger to support cost metrics and robust key aggregation."""
+
         def _log_scalar(tag: str, value: float, step: int):
             self.writer.add_scalar(tag, value, step)
             mirror_tag = self._key_curve_mirror_map.get(tag)
@@ -951,7 +902,9 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         if isinstance(cost_metrics, dict) and "step_size" in cost_metrics:
             _log_scalar("Loss/effective_step_size", float(cost_metrics["step_size"]), locs["it"])
         if isinstance(cost_metrics, dict) and "effective_step_ratio" in cost_metrics:
-            _log_scalar("Loss/effective_step_ratio", float(cost_metrics["effective_step_ratio"]), locs["it"])
+            _log_scalar(
+                "Loss/effective_step_ratio", float(cost_metrics["effective_step_ratio"]), locs["it"]
+            )
 
         # Log optional cost metrics
         cost_string = ""
@@ -961,36 +914,6 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 _log_scalar(f"Cost/{key}", scalar, locs["it"])
                 if key in _TERMINAL_COST_KEYS:
                     cost_string += f"""{f"Cost/{key}:":>{pad}} {scalar:.4f}\n"""
-
-        dagger_string = ""
-        if "dagger_buffer_size" in locs["loss_dict"]:
-            dagger_due = bool(round(float(locs["loss_dict"].get("dagger_update_due", 0.0))))
-            dagger_updated = bool(round(float(locs["loss_dict"].get("dagger_updated", 0.0))))
-            dagger_warmup = bool(round(float(locs["loss_dict"].get("dagger_warmup", 0.0))))
-            dagger_num_batches = float(locs["loss_dict"].get("dagger_num_batches", 0.0))
-            dagger_batch_budget = float(locs["loss_dict"].get("dagger_batch_budget", 0.0))
-            dagger_buffer_size = float(locs["loss_dict"].get("dagger_buffer_size", 0.0))
-            dagger_buffer_fill = float(locs["loss_dict"].get("dagger_buffer_fill", 0.0))
-            dagger_samples_added = float(locs["loss_dict"].get("dagger_samples_added", 0.0))
-            dagger_teacher_ratio = float(locs["loss_dict"].get("teacher_action_ratio", 0.0))
-            dagger_update_freq = int(locs["loss_dict"].get("dagger_update_freq", self.dagger_update_freq))
-            dagger_status = "collect-only"
-            if dagger_updated:
-                dagger_status = "updated"
-            elif dagger_warmup:
-                dagger_status = "warmup"
-            elif dagger_due:
-                dagger_status = "due"
-            dagger_string += (
-                f"""{'DAgger status:':>{pad}} {dagger_status} """
-                f"""(freq={dagger_update_freq}, next={int(locs.get('dagger_iters_to_update', 0))})\n"""
-            )
-            dagger_string += (
-                f"""{'DAgger replay:':>{pad}} added={dagger_samples_added:.0f}, """
-                f"""buffer={dagger_buffer_size:.0f}, fill={dagger_buffer_fill:.1%}, """
-                f"""batches={dagger_num_batches:.0f}, budget={dagger_batch_budget:.0f}, """
-                f"""teacher_mix={dagger_teacher_ratio:.2f}\n"""
-            )
 
         # Log noise std
         _log_scalar("Policy/mean_noise_std", mean_std.item(), locs["it"])
@@ -1012,12 +935,8 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 )
                 self.writer.add_scalar("Rnd/weight", self.alg.rnd.weight, locs["it"])
             # Everything else
-            _log_scalar(
-                "Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"]
-            )
-            _log_scalar(
-                "Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"]
-            )
+            _log_scalar("Train/mean_reward", statistics.mean(locs["rewbuffer"]), locs["it"])
+            _log_scalar("Train/mean_episode_length", statistics.mean(locs["lenbuffer"]), locs["it"])
             if self.logger_type != "wandb":  # wandb does not support non-integer x-axis logging
                 self.writer.add_scalar(
                     "Train/mean_episode_length/time",
@@ -1038,8 +957,6 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             if value is None:
                 continue
             log_string += f"""{f"Mean {key} loss:":>{pad}} {value:.4f}\n"""
-        if dagger_string:
-            log_string += dagger_string
         if cost_string:
             log_string += cost_string
         if len(locs["rewbuffer"]) > 0:
@@ -1114,7 +1031,9 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             policy = _normalized_policy
         return policy
 
-    def _extract_costs(self, infos: dict, rewards: torch.Tensor) -> tuple[torch.Tensor, dict | None]:
+    def _extract_costs(
+        self, infos: dict, rewards: torch.Tensor
+    ) -> tuple[torch.Tensor, dict | None]:
         cost = infos.get("cost") if isinstance(infos, dict) else None
         if cost is None:
             return torch.zeros_like(rewards), None

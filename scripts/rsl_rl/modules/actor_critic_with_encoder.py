@@ -45,6 +45,7 @@ class Actor(nn.Module):
         self.num_actions = num_actions
         self.num_priv_latent = num_priv_latent = kwargs.pop("num_priv_latent")
         self.num_priv_explicit = num_priv_explicit = kwargs.pop("num_priv_explicit")
+        self.normalize_latent = bool(kwargs.pop("normalize_latent", False))
         history_latent_dim = int(kwargs.pop("history_latent_dim", num_priv_latent) or 0)
         self.history_latent_dim = history_latent_dim if history_latent_dim > 0 else num_priv_latent
         self.history_reconstruction_dim = int(kwargs.pop("history_reconstruction_dim", 0) or 0)
@@ -53,6 +54,7 @@ class Actor(nn.Module):
         self.in_features = (
             num_prop + num_scan + num_priv_latent + num_priv_explicit + num_prop * num_hist
         )
+        self.student_in_features = num_prop + num_scan + num_prop * num_hist
 
         if len(priv_encoder_dims) > 0 and num_priv_latent > 0:
             priv_encoder_layers = []
@@ -64,7 +66,9 @@ class Actor(nn.Module):
                 )
                 priv_encoder_layers.append(activation)
             if priv_encoder_dims[-1] != self.history_latent_dim:
-                priv_encoder_layers.append(nn.Linear(priv_encoder_dims[-1], self.history_latent_dim))
+                priv_encoder_layers.append(
+                    nn.Linear(priv_encoder_dims[-1], self.history_latent_dim)
+                )
             self.priv_encoder = nn.Sequential(*priv_encoder_layers)
         elif num_priv_latent > 0 and num_priv_latent != self.history_latent_dim:
             self.priv_encoder = nn.Sequential(
@@ -109,10 +113,7 @@ class Actor(nn.Module):
         actor_layers = []
         actor_layers.append(
             nn.Linear(
-                num_prop
-                + self.scan_encoder_output_dim
-                + num_priv_explicit
-                + latent_dim,
+                num_prop + self.scan_encoder_output_dim + num_priv_explicit + latent_dim,
                 actor_hidden_dims[0],
             )
         )
@@ -136,11 +137,38 @@ class Actor(nn.Module):
         else:
             self.history_reconstruction_head = None
 
-    def forward(self, obs, hist_encoding: bool, scandots_latent: Optional[torch.Tensor] = None):
-        """前向推理：
-        - 可选对激光编码（或复用外部提供的 scandots_latent）
-        - 可选使用历史编码器，否则只编码特权隐式
-        """
+    def _normalize_latent(self, latent: torch.Tensor) -> torch.Tensor:
+        if not self.normalize_latent or latent.shape[-1] <= 0:
+            return latent
+        return F.normalize(latent, p=2, dim=-1, eps=1.0e-6)
+
+    def _expand_student_observation(self, obs: torch.Tensor) -> torch.Tensor:
+        if (
+            self.num_hist <= 0
+            or self.in_features <= self.student_in_features
+            or obs.shape[1] != self.student_in_features
+        ):
+            return obs
+        middle_dim = self.in_features - self.student_in_features
+        prop = obs[:, : self.num_prop + self.num_scan]
+        history = obs[:, self.num_prop + self.num_scan :]
+        zeros = obs.new_zeros((obs.shape[0], middle_dim))
+        return torch.cat([prop, zeros, history], dim=1)
+
+    def _ensure_full_observation(self, obs: torch.Tensor, hist_encoding: bool) -> torch.Tensor:
+        if hist_encoding:
+            return self._expand_student_observation(obs)
+        return obs
+
+    def _compose_backbone_input(
+        self,
+        obs: torch.Tensor,
+        latent: torch.Tensor,
+        scandots_latent: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        obs = self._ensure_full_observation(
+            obs, hist_encoding=latent.shape[-1] == self._hist_latent_dim
+        )
         if self.if_scan_encode:
             obs_scan = obs[:, self.num_prop : self.num_prop + self.num_scan]
             if scandots_latent is None:
@@ -154,16 +182,32 @@ class Actor(nn.Module):
             :,
             self.num_prop + self.num_scan : self.num_prop + self.num_scan + self.num_priv_explicit,
         ]
+        return torch.cat([obs_prop_scan, obs_priv_explicit, latent], dim=1)
+
+    def forward_with_latent(
+        self,
+        obs: torch.Tensor,
+        latent: torch.Tensor,
+        scandots_latent: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        backbone_input = self._compose_backbone_input(obs, latent, scandots_latent)
+        return self.actor_backbone(backbone_input)
+
+    def forward(self, obs, hist_encoding: bool, scandots_latent: Optional[torch.Tensor] = None):
+        """前向推理：
+        - 可选对激光编码（或复用外部提供的 scandots_latent）
+        - 可选使用历史编码器，否则只编码特权隐式
+        """
+        obs = self._ensure_full_observation(obs, hist_encoding=hist_encoding)
         if hist_encoding:
             latent = self.infer_hist_latent(obs)
         else:
             latent = self.infer_priv_latent(obs)
-        backbone_input = torch.cat([obs_prop_scan, obs_priv_explicit, latent], dim=1)
-        backbone_output = self.actor_backbone(backbone_input)
-        return backbone_output
+        return self.forward_with_latent(obs, latent, scandots_latent)
 
     def infer_priv_latent(self, obs):
         """仅编码特权隐式变量。"""
+        obs = self._ensure_full_observation(obs, hist_encoding=False)
         if self.num_priv_latent <= 0 or self._hist_latent_dim <= 0:
             return obs.new_zeros((obs.shape[0], self._hist_latent_dim))
         priv = obs[
@@ -175,14 +219,16 @@ class Actor(nn.Module):
             + self.num_priv_explicit
             + self.num_priv_latent,
         ]
-        return self.priv_encoder(priv)
+        return self._normalize_latent(self.priv_encoder(priv))
 
     def infer_hist_latent(self, obs):
         """对历史本体序列做 1D 卷积编码。"""
+        obs = self._ensure_full_observation(obs, hist_encoding=True)
         if self.num_hist <= 0 or self._hist_latent_dim <= 0:
             return self.infer_priv_latent(obs)
         hist = obs[:, -self.num_hist * self.num_prop :]
-        return self.history_encoder(hist.view(-1, self.num_hist, self.num_prop))
+        latent = self.history_encoder(hist.view(-1, self.num_hist, self.num_prop))
+        return self._normalize_latent(latent)
 
     def infer_scandots_latent(self, obs):
         """仅对激光点做编码。"""
@@ -248,6 +294,7 @@ class ActorCriticRMA(nn.Module):
             kwargs.get("critic_num_priv_latent", self._num_priv_latent) or self._num_priv_latent
         )
         self._critic_num_hist = int(kwargs.get("critic_num_hist", 0) or 0)
+        self._critic_use_latent = bool(kwargs.get("critic_use_latent", False))
         critic_scan_encoder_dims = kwargs.get("critic_scan_encoder_dims", None)
         self._critic_scan_encoder = None
         self._critic_scan_encoder_output_dim = self._critic_num_scan
@@ -285,6 +332,8 @@ class ActorCriticRMA(nn.Module):
             )
         else:
             mlp_input_dim_c = num_critic_obs
+        if self._critic_use_latent and self._history_latent_dim > 0:
+            mlp_input_dim_c += self._history_latent_dim
         critic_layers = []
         critic_layers.append(nn.Linear(mlp_input_dim_c, critic_hidden_dims[0]))
         critic_layers.append(activation)
@@ -368,6 +417,9 @@ class ActorCriticRMA(nn.Module):
     def update_distribution(self, observations, hist_encoding):
         """用最新 actor 输出均值并配合可学习方差构造高斯分布。"""
         mean = self.actor(observations, hist_encoding)
+        self.update_distribution_from_mean(mean)
+
+    def update_distribution_from_mean(self, mean: torch.Tensor) -> None:
         # sanitize mean to prevent NaN/Inf blowing up Normal
         mean = torch.nan_to_num(mean, nan=0.0, posinf=1.0e6, neginf=-1.0e6)
         if self.noise_std_type == "scalar":
@@ -383,6 +435,60 @@ class ActorCriticRMA(nn.Module):
         std = torch.clamp(std, max=self._std_ceiling) + self._std_floor
         self.distribution = Normal(mean, std)
 
+    def update_distribution_with_latent(
+        self,
+        observations: torch.Tensor,
+        latent: torch.Tensor,
+        scandots_latent: Optional[torch.Tensor] = None,
+    ) -> None:
+        mean = self.actor.forward_with_latent(observations, latent, scandots_latent)
+        self.update_distribution_from_mean(mean)
+
+    def _resolve_actor_mode_latent(
+        self,
+        observations: torch.Tensor,
+        actor_mode: str,
+        *,
+        detach_student_encoder: bool = False,
+    ) -> torch.Tensor:
+        if actor_mode == "teacher":
+            return self.actor.infer_priv_latent(observations)
+        if actor_mode == "student":
+            latent = self.actor.infer_hist_latent(observations)
+            return latent.detach() if detach_student_encoder else latent
+        raise ValueError(f"Unsupported actor mode: {actor_mode}")
+
+    def actor_mode_latent(
+        self,
+        observations: torch.Tensor,
+        actor_mode: str,
+        *,
+        detach_student_encoder: bool = False,
+    ) -> torch.Tensor:
+        return self._resolve_actor_mode_latent(
+            observations,
+            actor_mode,
+            detach_student_encoder=detach_student_encoder,
+        )
+
+    def act_by_mode(
+        self,
+        observations: torch.Tensor,
+        actor_mode: str,
+        *,
+        detach_student_encoder: bool = False,
+        deterministic: bool = False,
+    ) -> torch.Tensor:
+        latent = self._resolve_actor_mode_latent(
+            observations,
+            actor_mode,
+            detach_student_encoder=detach_student_encoder,
+        )
+        self.update_distribution_with_latent(observations, latent)
+        if deterministic:
+            return self.distribution.mean
+        return self.distribution.sample()
+
     def act(self, observations, hist_encoding=False, **kwargs):
         self.update_distribution(observations, hist_encoding)
         return self.distribution.sample()
@@ -397,7 +503,11 @@ class ActorCriticRMA(nn.Module):
     def act_student_inference(self, observations, zero_privileged: bool = True):
         """Deployment helper for student policy: zero privileged terms and force history encoding."""
         obs = observations
-        if zero_privileged and (self._num_priv_explicit + self._num_priv_latent) > 0:
+        if (
+            obs.shape[1] == self.actor.in_features
+            and zero_privileged
+            and (self._num_priv_explicit + self._num_priv_latent) > 0
+        ):
             obs = observations.clone()
             start = self._num_prop + self._num_scan
             end = start + self._num_priv_explicit + self._num_priv_latent
@@ -423,15 +533,76 @@ class ActorCriticRMA(nn.Module):
             dim=1,
         )
 
-    def evaluate(self, critic_observations, **kwargs):
+    def evaluate(
+        self,
+        critic_observations,
+        observations: torch.Tensor | None = None,
+        actor_mode: str | None = None,
+        latent: torch.Tensor | None = None,
+        detach_student_encoder: bool = False,
+        **kwargs,
+    ):
         critic_input = self._encode_critic_obs(critic_observations)
+        if self._critic_use_latent and self._history_latent_dim > 0:
+            if latent is None:
+                if observations is None or actor_mode is None:
+                    raise ValueError(
+                        "Critic latent conditioning requires observations and actor_mode."
+                    )
+                latent = self._resolve_actor_mode_latent(
+                    observations,
+                    actor_mode,
+                    detach_student_encoder=detach_student_encoder,
+                )
+            critic_input = torch.cat([critic_input, latent], dim=-1)
         value = self.critic(critic_input)
         return value
 
-    def evaluate_cost(self, critic_observations, **kwargs):
+    def evaluate_cost(
+        self,
+        critic_observations,
+        observations: torch.Tensor | None = None,
+        actor_mode: str | None = None,
+        latent: torch.Tensor | None = None,
+        detach_student_encoder: bool = False,
+        **kwargs,
+    ):
         critic_input = self._encode_critic_obs(critic_observations)
+        if self._critic_use_latent and self._history_latent_dim > 0:
+            if latent is None:
+                if observations is None or actor_mode is None:
+                    raise ValueError(
+                        "Critic latent conditioning requires observations and actor_mode."
+                    )
+                latent = self._resolve_actor_mode_latent(
+                    observations,
+                    actor_mode,
+                    detach_student_encoder=detach_student_encoder,
+                )
+            critic_input = torch.cat([critic_input, latent], dim=-1)
         cost_value = self.cost_critic(critic_input)
         return cost_value
+
+    def teacher_latent(self, observations: torch.Tensor) -> torch.Tensor:
+        return self.actor.infer_priv_latent(observations)
+
+    def student_latent(self, observations: torch.Tensor) -> torch.Tensor:
+        return self.actor.infer_hist_latent(observations)
+
+    def latent_alignment_targets(
+        self, observations: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.student_latent(observations), self.teacher_latent(observations).detach()
+
+    def student_encoder_parameters(self):
+        history_encoder = getattr(self.actor, "history_encoder", None)
+        if history_encoder is None or isinstance(history_encoder, nn.Identity):
+            return []
+        return list(history_encoder.parameters())
+
+    def ppo_parameters(self):
+        student_param_ids = {id(param) for param in self.student_encoder_parameters()}
+        return [param for param in self.parameters() if id(param) not in student_param_ids]
 
     def predict_history_reconstruction(self, observations: torch.Tensor) -> torch.Tensor | None:
         return self.actor.reconstruct_privileged_from_history(observations)

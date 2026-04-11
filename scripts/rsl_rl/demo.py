@@ -98,22 +98,19 @@ from crl_isaaclab.envs import CRLManagerBasedRLEnv
 from isaaclab.utils.math import quat_apply
 from scripts.rsl_rl.vecenv_wrapper import CRLRslRlVecEnvWrapper
 from crl_tasks.tasks.galileo.config.agents.rsl_rl_cfg import CRLRslRlOnPolicyRunnerCfg
-from crl_tasks.tasks.galileo.config.teacher_env_cfg import GalileoTeacherCRLEnvCfg_PLAY
-from crl_tasks.tasks.galileo.config.student_env_cfg import GalileoStudentCRLEnvCfg_PLAY
+from crl_tasks.tasks.galileo.config.cts_env_cfg import GalileoCTSCRLEnvCfg_PLAY
 
 
 class GalileoDemoController:
-    """Interactive controller for Galileo teacher/student play configs."""
+    """Interactive controller for the CTS blind-locomotion play config."""
 
     def __init__(self):
         agent_cfg: CRLRslRlOnPolicyRunnerCfg = cli_args.parse_rsl_rl_cfg(args_cli.task, args_cli)
-        experiment_preset = load_experiment_preset(selection=args_cli.exp, file_path=args_cli.exp_file)
-
-        env_cfg = (
-            GalileoTeacherCRLEnvCfg_PLAY()
-            if "Teacher" in args_cli.task
-            else GalileoStudentCRLEnvCfg_PLAY()
+        experiment_preset = load_experiment_preset(
+            selection=args_cli.exp, file_path=args_cli.exp_file
         )
+
+        env_cfg = GalileoCTSCRLEnvCfg_PLAY()
         if experiment_preset is not None:
             apply_experiment_preset(env_cfg=env_cfg, agent_cfg=agent_cfg, preset=experiment_preset)
             agent_cfg = cli_args.reapply_rsl_rl_cli_overrides(agent_cfg, args_cli)

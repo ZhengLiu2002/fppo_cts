@@ -71,8 +71,8 @@ parser.add_argument(
 parser.add_argument(
     "--task",
     type=str,
-    default="Isaac-Galileo-CRL-Student-Play-v0",
-    help="Galileo task to load. Override with the teacher play task when needed.",
+    default="Isaac-Galileo-CTS-Play-v0",
+    help="CTS play task to load for blind omni-directional locomotion teleoperation.",
 )
 parser.add_argument(
     "--use_pretrained_checkpoint",
@@ -314,7 +314,9 @@ class ManualCommandInjector:
             return command * scale_tensor
         return command * scale_tensor.view(1, -1)
 
-    def _patch_group_obs(self, group_name: str, obs_tensor: torch.Tensor, command: torch.Tensor) -> None:
+    def _patch_group_obs(
+        self, group_name: str, obs_tensor: torch.Tensor, command: torch.Tensor
+    ) -> None:
         if not torch.is_tensor(obs_tensor):
             return
 
@@ -332,21 +334,28 @@ class ManualCommandInjector:
                 scale_cfg = dict(params.get("scales") or {})
                 scaled_command = self._scale_command(command, scale_cfg.get("commands", 1.0))
                 history_buffer = getattr(term_func, "_obs_history_buffer", None)
-                if history_buffer is not None and history_buffer.shape[-1] >= scaled_command.shape[1]:
+                if (
+                    history_buffer is not None
+                    and history_buffer.shape[-1] >= scaled_command.shape[1]
+                ):
                     reset_mask = self.env.unwrapped.episode_length_buf <= 1
                     if torch.any(reset_mask):
                         history_buffer[reset_mask, :, -scaled_command.shape[1] :] = scaled_command[
                             reset_mask
                         ].unsqueeze(1)
                     history_buffer[:, -1, -scaled_command.shape[1] :] = scaled_command
-                obs_tensor[:, term_slice.stop - scaled_command.shape[1] : term_slice.stop] = scaled_command
+                obs_tensor[:, term_slice.stop - scaled_command.shape[1] : term_slice.stop] = (
+                    scaled_command
+                )
                 continue
 
             if flat_dim == command.shape[1]:
                 scaled_command = self._scale_command(command, getattr(term_cfg, "scale", None))
                 obs_tensor[:, term_slice] = scaled_command
 
-    def apply(self, command: torch.Tensor, obs: torch.Tensor | None = None, extras: dict | None = None) -> None:
+    def apply(
+        self, command: torch.Tensor, obs: torch.Tensor | None = None, extras: dict | None = None
+    ) -> None:
         self.command_term.vel_command_b[:, :] = command
         self.command_term.is_standing_env[:] = False
 
@@ -354,7 +363,11 @@ class ManualCommandInjector:
         if isinstance(observations, dict):
             for group_name, group_obs in observations.items():
                 self._patch_group_obs(group_name, group_obs, command)
-            if torch.is_tensor(obs) and "policy" in observations and obs.data_ptr() != observations["policy"].data_ptr():
+            if (
+                torch.is_tensor(obs)
+                and "policy" in observations
+                and obs.data_ptr() != observations["policy"].data_ptr()
+            ):
                 obs.copy_(observations["policy"])
         elif torch.is_tensor(obs):
             self._patch_group_obs("policy", obs, command)
@@ -433,19 +446,23 @@ class KeyboardCommandController:
             max(abs(float(yaw_range[0])), abs(float(yaw_range[1]))),
         )
         self._accel = torch.tensor(
-            [[
-                max(float(args_cli.lin_accel), 1.0e-4),
-                max(float(args_cli.lat_accel), 1.0e-4),
-                max(float(args_cli.yaw_accel), 1.0e-4),
-            ]],
+            [
+                [
+                    max(float(args_cli.lin_accel), 1.0e-4),
+                    max(float(args_cli.lat_accel), 1.0e-4),
+                    max(float(args_cli.yaw_accel), 1.0e-4),
+                ]
+            ],
             device=self.device,
         )
         self._command_step = torch.tensor(
-            [[
-                max(self.forward_speed / 10.0, 0.05),
-                max(self.lateral_speed / 10.0, 0.05),
-                max(self.yaw_speed / 10.0, 0.05),
-            ]],
+            [
+                [
+                    max(self.forward_speed / 10.0, 0.05),
+                    max(self.lateral_speed / 10.0, 0.05),
+                    max(self.yaw_speed / 10.0, 0.05),
+                ]
+            ],
             device=self.device,
         )
 
@@ -494,7 +511,9 @@ class KeyboardCommandController:
             self._terminal_fd = sys.stdin.fileno()
             self._terminal_old_attrs = termios.tcgetattr(self._terminal_fd)
             tty.setcbreak(self._terminal_fd)
-            print("[INFO] Terminal keyboard fallback enabled. You can press keys in the launch terminal.")
+            print(
+                "[INFO] Terminal keyboard fallback enabled. You can press keys in the launch terminal."
+            )
         except Exception as exc:
             self._terminal_fd = None
             self._terminal_old_attrs = None
@@ -516,7 +535,9 @@ class KeyboardCommandController:
         self._last_input_label = label
 
     @staticmethod
-    def _move_towards(current: torch.Tensor, target: torch.Tensor, max_delta: torch.Tensor) -> torch.Tensor:
+    def _move_towards(
+        current: torch.Tensor, target: torch.Tensor, max_delta: torch.Tensor
+    ) -> torch.Tensor:
         return current + torch.clamp(target - current, min=-max_delta, max=max_delta)
 
     def _apply_incremental_keypress(self, key_name: str, *, source: str) -> None:
@@ -629,10 +650,7 @@ class KeyboardCommandController:
         raw_key_name = event.input.name
         key_name = self._normalize_key_name(raw_key_name)
         if args_cli.debug_keys:
-            print(
-                "\n[KEY] "
-                f"type={event.type} raw={raw_key_name} normalized={key_name}"
-            )
+            print("\n[KEY] " f"type={event.type} raw={raw_key_name} normalized={key_name}")
         if event.type in (
             carb.input.KeyboardEventType.KEY_PRESS,
             carb.input.KeyboardEventType.KEY_REPEAT,

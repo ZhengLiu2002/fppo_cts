@@ -185,7 +185,9 @@ class PPO:
         )
         sigma_batch = torch.clamp(sigma_batch, min=1.0e-6)
         old_sigma_batch = torch.clamp(old_sigma_batch, min=1.0e-6)
-        mu_batch = self._sanitize_tensor(mu_batch, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6)
+        mu_batch = self._sanitize_tensor(
+            mu_batch, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6
+        )
         old_mu_batch = self._sanitize_tensor(
             old_mu_batch, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6
         )
@@ -384,8 +386,9 @@ class PPO:
         pad = cost_values[:, -1:].expand(-1, target_heads - cost_values.shape[-1])
         return torch.cat([cost_values, pad], dim=-1)
 
-
-    def _resolve_constraint_limits(self, num_constraints: int, device: torch.device) -> torch.Tensor:
+    def _resolve_constraint_limits(
+        self, num_constraints: int, device: torch.device
+    ) -> torch.Tensor:
         if self.constraint_limits is None:
             return torch.full((num_constraints,), float(self.cost_limit), device=device)
         d = self.constraint_limits.to(device=device, dtype=torch.float32)
@@ -405,9 +408,9 @@ class PPO:
             neginf=-1.0e6,
             clamp=1.0e6,
         )
-        d_limits = self._resolve_constraint_limits(cost_terms_ret.shape[1], device=cost_terms_ret.device).to(
-            dtype=cost_terms_ret.dtype
-        )
+        d_limits = self._resolve_constraint_limits(
+            cost_terms_ret.shape[1], device=cost_terms_ret.device
+        ).to(dtype=cost_terms_ret.dtype)
         j_cost = self._all_reduce_mean(cost_terms_ret.mean(dim=0))
         c_hat = self._sanitize_tensor(
             j_cost - d_limits,
@@ -479,7 +482,9 @@ class PPO:
         if self.cost_viol_loss_coef <= 0.0 or self.k_value <= 0.0:
             return torch.zeros((), device=cost_surrogate.device, dtype=cost_surrogate.dtype)
         if cost_surrogate.ndim == 0:
-            return self._positive_cost_penalty(cost_surrogate, c_hat, detach_violation=detach_violation)
+            return self._positive_cost_penalty(
+                cost_surrogate, c_hat, detach_violation=detach_violation
+            )
         violation = c_hat.detach() if detach_violation else c_hat
         penalties = torch.relu(cost_surrogate + violation)
         return self.cost_viol_loss_coef * self.k_value * penalties.mean()
@@ -491,8 +496,8 @@ class PPO:
         self.transition.actions = self.policy.act(obs, hist_encoding).detach()
         self.transition.values = self.policy.evaluate(critic_obs).detach()
         cost_value_pred = self.policy.evaluate_cost(critic_obs).detach()
-        self.transition.cost_values, self.transition.cost_term_values = self._split_cost_value_heads(
-            cost_value_pred
+        self.transition.cost_values, self.transition.cost_term_values = (
+            self._split_cost_value_heads(cost_value_pred)
         )
         self.transition.actions_log_prob = self.policy.get_actions_log_prob(
             self.transition.actions
@@ -513,7 +518,9 @@ class PPO:
         self.transition.cost_rewards = costs.clone()
         self.transition.cost_term_rewards = None
         if cost_terms is not None:
-            cost_term_values = cost_terms.get("values", None) if isinstance(cost_terms, dict) else cost_terms
+            cost_term_values = (
+                cost_terms.get("values", None) if isinstance(cost_terms, dict) else cost_terms
+            )
             if cost_term_values is not None:
                 if not torch.is_tensor(cost_term_values):
                     cost_term_values = torch.as_tensor(cost_term_values, device=self.device)
@@ -523,7 +530,10 @@ class PPO:
                 elif cost_term_values.ndim > 2:
                     cost_term_values = cost_term_values.view(cost_term_values.shape[0], -1)
                 self.transition.cost_term_rewards = cost_term_values.clone()
-                if self.transition.cost_values is not None and self.transition.cost_term_values is not None:
+                if (
+                    self.transition.cost_values is not None
+                    and self.transition.cost_term_values is not None
+                ):
                     pred_terms = self.transition.cost_term_values
                     target_heads = cost_term_values.shape[-1]
                     if pred_terms.shape[-1] > target_heads:
@@ -761,7 +771,9 @@ class PPO:
             surrogate_loss = self._sanitize_tensor(
                 surrogate_loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6
             )
-            viol_loss = self._sanitize_tensor(viol_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6)
+            viol_loss = self._sanitize_tensor(
+                viol_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
+            )
 
             if self.use_clipped_value_loss:
                 value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(
@@ -772,12 +784,14 @@ class PPO:
                 value_loss = torch.max(value_losses, value_losses_clipped).mean()
             else:
                 value_loss = (returns_batch - value_batch).pow(2).mean()
-            value_loss = self._sanitize_tensor(value_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6)
+            value_loss = self._sanitize_tensor(
+                value_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
+            )
 
             if self.use_clipped_value_loss:
-                cost_value_clipped = old_cost_terms + (
-                    pred_cost_terms - old_cost_terms
-                ).clamp(-self.clip_param, self.clip_param)
+                cost_value_clipped = old_cost_terms + (pred_cost_terms - old_cost_terms).clamp(
+                    -self.clip_param, self.clip_param
+                )
                 cost_value_losses = (pred_cost_terms - cost_terms_ret).pow(2)
                 cost_value_losses_clipped = (cost_value_clipped - cost_terms_ret).pow(2)
                 cost_value_loss = torch.max(cost_value_losses, cost_value_losses_clipped).mean()

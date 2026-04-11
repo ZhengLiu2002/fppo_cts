@@ -27,12 +27,10 @@ def _cfg_items(cfg) -> dict:
     return {}
 
 
-def _infer_runner_role(agent_cfg: "RslRlOnPolicyRunnerCfg") -> str | None:
+def _infer_runner_mode(agent_cfg: "RslRlOnPolicyRunnerCfg") -> str | None:
     cfg_name = type(agent_cfg).__name__.lower()
-    if "student" in cfg_name:
-        return "student"
-    if "teacher" in cfg_name:
-        return "teacher"
+    if "cts" in cfg_name:
+        return "cts"
     return None
 
 
@@ -43,16 +41,16 @@ def _rebuild_galileo_algorithm_cfg_if_available(
     preserve_values: bool,
 ) -> bool:
     try:
-        from crl_tasks.tasks.galileo.config.agents._shared_runner_cfg import build_algorithm_cfg
+        from crl_tasks.tasks.galileo.config.agents.rsl_cts_cfg import build_cts_algorithm_cfg
     except Exception:
         return False
 
-    role = _infer_runner_role(agent_cfg)
-    if role is None or not hasattr(agent_cfg, "algorithm"):
+    runner_mode = _infer_runner_mode(agent_cfg)
+    if runner_mode != "cts" or not hasattr(agent_cfg, "algorithm"):
         return False
 
     current_algo_cfg = getattr(agent_cfg, "algorithm", None)
-    new_algo_cfg = build_algorithm_cfg(role, algo_name)
+    new_algo_cfg = build_cts_algorithm_cfg(algo_name)
 
     if preserve_values and current_algo_cfg is not None:
         for key, value in _cfg_items(current_algo_cfg).items():
@@ -69,8 +67,8 @@ def _rebuild_galileo_algorithm_cfg_if_available(
 def _apply_algo_profile_if_available(agent_cfg: "RslRlOnPolicyRunnerCfg", algo_name: str) -> None:
     """Apply task-level algorithm preset when available.
 
-    Some tasks (e.g. Galileo) define per-algorithm hyper-parameter profiles in
-    their defaults module. If the user passes `--algo`, we should switch both
+    Some tasks (e.g. Galileo CTS) define per-algorithm hyper-parameter profiles
+    in their defaults module. If the user passes `--algo`, we should switch both
     class name and hyper-parameters, not only class name.
     """
 
@@ -92,12 +90,6 @@ def _apply_algo_profile_if_available(agent_cfg: "RslRlOnPolicyRunnerCfg", algo_n
     merged_params: dict = {}
     merged_params.update(getattr(algo_defaults, "base", {}))
     merged_params.update(getattr(algo_defaults, "per_algo", {}).get(algo_name, {}))
-
-    cfg_name = type(agent_cfg).__name__.lower()
-    if "student" in cfg_name:
-        merged_params.update(getattr(algo_defaults, "student_override", {}))
-    else:
-        merged_params.update(getattr(algo_defaults, "teacher_override", {}))
 
     for key, value in merged_params.items():
         if hasattr(algo_cfg, key):

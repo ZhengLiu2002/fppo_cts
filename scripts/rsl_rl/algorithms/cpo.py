@@ -157,7 +157,9 @@ class CPO(PPO):
         old_distribution: torch.distributions.Normal,
         new_distribution: torch.distributions.Normal,
     ) -> torch.Tensor:
-        kl = torch.distributions.kl_divergence(old_distribution, new_distribution).sum(dim=-1).mean()
+        kl = (
+            torch.distributions.kl_divergence(old_distribution, new_distribution).sum(dim=-1).mean()
+        )
         return self._all_reduce_mean(kl)
 
     def _loss_pi_reward(
@@ -589,7 +591,9 @@ class CPO(PPO):
 
         if self.policy.is_recurrent:
             raise NotImplementedError("CPO/PCPO currently support feed-forward policies only.")
-        generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
+        generator = self.storage.mini_batch_generator(
+            self.num_mini_batches, self.num_learning_epochs
+        )
 
         for (
             _obs_batch,
@@ -659,9 +663,9 @@ class CPO(PPO):
                 value_loss = (returns_batch - value_batch).pow(2).mean()
 
             if self.use_clipped_value_loss:
-                cost_value_clipped = old_cost_terms + (
-                    pred_cost_terms - old_cost_terms
-                ).clamp(-self.clip_param, self.clip_param)
+                cost_value_clipped = old_cost_terms + (pred_cost_terms - old_cost_terms).clamp(
+                    -self.clip_param, self.clip_param
+                )
                 cost_value_losses = (pred_cost_terms - cost_terms_ret).pow(2)
                 cost_value_losses_clipped = (cost_value_clipped - cost_terms_ret).pow(2)
                 cost_value_loss = torch.max(cost_value_losses, cost_value_losses_clipped).mean()

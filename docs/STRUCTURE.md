@@ -17,10 +17,10 @@ Each task lives under `crl_tasks/crl_tasks/tasks/<task_name>/` and exposes:
 
 - `config/defaults.py`: Shared defaults (robot USD, scene defaults, terrain presets, algorithm knobs).
 - `config/mdp_cfg.py`: MDP terms (observations, rewards, terminations, curriculum, events).
-- `config/teacher_env_cfg.py`: Teacher environment configuration.
-- `config/student_env_cfg.py`: Student environment configuration.
+- `config/scene_cfg.py`: CTS scene configuration shared by train/eval/play.
+- `config/cts_env_cfg.py`: CTS train/eval/play environment configuration.
 - `config/costs_cfg.py`: CMDP constraint/cost definitions.
-- `config/agents/`: Agent configs (RSL-RL PPO/FPPO, distillation, etc.).
+- `config/agents/`: Agent configs for CTS benchmark algorithms.
 - `config/assets/`: Task-specific USD assets used in configs/tests.
 
 Gym registrations live at `crl_tasks/crl_tasks/tasks/<task_name>/__init__.py`.

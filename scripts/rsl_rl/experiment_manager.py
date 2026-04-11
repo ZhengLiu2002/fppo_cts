@@ -234,7 +234,9 @@ def _load_preset_chain(
 
     raw_data = _read_preset_file(resolved_path)
     if not isinstance(raw_data, Mapping):
-        raise ExperimentPresetError(f"Preset file `{resolved_path}` must contain a top-level object.")
+        raise ExperimentPresetError(
+            f"Preset file `{resolved_path}` must contain a top-level object."
+        )
 
     current_data = dict(raw_data)
     extends_value = current_data.pop("extends", [])

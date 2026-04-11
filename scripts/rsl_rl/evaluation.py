@@ -59,7 +59,9 @@ parser.add_argument(
     default=False,
     help="Disable fabric and use USD I/O operations.",
 )
-parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
+parser.add_argument(
+    "--num_envs", type=int, default=None, help="Number of environments to simulate."
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--use_pretrained_checkpoint",
@@ -151,7 +153,9 @@ def _scalar_stats(values: list[float]) -> dict[str, float | int | None]:
     }
 
 
-def _extract_step_costs(extras: dict, device: torch.device | str, num_envs: int) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def _extract_step_costs(
+    extras: dict, device: torch.device | str, num_envs: int
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
     payload = extras.get("cost") if isinstance(extras, dict) else None
     if payload is None:
         return torch.zeros(num_envs, device=device, dtype=torch.float32), {}
@@ -380,7 +384,9 @@ def main():
         "reward": _scalar_stats(reward_buffer),
         "episode_length": _scalar_stats(length_buffer),
         "cost": {
-            "mean_step_cost": (total_step_cost_sum / total_step_samples) if total_step_samples else None,
+            "mean_step_cost": (
+                (total_step_cost_sum / total_step_samples) if total_step_samples else None
+            ),
             "step_positive_rate": (
                 total_step_positive / total_step_samples if total_step_samples else None
             ),

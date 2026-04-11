@@ -243,63 +243,21 @@ class GalileoDefaults:
 
     class env:
         num_envs = 4096
-        teacher_num_envs = 4096
-        student_num_envs = 1024
-        teacher_play_num_envs = 32
-        teacher_eval_num_envs = 128
-        student_eval_num_envs = 128
-        student_play_num_envs = 16
+        play_num_envs = 16
+        eval_num_envs = 128
 
     class obs:
-        """Actor/Critic 观测维度与布局（训练配置从这里读取）。"""
+        """CTS-only actor/critic observation layout."""
 
         # 通用环境/动作维度
         num_envs = 4096
         num_actions = 12
 
-        # Teacher / Student 的 actor-critic 观测维度（当前默认一致，后续可按需分化）
-        class teacher:
-            # Actor obs:
-            # base_lin_vel*3 + base_ang_vel*3 + projected_gravity*3 + joint_pos*12
-            # + joint_vel*12 + actions*12 + commands*3
-            # + height_scan*132 + (base_com*3 + base_mass*1 + ground_friction*1)
-            actor_num_prop = 48
-            actor_num_scan = 132
-            actor_num_priv_explicit = 5
-            actor_num_priv_latent = 0
-            actor_history_latent_dim = 0
-            actor_num_hist = 0
-            num_actor_obs = (
-                actor_num_prop
-                + actor_num_scan
-                + actor_num_priv_explicit
-                + actor_num_priv_latent
-                + actor_num_prop * actor_num_hist
-            )
-
-            # Critic obs:
-            # base_lin_vel*3 + base_ang_vel*3 + projected_gravity*3 + joint_pos*12 + joint_vel*12 + actions*12 + commands*3
-            # + height_scan*132 + (base_com*3 + base_mass*1 + ground_friction*1)
-            critic_num_prop = 48
-            critic_num_scan = 132
-            critic_num_priv_explicit = 5
-            critic_num_priv_latent = 0
-            critic_num_hist = 0
-            num_critic_obs = (
-                critic_num_prop
-                + critic_num_scan
-                + critic_num_priv_explicit
-                + critic_num_priv_latent
-                + critic_num_prop * critic_num_hist
-            )
-
-        class student:
-            # Actor obs (同 teacher):
-            # base_ang_vel*3 + projected_gravity*3 + joint_pos*12 + joint_vel*12 + actions*12 + commands*3
+        class cts:
             actor_num_prop = 45
             actor_num_scan = 0
             actor_num_priv_explicit = 0
-            actor_num_priv_latent = 0
+            actor_num_priv_latent = 185
             actor_history_latent_dim = 32
             actor_num_hist = 20
             num_actor_obs = (
@@ -310,9 +268,6 @@ class GalileoDefaults:
                 + actor_num_prop * actor_num_hist
             )
 
-            # Critic obs (同 teacher):
-            # base_lin_vel*3 + base_ang_vel*3 + projected_gravity*3 + joint_pos*12 + joint_vel*12 + actions*12 + commands*3
-            # + height_scan*132 + (base_com*3 + base_mass*1 + ground_friction*1)
             critic_num_prop = 48
             critic_num_scan = 132
             critic_num_priv_explicit = 5
@@ -520,26 +475,20 @@ class GalileoDefaults:
             is_global_time = True
 
     class algorithm:
-        """算法选择与超参配置（集中在 GalileoDefaults 中便于调参）。
+        """CTS benchmark algorithm profiles.
 
-        设计原则（解决“不同算法参数种类/数量不同”的问题）：
-        - **name**: 选择当前使用的算法（与 CLI `--algo` 的取值一致：fppo/ppo/cpo/...）。
-        - **base**: 所有算法共享/通用的超参（或你希望大多数算法都用的默认值）。
-        - **per_algo**: 针对不同算法的“可选字段”字典，只写该算法需要/关心的字段即可。
-        - **teacher_override / student_override**: Teacher/Student 的差异化覆写（可选）。
-        - 应用时按顺序合并：base -> per_algo[name] -> teacher/student_override。
-
-        说明：
-        - `FPPO` 现在使用更精简的专用配置类；约束归一化/缩放等 runner 侧逻辑单独走
-          `constraint_adapter`，不再混在算法超参里。
-        - 其他算法继续复用通用 constrained-RL 配置；未用到的字段会在 runner 中过滤。
+        The CTS task is the only training scaffold in the repo. Algorithm
+        selection changes the constrained-RL update rule while keeping the same
+        blind omni-directional locomotion task, observation layout, reward, and
+        constraint definitions.
         """
 
-        # 与 CLI `--algo` 对齐：{"fppo","np3o","ppo","ppo_lagrange","cpo","pcpo","focops","dagger"}
+        # 与 CLI `--algo` 对齐：{"cts","fppo","np3o","ppo","ppo_lagrange","cpo","pcpo","focops"}
         name: str = "fppo"
 
         # CLI/代码中的 class_name 映射（最终写入 agent_cfg.algorithm.class_name）
         class_name_map = {
+            "cts": "CTS",
             "fppo": "FPPO",
             "np3o": "NP3O",
             "ppo": "PPO",
@@ -547,7 +496,6 @@ class GalileoDefaults:
             "cpo": "CPO",
             "pcpo": "PCPO",
             "focops": "FOCOPS",
-            "dagger": "DAgger",
         }
 
         # 共享默认值（两边都通用）
@@ -556,6 +504,7 @@ class GalileoDefaults:
             value_loss_coef=0.5,
             use_clipped_value_loss=True,
             clip_param=0.2,
+            entropy_coef=0.01,
             desired_kl=0.004,
             num_learning_epochs=5,
             num_mini_batches=4,
@@ -607,6 +556,35 @@ class GalileoDefaults:
         }
         # 各算法差异化字段（只写需要的即可）
         per_algo = {
+            "cts": dict(
+                value_loss_coef=0.5,
+                cost_value_loss_coef=1.0,
+                use_clipped_value_loss=True,
+                clip_param=0.2,
+                desired_kl=0.01,
+                num_learning_epochs=5,
+                num_mini_batches=4,
+                learning_rate=3.0e-4,
+                reconstruction_learning_rate=1.0e-3,
+                num_reconstruction_epochs=2,
+                schedule="adaptive",
+                gamma=0.99,
+                lam=0.95,
+                max_grad_norm=1.0,
+                entropy_coef=0.01,
+                student_group_ratio=0.25,
+                detach_student_encoder_during_rl=True,
+                cost_limit=1.3,
+                cost_viol_loss_coef=0.1,
+                k_value=0.2,
+                k_growth=1.0003,
+                k_max=1.0,
+                constraint_limits={
+                    "prob_joint_pos": 0.15,
+                    "prob_joint_vel": 0.08,
+                    "prob_joint_torque": 0.04,
+                },
+            ),
             # FPPO（更激进参数：更大步长、更松约束、更少回溯）
             "fppo": dict(
                 cost_value_loss_coef=1.0,
@@ -640,8 +618,6 @@ class GalileoDefaults:
                 constraint_curriculum_alpha=0.7,
                 constraint_curriculum_shrink=0.985,
                 step_size_adaptive=True,
-                dagger_update_freq=20,
-                priv_reg_coef_schedual=[0.0, 0.1, 2000.0, 3000.0],
             ),
             # NP3O
             "np3o": dict(
@@ -661,7 +637,6 @@ class GalileoDefaults:
                 k_decay=0.9999,
                 k_min=0.01,
                 k_violation_threshold=0.02,
-                dagger_update_freq=20,
             ),
             # PPO（示例：如果你切到 PPO，只需要写 PPO 特有/你要覆写的字段）
             "ppo": dict(
@@ -718,45 +693,7 @@ class GalileoDefaults:
                 focops_eta=0.02,
                 focops_lambda=1.0,
             ),
-            "dagger": dict(
-                dagger_update_freq=10,
-                dagger_buffer_size=1_048_576,
-                dagger_batch_size=16_384,
-                dagger_min_buffer_size=262_144,
-                dagger_batches_per_update=32,
-                teacher_action_ratio_start=1.0,
-                teacher_action_ratio_end=0.0,
-                teacher_action_ratio_decay_steps=8000,
-            ),
         }
-
-        # Teacher/Student 差异
-        constraint_adapter_teacher_override = dict(
-            enabled=False,
-        )
-        constraint_adapter_student_override = dict()
-
-        teacher_override = dict(
-            entropy_coef=0.005,
-            # Ablation: relax predictor hard stop only for teacher runs to test whether
-            # current KL protection is overly conservative.
-            # baseline: predictor_kl_hard_limit=0.02
-            predictor_kl_hard_limit=0.04,
-            constraint_curriculum_names=[
-                "prob_joint_pos",
-                "prob_joint_vel",
-                "prob_joint_torque",
-            ],
-        )
-        student_override = dict(
-            entropy_coef=0.01,
-            reconstruction_loss_coef=0.1,
-            constraint_curriculum_names=[
-                "prob_joint_pos",
-                "prob_joint_vel",
-                "prob_joint_torque",
-            ],
-        )
 
 
 # -----------------------------------------------------------------------------

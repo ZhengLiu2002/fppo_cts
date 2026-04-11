@@ -47,7 +47,7 @@ class RuntimeUtilsTest(unittest.TestCase):
         os.environ["LOG_RUN_NAME"] = "fppo"
         try:
             directory_name, needs_exact_name_log = create_run_directory_name(
-                "teacher",
+                "cts",
                 timestamp=datetime(2026, 3, 6, 12, 0, 0),
             )
         finally:
@@ -56,19 +56,19 @@ class RuntimeUtilsTest(unittest.TestCase):
             else:
                 os.environ["LOG_RUN_NAME"] = original_prefix
 
-        self.assertEqual(directory_name, "fppo_2026-03-06_12-00-00_teacher")
+        self.assertEqual(directory_name, "fppo_2026-03-06_12-00-00_cts")
         self.assertFalse(needs_exact_name_log)
 
     def test_create_run_directory_name_includes_experiment_slug(self) -> None:
         directory_name, needs_exact_name_log = create_run_directory_name(
-            "teacher",
+            "cts",
             timestamp=datetime(2026, 3, 6, 12, 0, 0),
             experiment_slug="cost-limit-relaxed",
         )
 
         self.assertEqual(
             directory_name,
-            "2026-03-06_12-00-00_cost-limit-relaxed_teacher",
+            "2026-03-06_12-00-00_cost-limit-relaxed_cts",
         )
         self.assertTrue(needs_exact_name_log)
 
@@ -121,7 +121,7 @@ class RuntimeUtilsTest(unittest.TestCase):
             (run_dir / "model_1200.pt").write_text("", encoding="utf-8")
 
             resolved = resolve_checkpoint_path(
-                task_name="Isaac-Galileo-CRL-Teacher-Play-v0",
+                task_name="Isaac-Galileo-CTS-Play-v0",
                 log_root_path=temp_dir,
                 load_run=".*",
                 load_checkpoint="model_.*.pt",
@@ -133,9 +133,9 @@ class RuntimeUtilsTest(unittest.TestCase):
 
     def test_resolve_checkpoint_path_filters_experiment_root_by_algo(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            experiment_root = Path(temp_dir) / "galileo_algo_compare_teacher_fair"
-            fppo_run = experiment_root / "fppo_2026-03-14_teacher"
-            ppo_run = experiment_root / "ppo_2026-03-14_teacher"
+            experiment_root = Path(temp_dir) / "galileo_algo_compare_cts_fair"
+            fppo_run = experiment_root / "fppo_2026-03-14_cts"
+            ppo_run = experiment_root / "ppo_2026-03-14_cts"
             fppo_run.mkdir(parents=True)
             ppo_run.mkdir(parents=True)
             (fppo_run / "model_500.pt").write_text("", encoding="utf-8")
@@ -143,7 +143,7 @@ class RuntimeUtilsTest(unittest.TestCase):
             (ppo_run / "model_9000.pt").write_text("", encoding="utf-8")
 
             resolved = resolve_checkpoint_path(
-                task_name="Isaac-Galileo-CRL-Teacher-Play-v0",
+                task_name="Isaac-Galileo-CTS-Play-v0",
                 log_root_path=temp_dir,
                 load_run=".*",
                 load_checkpoint="model_.*.pt",
@@ -155,40 +155,40 @@ class RuntimeUtilsTest(unittest.TestCase):
 
     def test_resolve_task_variant_prefers_registered_eval_task(self) -> None:
         registered = {
-            "Isaac-Galileo-CRL-Teacher-v0",
-            "Isaac-Galileo-CRL-Teacher-Eval-v0",
+            "Isaac-Galileo-CTS-v0",
+            "Isaac-Galileo-CTS-Eval-v0",
         }
 
         resolved = resolve_task_variant(
-            "Isaac-Galileo-CRL-Teacher-v0",
+            "Isaac-Galileo-CTS-v0",
             variant="eval",
             registered_tasks=registered,
         )
 
-        self.assertEqual(resolved, "Isaac-Galileo-CRL-Teacher-Eval-v0")
+        self.assertEqual(resolved, "Isaac-Galileo-CTS-Eval-v0")
 
     def test_resolve_task_variant_keeps_original_when_no_match_exists(self) -> None:
-        registered = {"Isaac-Galileo-CRL-Teacher-v0"}
+        registered = {"Isaac-Galileo-CTS-v0"}
 
         resolved = resolve_task_variant(
-            "Isaac-Galileo-CRL-Teacher-v0",
+            "Isaac-Galileo-CTS-v0",
             variant="eval",
             registered_tasks=registered,
         )
 
-        self.assertEqual(resolved, "Isaac-Galileo-CRL-Teacher-v0")
+        self.assertEqual(resolved, "Isaac-Galileo-CTS-v0")
 
     def test_build_evaluation_output_path_nests_task_checkpoint_and_tag(self) -> None:
         path = build_evaluation_output_path(
             "/tmp/run",
-            "Isaac-Galileo-CRL-Teacher-Eval-v0",
+            "Isaac-Galileo-CTS-Eval-v0",
             "/tmp/run/model_100.pt",
             summary_tag="seed-1",
         )
 
         self.assertEqual(
             path,
-            Path("/tmp/run/evaluations/isaac_galileo_crl_teacher_eval_v0/model_100/seed_1/summary.json"),
+            Path("/tmp/run/evaluations/isaac_galileo_cts_eval_v0/model_100/seed_1/summary.json"),
         )
 
 

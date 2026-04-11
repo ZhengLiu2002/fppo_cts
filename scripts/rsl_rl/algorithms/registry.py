@@ -125,7 +125,6 @@ register_algorithm(
         module="scripts.rsl_rl.algorithms.fppo",
         class_name="FPPO",
         training_type="rl",
-        extra_cfg_keys=("priv_reg_coef_schedual",),
     )
 )
 register_algorithm(
@@ -171,10 +170,10 @@ register_algorithm(
 )
 register_algorithm(
     AlgorithmSpec(
-        name="dagger",
-        module="scripts.rsl_rl.algorithms.dagger",
-        class_name="DAgger",
-        training_type="dagger",
+        name="cts",
+        module="scripts.rsl_rl.algorithms.cts",
+        class_name="CTS",
+        training_type="cts",
     )
 )
 

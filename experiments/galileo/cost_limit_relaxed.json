@@ -1,7 +1,7 @@
 {
   "extends": "galileo/base",
   "meta": {
-    "description": "Example constrained-RL sweep point with a relaxed cost limit and a larger step size.",
+    "description": "CTS benchmark sweep point with a relaxed cost limit and a larger FPPO step size.",
     "tags": [
       "sweep",
       "constraint",
@@ -11,8 +11,7 @@
   "agent": {
     "algorithm": {
       "cost_limit": 0.1,
-      "step_size": 0.0005,
-      "constraint_proxy_delta": 0.15
+      "step_size": 0.0005
     }
   }
 }

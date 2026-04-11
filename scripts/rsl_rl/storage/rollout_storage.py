@@ -15,7 +15,7 @@ class RolloutStorage:
             self.observations = None
             self.privileged_observations = None
             self.actions = None
-            self.privileged_actions = None
+            self.actor_is_student = None
             self.rewards = None
             self.cost_rewards = None
             self.cost_term_rewards = None
@@ -69,16 +69,11 @@ class RolloutStorage:
         self.actions = torch.zeros(
             num_transitions_per_env, num_envs, *actions_shape, device=self.device
         )
+        self.actor_is_student = None
         self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
-        # for DAgger
-        if training_type == "dagger":
-            self.privileged_actions = torch.zeros(
-                num_transitions_per_env, num_envs, *actions_shape, device=self.device
-            )
-
         # for reinforcement learning
-        if training_type == "rl":
+        if training_type in {"rl", "cts"}:
             self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.cost_values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
             self.actions_log_prob = torch.zeros(
@@ -119,6 +114,22 @@ class RolloutStorage:
         if self.privileged_observations is not None:
             self.privileged_observations[self.step].copy_(transition.privileged_observations)
         self.actions[self.step].copy_(transition.actions)
+        if transition.actor_is_student is not None:
+            role_mask = transition.actor_is_student
+            if not torch.is_tensor(role_mask):
+                role_mask = torch.as_tensor(role_mask, device=self.device)
+            role_mask = role_mask.to(self.device)
+            if role_mask.ndim == 1:
+                role_mask = role_mask.unsqueeze(-1)
+            if self.actor_is_student is None:
+                self.actor_is_student = torch.zeros(
+                    self.num_transitions_per_env,
+                    self.num_envs,
+                    role_mask.shape[-1],
+                    device=self.device,
+                    dtype=torch.bool,
+                )
+            self.actor_is_student[self.step].copy_(role_mask.bool())
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
         if transition.cost_rewards is not None:
             self.cost_rewards[self.step].copy_(transition.cost_rewards.view(-1, 1))
@@ -168,12 +179,8 @@ class RolloutStorage:
                     )
                 self.cost_term_values[self.step].copy_(cost_term_values)
         self.dones[self.step].copy_(transition.dones.view(-1, 1))
-        # for DAgger
-        if self.training_type == "dagger":
-            self.privileged_actions[self.step].copy_(transition.privileged_actions)
-
         # for reinforcement learning
-        if self.training_type == "rl":
+        if self.training_type in {"rl", "cts"}:
             self.values[self.step].copy_(transition.values)
             self.cost_values[self.step].copy_(transition.cost_values)
             self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
@@ -250,7 +257,7 @@ class RolloutStorage:
         cost_advantage = 0
         cost_gamma = gamma if cost_gamma is None else cost_gamma
         cost_lam = lam if cost_lam is None else cost_lam
-        compute_cost = self.training_type == "rl" and last_cost_values is not None
+        compute_cost = self.training_type in {"rl", "cts"} and last_cost_values is not None
         compute_cost_terms = (
             compute_cost
             and self.cost_term_rewards is not None
@@ -271,7 +278,9 @@ class RolloutStorage:
             else:
                 next_values = self.values[step + 1]
                 next_cost_values = self.cost_values[step + 1] if compute_cost else None
-                next_cost_term_values = self.cost_term_values[step + 1] if compute_cost_terms else None
+                next_cost_term_values = (
+                    self.cost_term_values[step + 1] if compute_cost_terms else None
+                )
             # 1 if we are not in a terminal state, 0 otherwise
             next_is_not_terminal = 1.0 - self.dones[step].float()
             # TD error: r_t + gamma * V(s_{t+1}) - V(s_t)
@@ -328,23 +337,9 @@ class RolloutStorage:
                     std = self.cost_term_advantages.std(dim=(0, 1), keepdim=True, unbiased=False)
                     self.cost_term_advantages = (self.cost_term_advantages - mean) / (std + 1e-8)
 
-    # for DAgger
-    def generator(self):
-        if self.training_type != "dagger":
-            raise ValueError("This function is only available for DAgger training.")
-
-        for i in range(self.num_transitions_per_env):
-            if self.privileged_observations is not None:
-                privileged_observations = self.privileged_observations[i]
-            else:
-                privileged_observations = self.observations[i]
-            yield self.observations[i], privileged_observations, self.actions[
-                i
-            ], self.privileged_actions[i], self.dones[i]
-
     # for reinforcement learning with feedforward networks
     def mini_batch_generator(self, num_mini_batches, num_epochs=8):
-        if self.training_type != "rl":
+        if self.training_type not in {"rl", "cts"}:
             raise ValueError("This function is only available for reinforcement learning training.")
         batch_size = self.num_envs * self.num_transitions_per_env
         mini_batch_size = batch_size // num_mini_batches
@@ -385,6 +380,9 @@ class RolloutStorage:
         advantages = self.advantages.flatten(0, 1)
         old_mu = self.mu.flatten(0, 1)
         old_sigma = self.sigma.flatten(0, 1)
+        actor_is_student = (
+            self.actor_is_student.flatten(0, 1) if self.actor_is_student is not None else None
+        )
 
         for epoch in range(num_epochs):
             for i in range(num_mini_batches):
@@ -413,9 +411,7 @@ class RolloutStorage:
                     cost_term_returns[batch_idx] if cost_term_returns is not None else None
                 )
                 cost_term_advantages_batch = (
-                    cost_term_advantages[batch_idx]
-                    if cost_term_advantages is not None
-                    else None
+                    cost_term_advantages[batch_idx] if cost_term_advantages is not None else None
                 )
                 cost_term_rewards_batch = (
                     cost_term_rewards[batch_idx] if cost_term_rewards is not None else None
@@ -444,11 +440,12 @@ class RolloutStorage:
                     cost_term_advantages_batch,
                     cost_term_rewards_batch,
                     cost_term_values_batch,
+                    actor_is_student[batch_idx] if actor_is_student is not None else None,
                 )
 
     # for reinfrocement learning with recurrent networks
     def recurrent_mini_batch_generator(self, num_mini_batches, num_epochs=8):
-        if self.training_type != "rl":
+        if self.training_type not in {"rl", "cts"}:
             raise ValueError("This function is only available for reinforcement learning training.")
         # split trajectories into episode segments
         trajectories = split_and_pad_trajectories(self.dones, self.observations)
@@ -493,6 +490,11 @@ class RolloutStorage:
         advantages_traj = split_and_pad_trajectories(self.dones, self.advantages)[0]
         old_mu_traj = split_and_pad_trajectories(self.dones, self.mu)[0]
         old_sigma_traj = split_and_pad_trajectories(self.dones, self.sigma)[0]
+        actor_is_student_traj = (
+            split_and_pad_trajectories(self.dones, self.actor_is_student)[0]
+            if self.actor_is_student is not None
+            else None
+        )
 
         # RNN hidden states
         if self.saved_hidden_states_a is None:
@@ -543,6 +545,11 @@ class RolloutStorage:
                     if cost_term_values_traj is not None
                     else None
                 )
+                actor_is_student_batch = (
+                    actor_is_student_traj[:, batch_idx]
+                    if actor_is_student_traj is not None
+                    else None
+                )
 
                 # hidden states: (num_layers, batch, hidden_dim)
                 hid_a = self.saved_hidden_states_a[:, batch_idx]
@@ -570,4 +577,5 @@ class RolloutStorage:
                     cost_term_advantages_batch,
                     cost_term_rewards_batch,
                     cost_term_values_batch,
+                    actor_is_student_batch,
                 )

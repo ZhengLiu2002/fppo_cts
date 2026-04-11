@@ -62,15 +62,11 @@ def test_dof_error_l2_supports_command_speed_scaling() -> None:
 
 def test_galileo_dof_error_reward_uses_speed_scaling_params() -> None:
     module, source = _module_and_source(MDP_CFG_FILE)
-    student = _class_assignments(_class_node(module, "StudentRewardsCfg"))
-    teacher = _class_assignments(_class_node(module, "TeacherRewardsCfg"))
+    cts = _class_assignments(_class_node(module, "CTSRewardsCfg"))
 
-    student_segment = _source_segment(source, student["dof_error_l2"])
-    teacher_segment = _source_segment(source, teacher["dof_error_l2"])
-
-    for segment in (student_segment, teacher_segment):
-        assert '"command_name": "base_velocity"' in segment
-        assert '"low_speed_threshold": 0.1' in segment
-        assert '"high_speed_threshold": 0.8' in segment
-        assert '"low_speed_scale": 1.5' in segment
-        assert '"high_speed_scale": 0.5' in segment
+    segment = _source_segment(source, cts["dof_error_l2"])
+    assert '"command_name": "base_velocity"' in segment
+    assert '"low_speed_threshold": 0.1' in segment
+    assert '"high_speed_threshold": 0.8' in segment
+    assert '"low_speed_scale": 1.5' in segment
+    assert '"high_speed_scale": 0.5' in segment

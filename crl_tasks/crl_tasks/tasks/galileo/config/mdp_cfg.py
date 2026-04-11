@@ -139,24 +139,8 @@ class _PrivilegedObsGroupCfg(ObsGroup):
 
 
 @configclass
-class TeacherObservationsCfg:
-    """FPPO 风格观测：teacher 的 actor/critic 使用同一套特权观测。"""
-
-    @configclass
-    class PolicyCfg(_PrivilegedObsGroupCfg):
-        pass
-
-    @configclass
-    class CriticCfg(_PrivilegedObsGroupCfg):
-        pass
-
-    policy: PolicyCfg = PolicyCfg()
-    critic: CriticCfg = CriticCfg()
-
-
-@configclass
-class StudentObservationsCfg:
-    """学生（蒸馏/学生网络）观测"""
+class CTSObservationsCfg:
+    """CTS benchmark observations for blind omni-directional locomotion."""
 
     @configclass
     class PolicyCfg(ObsGroup):
@@ -170,10 +154,47 @@ class StudentObservationsCfg:
             params={"command_name": "base_velocity"},
             scale=(2.0, 2.0, 0.25),
         )
+        teacher_base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
+        teacher_base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
+        teacher_projected_gravity = ObsTerm(func=mdp.projected_gravity)
+        teacher_joint_pos = ObsTerm(func=mdp.joint_pos_rel)
+        teacher_joint_vel = ObsTerm(func=mdp.joint_vel_rel)
+        teacher_actions = ObsTerm(func=mdp.last_action)
+        teacher_velocity_commands = ObsTerm(
+            func=mdp.generated_commands,
+            params={"command_name": "base_velocity"},
+        )
+        teacher_height_scan = ObsTerm(
+            func=mdp.height_scan,
+            params={"sensor_cfg": SceneEntityCfg("height_scanner"), "offset": 0.5},
+        )
+        teacher_base_com = ObsTerm(
+            func=crl_obs.base_com,
+            params={
+                "body_name": "base_link",
+                "normalize": True,
+                "com_range": GalileoDefaults.priv_obs_norm.base_com_range,
+            },
+        )
+        teacher_base_mass = ObsTerm(
+            func=crl_obs.base_mass,
+            params={
+                "body_name": "base_link",
+                "normalize": True,
+                "mass_delta_range": GalileoDefaults.priv_obs_norm.base_mass_delta_range,
+            },
+        )
+        teacher_ground_friction = ObsTerm(
+            func=crl_obs.ground_friction,
+            params={
+                "normalize": True,
+                "friction_range": GalileoDefaults.priv_obs_norm.ground_friction_range,
+            },
+        )
         proprio_history = ObsTerm(
             func=crl_obs.PolicyHistory,
             params={
-                "history_length": GalileoDefaults.obs.student.actor_num_hist,
+                "history_length": GalileoDefaults.obs.cts.actor_num_hist,
                 "include_base_lin_vel": False,
                 "command_name": "base_velocity",
                 "scales": {
@@ -192,20 +213,13 @@ class StudentObservationsCfg:
     class CriticCfg(_PrivilegedObsGroupCfg):
         pass
 
-    @configclass
-    class TeacherCfg(_PrivilegedObsGroupCfg):
-        """Teacher-policy observations exposed during DAgger training."""
-
-        pass
-
     policy: PolicyCfg = PolicyCfg()
     critic: CriticCfg = CriticCfg()
-    teacher: TeacherCfg = TeacherCfg()
 
 
 @configclass
-class TeacherCostsCfg:
-    """Cost terms mirrored from FPPO CMDP constraints (teacher)."""
+class CTSCostsCfg:
+    """Constraint terms used by all CTS benchmark algorithms."""
 
     prob_joint_pos = CostTerm(
         func=mdp_constraints.joint_pos_prob_constraint,
@@ -238,151 +252,13 @@ class TeacherCostsCfg:
     )
 
 
-@configclass
-class StudentCostsCfg(TeacherCostsCfg):
-    """Mirror the teacher feasibility constraints for the student."""
-
-
-# Backwards compatibility alias.
-CostsCfg = TeacherCostsCfg
+# Backwards-compatible generic alias used by helper modules.
+CostsCfg = CTSCostsCfg
 
 
 @configclass
-class StudentRewardsCfg:
-    """Teacher-aligned student rewards with mild proprioceptive-policy tuning."""
-
-    only_positive_rewards: bool = True
-
-    track_lin_vel_xy_exp = RewTerm(
-        func=rewards.track_lin_vel_xy_exp,
-        weight=0.5,
-        params={
-            "command_name": "base_velocity",
-            "std": 0.25,
-            "min_command_speed": 0.05,
-        },
-    )
-    track_ang_vel_z_exp = RewTerm(
-        func=rewards.track_ang_vel_z_exp,
-        weight=0.5,
-        params={
-            "command_name": "base_velocity",
-            "std": 0.25,
-            "min_command_speed": 0.05,
-        },
-    )
-    joint_torques_l2 = RewTerm(
-        func=rewards.joint_torque_l2,
-        weight=-2.0e-7,
-        params={"asset_cfg": SceneEntityCfg("robot")},
-    )
-    joint_acc_l2 = RewTerm(
-        func=rewards.joint_acc_l2,
-        weight=-2.5e-9,
-    )
-    dof_error_l2 = RewTerm(
-        func=rewards.dof_error_l2,
-        weight=-0.1,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "command_name": "base_velocity",
-            "low_speed_threshold": 0.1,
-            "high_speed_threshold": 0.8,
-            "low_speed_scale": 1.5,
-            "high_speed_scale": 0.5,
-        },
-    )
-    hip_pos_l2 = RewTerm(
-        func=rewards.hip_pos_l2,
-        weight=-0.1,
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint"),
-            "command_name": "base_velocity",
-            "low_speed_threshold": 0.1,
-            "high_speed_threshold": 0.8,
-            "low_speed_scale": 1.5,
-            "high_speed_scale": 0.5,
-        },
-    )
-    action_rate_l2 = RewTerm(
-        func=rewards.action_rate_l2,
-        weight=-1.0e-4,
-    )
-    lin_vel_z_l2 = RewTerm(
-        func=rewards.lin_vel_z_l2,
-        weight=-2.0,
-    )
-    ang_vel_xy_l2 = RewTerm(
-        func=rewards.ang_vel_xy_l2,
-        weight=-0.1,
-    )
-    flat_orientation_l2 = RewTerm(
-        func=rewards.flat_orientation_l2,
-        weight=-0.5,
-        params={
-            "asset_cfg": SceneEntityCfg("robot"),
-            "flat_terrain_name": "crl_flat",
-        },
-    )
-    feet_air_time = RewTerm(
-        func=rewards.feet_air_time,
-        weight=0.8,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
-            "command_name": "base_velocity",
-            "threshold": 0.22,
-        },
-    )
-    feet_slide = RewTerm(
-        func=rewards.feet_slide,
-        weight=-0.1,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
-            "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
-            "contact_threshold": 5.0,
-        },
-    )
-    gait_contact_symmetry = RewTerm(
-        func=rewards.gait_contact_symmetry,
-        weight=0.2,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "left_foot_names": LEFT_FOOT_BODY_NAMES,
-            "right_foot_names": RIGHT_FOOT_BODY_NAMES,
-            "contact_threshold": 5.0,
-            "command_name": "base_velocity",
-            "min_command_speed": 0.1,
-        },
-    )
-    trot_phase_reward = RewTerm(
-        func=rewards.trot_phase_reward,
-        weight=0.0,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "foot_body_names": FOOT_BODY_NAMES,
-            "contact_threshold": 5.0,
-            "contact_smoothing": 1.5,
-            "ema_decay": 0.9,
-            "command_name": "base_velocity",
-            "min_command_speed": 0.1,
-            "low_speed_threshold": 0.45,
-            "max_abs_yaw_cmd": 0.2,
-        },
-    )
-    undesired_contacts = RewTerm(
-        func=rewards.undesired_contacts,
-        weight=-1.0,
-        params={
-            "sensor_cfg": SceneEntityCfg(
-                "contact_forces", body_names=[".*_thigh", ".*_calf"]
-            ),
-            "threshold": 1.0,
-        },
-    )
-
-@configclass
-class TeacherRewardsCfg:
-    """FPPO 奖励配置（与 FPPO 基线一致）。"""
+class CTSRewardsCfg:
+    """Shared locomotion reward for the CTS blind-locomotion benchmark."""
 
     only_positive_rewards: bool = True
 
@@ -411,7 +287,7 @@ class TeacherRewardsCfg:
     )
 
     joint_acc_l2 = RewTerm(
-        func=rewards.joint_acc_l2, 
+        func=rewards.joint_acc_l2,
         weight=-6.0e-9,
     )
     dof_error_l2 = RewTerm(
@@ -442,14 +318,8 @@ class TeacherRewardsCfg:
         func=rewards.action_rate_l2,
         weight=-1.0e-3,
     )
-    lin_vel_z_l2 = RewTerm(
-        func=rewards.lin_vel_z_l2, 
-        weight=-2.0
-    )
-    ang_vel_xy_l2 = RewTerm(
-        func=rewards.ang_vel_xy_l2, 
-        weight=-0.5
-    )
+    lin_vel_z_l2 = RewTerm(func=rewards.lin_vel_z_l2, weight=-2.0)
+    ang_vel_xy_l2 = RewTerm(func=rewards.ang_vel_xy_l2, weight=-0.5)
     flat_orientation_l2 = RewTerm(
         func=rewards.flat_orientation_l2,
         weight=-2.0,
@@ -508,12 +378,11 @@ class TeacherRewardsCfg:
         func=rewards.undesired_contacts,
         weight=-1.0,
         params={
-            "sensor_cfg": SceneEntityCfg(
-                "contact_forces", body_names=[".*_thigh", ".*_calf"]
-            ),
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*_thigh", ".*_calf"]),
             "threshold": 1.0,
         },
     )
+
 
 @configclass
 class TerminationsCfg:
@@ -715,41 +584,8 @@ class CurriculumCfg:
 
 
 @configclass
-class StudentCurriculumCfg:
-    """Teacher curriculum with slightly slower command progression for the blind student."""
-
-    terrain_levels = CurrTerm(
-        func=curriculums.terrain_levels_vel,
-        params={
-            "move_up_ratio": GalileoDefaults.curriculum.terrain_move_up_ratio,
-            "move_down_ratio": GalileoDefaults.curriculum.terrain_move_down_ratio,
-        },
-    )
-    lin_vel_x_command_threshold = CurrTerm(
-        func=curriculums.lin_vel_x_command_threshold,
-        params={
-            "episodes_per_level": GalileoDefaults.curriculum.episodes_per_level,
-            "warmup_steps": int(GalileoDefaults.curriculum.command_warmup_steps * 1.5),
-            "min_progress_steps": int(GalileoDefaults.curriculum.command_min_progress_steps * 1.25),
-            "terrain_level_threshold": GalileoDefaults.curriculum.command_terrain_gate_level,
-            "error_threshold": GalileoDefaults.curriculum.lin_tracking_error_threshold,
-            "min_command_speed": GalileoDefaults.curriculum.lin_eval_min_command_speed,
-            "min_active_ratio": GalileoDefaults.curriculum.command_min_active_ratio,
-        },
-    )
-    ang_vel_z_command_threshold = CurrTerm(
-        func=curriculums.ang_vel_z_command_threshold,
-        params={
-            "episodes_per_level": GalileoDefaults.curriculum.episodes_per_level,
-            "warmup_steps": int(GalileoDefaults.curriculum.command_warmup_steps * 1.5),
-            "min_progress_steps": int(GalileoDefaults.curriculum.command_min_progress_steps * 1.25),
-            "terrain_level_threshold": GalileoDefaults.curriculum.command_terrain_gate_level,
-            "error_threshold": GalileoDefaults.curriculum.ang_tracking_error_threshold,
-            "min_command_speed": GalileoDefaults.curriculum.ang_eval_min_command_speed,
-            "min_active_ratio": GalileoDefaults.curriculum.command_min_active_ratio,
-            "min_lin_x_level": max(float(GalileoDefaults.curriculum.ang_min_lin_x_level), 0.45),
-        },
-    )
+class CTSCurriculumCfg(CurriculumCfg):
+    """CTS benchmark uses a single unified command-and-terrain curriculum."""
 
 
 @configclass

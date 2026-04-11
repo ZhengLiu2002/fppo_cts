@@ -72,7 +72,11 @@ def create_run_directory_name(
     log_run_prefix = os.getenv(env_var_name, "").strip()
     current_timestamp = (timestamp or datetime.now()).strftime("%Y-%m-%d_%H-%M-%S")
 
-    name_parts = [part for part in (log_run_prefix, current_timestamp, experiment_slug, run_name_suffix) if part]
+    name_parts = [
+        part
+        for part in (log_run_prefix, current_timestamp, experiment_slug, run_name_suffix)
+        if part
+    ]
     directory_name = "_".join(name_parts)
 
     return directory_name, not bool(log_run_prefix)
@@ -106,7 +110,9 @@ def write_json_artifact(
 
     target_path = Path(file_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
-    target_path.write_text(json.dumps(_json_safe(dict(data)), indent=2, sort_keys=True), encoding="utf-8")
+    target_path.write_text(
+        json.dumps(_json_safe(dict(data)), indent=2, sort_keys=True), encoding="utf-8"
+    )
     return target_path
 
 
@@ -226,9 +232,9 @@ def iter_task_variant_candidates(task_name: str, *, variant: str) -> list[str]:
     """Return candidate task ids for a requested task variant.
 
     Example:
-        ``Isaac-Galileo-CRL-Teacher-v0`` + ``variant="eval"`` yields
-        ``Isaac-Galileo-CRL-Teacher-Eval-v0`` before falling back to the original
-        task name.
+        ``Isaac-Galileo-CTS-v0`` + ``variant="eval"`` yields
+        ``Isaac-Galileo-CTS-Eval-v0`` before falling back to the original task
+        name.
     """
 
     normalized_variant = variant.strip().lower()
@@ -466,7 +472,9 @@ def _resolve_checkpoint_from_directory(
         run_pattern = rf"{re.escape(algo_name)}_.*"
 
     run_dirs = [
-        entry.path for entry in os.scandir(directory_path) if entry.is_dir() and re.match(run_pattern, entry.name)
+        entry.path
+        for entry in os.scandir(directory_path)
+        if entry.is_dir() and re.match(run_pattern, entry.name)
     ]
     run_dirs.sort()
     if not run_dirs:

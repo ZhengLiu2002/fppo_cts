@@ -239,7 +239,10 @@ def test_fppo_projection_corrector_respects_step_size_budget() -> None:
     expected_theta = theta_anchor + theta_predictor / torch.norm(theta_predictor) * expected_step
     assert torch.allclose(state["theta"], expected_theta, atol=1e-6)
     assert abs(metrics["effective_step_size"] - expected_step) < 1.0e-6
-    assert abs(metrics["effective_step_ratio"] - (expected_step / torch.norm(theta_predictor).item())) < 1.0e-6
+    assert (
+        abs(metrics["effective_step_ratio"] - (expected_step / torch.norm(theta_predictor).item()))
+        < 1.0e-6
+    )
 
 
 def test_fppo_predictor_uses_separate_kl_limits() -> None:
@@ -298,7 +301,9 @@ def test_fppo_predictor_uses_separate_kl_limits() -> None:
     fppo.kl_hard_abs = 0.05
     fppo.kl_hard_ratio = 4.0
 
-    kl_values = iter([torch.tensor(0.005), torch.tensor(0.005), torch.tensor(0.005), torch.tensor(0.005)])
+    kl_values = iter(
+        [torch.tensor(0.005), torch.tensor(0.005), torch.tensor(0.005), torch.tensor(0.005)]
+    )
     fppo._mini_batch_generator = lambda: iter([batch, batch, batch, batch])
     fppo._sanitize_tensor = lambda tensor, **_kwargs: tensor
     fppo._all_reduce_mean = lambda tensor: tensor

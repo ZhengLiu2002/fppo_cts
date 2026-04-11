@@ -102,7 +102,10 @@ class PPOLagrange(PPO):
 
     def _ensure_lagrange(self, num_constraints: int) -> None:
         num_constraints = max(int(num_constraints), 1)
-        if self._lagrange_multiplier is not None and self._lagrange_multiplier.numel() == num_constraints:
+        if (
+            self._lagrange_multiplier is not None
+            and self._lagrange_multiplier.numel() == num_constraints
+        ):
             return
         init = torch.full(
             (num_constraints,),
@@ -148,7 +151,9 @@ class PPOLagrange(PPO):
         return self._all_reduce_mean(mean_cost)
 
     def _update_lagrange_multiplier(self, rollout_costs: torch.Tensor) -> None:
-        rollout_costs = rollout_costs.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        rollout_costs = (
+            rollout_costs.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+        )
         self._ensure_lagrange(rollout_costs.numel())
         d_limits = self._resolve_constraint_limits(rollout_costs.numel(), device=self.device).to(
             dtype=rollout_costs.dtype
@@ -167,7 +172,9 @@ class PPOLagrange(PPO):
         if cost_advantages.ndim == 1:
             cost_advantages = cost_advantages.unsqueeze(-1)
         self._ensure_lagrange(cost_advantages.shape[1])
-        penalty = self.lagrange_multiplier.to(device=cost_advantages.device, dtype=cost_advantages.dtype)
+        penalty = self.lagrange_multiplier.to(
+            device=cost_advantages.device, dtype=cost_advantages.dtype
+        )
         weighted_cost_adv = self._constraint_weighted_advantages(cost_advantages, penalty)
         combined = (reward_advantages - weighted_cost_adv) / (1.0 + penalty.sum())
         return self._sanitize_tensor(
@@ -184,7 +191,9 @@ class PPOLagrange(PPO):
             lagrange_state = {
                 "lagrangian_multiplier": self._lagrange_multiplier.detach().clone(),
                 "lambda_optimizer": (
-                    self._lagrange_optimizer.state_dict() if self._lagrange_optimizer is not None else None
+                    self._lagrange_optimizer.state_dict()
+                    if self._lagrange_optimizer is not None
+                    else None
                 ),
             }
         return {
@@ -375,7 +384,9 @@ class PPOLagrange(PPO):
                 1.0 + self.cost_ratio_clip,
             )
             cost_surrogates = self._constraint_surrogate_terms(cost_terms_adv, ratio_cost)
-            viol_loss = self._positive_cost_penalty_per_constraint(cost_surrogates, constraint_stats["c_hat"])
+            viol_loss = self._positive_cost_penalty_per_constraint(
+                cost_surrogates, constraint_stats["c_hat"]
+            )
             surrogate_loss = self._sanitize_tensor(
                 surrogate_loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6
             )
@@ -397,9 +408,9 @@ class PPOLagrange(PPO):
             )
 
             if self.use_clipped_value_loss:
-                cost_value_clipped = old_cost_terms + (
-                    pred_cost_terms - old_cost_terms
-                ).clamp(-self.clip_param, self.clip_param)
+                cost_value_clipped = old_cost_terms + (pred_cost_terms - old_cost_terms).clamp(
+                    -self.clip_param, self.clip_param
+                )
                 cost_value_losses = (pred_cost_terms - cost_terms_ret).pow(2)
                 cost_value_losses_clipped = (cost_value_clipped - cost_terms_ret).pow(2)
                 cost_value_loss = torch.max(cost_value_losses, cost_value_losses_clipped).mean()

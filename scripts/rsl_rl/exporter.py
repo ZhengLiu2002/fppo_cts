@@ -274,7 +274,9 @@ def _build_export_input_layout(
     obs_scales = _extract_obs_scales(env)
     obs_term_cfgs = _extract_obs_term_cfgs(env)
 
-    summary = getattr(env.unwrapped.cfg, "config_summary", None) or getattr(env_cfg, "config_summary", None)
+    summary = getattr(env.unwrapped.cfg, "config_summary", None) or getattr(
+        env_cfg, "config_summary", None
+    )
     obs_summary = getattr(summary, "observation", None)
     obs_name_map = getattr(obs_summary, "export_name_map", None)
     if not isinstance(obs_name_map, dict):
@@ -307,12 +309,24 @@ def _build_export_input_layout(
         and actor_num_priv_explicit == 0
         and actor_num_priv_latent == 0
     )
+    can_split_cts_history = bool(
+        history_raw_name is not None
+        and history_cfg is not None
+        and actor_num_hist > 0
+        and actor_num_prop > 0
+        and any(name.startswith("teacher_") for name in raw_obs_names)
+    )
 
-    if can_split_history:
-        current_raw_names = [name for name in raw_obs_names if name != history_raw_name]
+    if can_split_history or can_split_cts_history:
+        current_raw_names = [
+            name
+            for name in raw_obs_names
+            if name != history_raw_name and not name.startswith("teacher_")
+        ]
         current_obs_names = [raw_to_mapped[name] for name in current_raw_names]
         current_obs_scales = {
-            raw_to_mapped[name]: mapped_obs_scales[raw_to_mapped[name]] for name in current_raw_names
+            raw_to_mapped[name]: mapped_obs_scales[raw_to_mapped[name]]
+            for name in current_raw_names
         }
         history_input_name = raw_to_mapped.get(history_raw_name, history_raw_name)
         history_spec = _build_history_input_spec(
@@ -353,9 +367,7 @@ def _build_export_input_layout(
         )
 
     actor_obs_names = mapped_obs_names
-    input_actor_obs_scales = {
-        name: mapped_obs_scales.get(name, 1.0) for name in actor_obs_names
-    }
+    input_actor_obs_scales = {name: mapped_obs_scales.get(name, 1.0) for name in actor_obs_names}
     obs_mgr = env.unwrapped.observation_manager
     group = _resolve_obs_group(obs_mgr)
     group_dims = getattr(obs_mgr, "group_obs_dim", {})
@@ -460,12 +472,18 @@ def _infer_command_max_velocity(command_cfg):
 
 
 def _extract_joint_defaults(env, joint_names):
-    joint_name_to_idx = {name: idx for idx, name in enumerate(env.unwrapped.scene.articulations["robot"].joint_names)}
-    default_joint_pos = env.unwrapped.scene.articulations["robot"]._data.default_joint_pos[0].cpu().numpy()
+    joint_name_to_idx = {
+        name: idx for idx, name in enumerate(env.unwrapped.scene.articulations["robot"].joint_names)
+    }
+    default_joint_pos = (
+        env.unwrapped.scene.articulations["robot"]._data.default_joint_pos[0].cpu().numpy()
+    )
     return [float(f"{default_joint_pos[joint_name_to_idx[name]]:.4f}") for name in joint_names]
 
 
-def _extract_actuator_vectors(env, joint_names, fallback_kp=90.0, fallback_kd=3.0, fallback_torque=130.0):
+def _extract_actuator_vectors(
+    env, joint_names, fallback_kp=90.0, fallback_kd=3.0, fallback_torque=130.0
+):
     actuators = getattr(env.unwrapped.scene.articulations["robot"], "actuators", {})
     actuator = None
     if isinstance(actuators, dict):
@@ -488,24 +506,33 @@ def _extract_actuator_vectors(env, joint_names, fallback_kp=90.0, fallback_kd=3.
     if effort_limit is not None:
         effort_limit = _to_numpy(effort_limit).reshape(-1)
     if act_joint_names and stiffness is not None and len(act_joint_names) == len(stiffness):
-        kp_map = {name: _safe_float(val, fallback_kp) for name, val in zip(act_joint_names, stiffness)}
+        kp_map = {
+            name: _safe_float(val, fallback_kp) for name, val in zip(act_joint_names, stiffness)
+        }
         kp_list = [kp_map.get(name, fallback_kp) for name in joint_names]
     elif stiffness is not None and len(stiffness) == len(joint_names):
         kp_list = [_safe_float(val, fallback_kp) for val in stiffness]
     if act_joint_names and damping is not None and len(act_joint_names) == len(damping):
-        kd_map = {name: _safe_float(val, fallback_kd) for name, val in zip(act_joint_names, damping)}
+        kd_map = {
+            name: _safe_float(val, fallback_kd) for name, val in zip(act_joint_names, damping)
+        }
         kd_list = [kd_map.get(name, fallback_kd) for name in joint_names]
     elif damping is not None and len(damping) == len(joint_names):
         kd_list = [_safe_float(val, fallback_kd) for val in damping]
     if act_joint_names and effort_limit is not None and len(act_joint_names) == len(effort_limit):
-        tq_map = {name: _safe_float(val, fallback_torque) for name, val in zip(act_joint_names, effort_limit)}
+        tq_map = {
+            name: _safe_float(val, fallback_torque)
+            for name, val in zip(act_joint_names, effort_limit)
+        }
         torque_list = [tq_map.get(name, fallback_torque) for name in joint_names]
     elif effort_limit is not None and len(effort_limit) == len(joint_names):
         torque_list = [_safe_float(val, fallback_torque) for val in effort_limit]
     return kp_list, kd_list, torque_list
 
 
-def export_policy_as_jit(actor_critic: object, normalizer: object | None, path: str, filename="policy.pt"):
+def export_policy_as_jit(
+    actor_critic: object, normalizer: object | None, path: str, filename="policy.pt"
+):
     """Export policy into a Torch JIT file.
 
     Args:
@@ -519,7 +546,11 @@ def export_policy_as_jit(actor_critic: object, normalizer: object | None, path: 
 
 
 def export_policy_as_onnx(
-    actor_critic: object, path: str, normalizer: object | None = None, filename="policy.onnx", verbose=False
+    actor_critic: object,
+    path: str,
+    normalizer: object | None = None,
+    filename="policy.onnx",
+    verbose=False,
 ):
     """Export policy into a Torch ONNX file.
 
@@ -597,8 +628,12 @@ class _TorchPolicyExporter(torch.nn.Module):
         if self.is_recurrent:
             self.rnn = copy.deepcopy(actor_critic.memory_a.rnn)
             self.rnn.cpu()
-            self.register_buffer("hidden_state", torch.zeros(self.rnn.num_layers, 1, self.rnn.hidden_size))
-            self.register_buffer("cell_state", torch.zeros(self.rnn.num_layers, 1, self.rnn.hidden_size))
+            self.register_buffer(
+                "hidden_state", torch.zeros(self.rnn.num_layers, 1, self.rnn.hidden_size)
+            )
+            self.register_buffer(
+                "cell_state", torch.zeros(self.rnn.num_layers, 1, self.rnn.hidden_size)
+            )
             self.forward = self.forward_lstm
             self.reset = self.reset_memory
         # copy normalizer if exists
@@ -726,25 +761,36 @@ class _OnnxPolicyExporterGroupedInputs(torch.nn.Module):
             except Exception as exc:
                 raise RuntimeError(f"Invalid input dim for group '{name}': {dim}") from exc
             if group_dim <= 0:
-                raise RuntimeError(f"Invalid non-positive input dim for group '{name}': {group_dim}")
+                raise RuntimeError(
+                    f"Invalid non-positive input dim for group '{name}': {group_dim}"
+                )
             normalized_groups.append((str(name), group_dim))
         if not normalized_groups:
             raise RuntimeError("Grouped-input exporter requires at least one input group.")
 
         inferred = _infer_actor_input_dim(self.actor)
+        student_inferred = int(getattr(self.actor, "student_in_features", 0) or 0)
         total_input_dim = sum(dim for _name, dim in normalized_groups)
         if inferred is None and total_input_dim <= 0:
             raise RuntimeError(
                 "Unable to infer grouped-input export size. Please provide explicit input_groups."
             )
-        if inferred is not None and inferred != total_input_dim:
+        if (
+            inferred is not None
+            and inferred != total_input_dim
+            and student_inferred != total_input_dim
+        ):
             raise RuntimeError(
                 f"Grouped-input export dims {total_input_dim} do not match actor input dim {inferred}."
             )
 
         self.input_names = [name for name, _dim in normalized_groups]
         self.input_dims = [dim for _name, dim in normalized_groups]
-        self.expected_obs_dim = inferred or total_input_dim
+        self.expected_obs_dim = (
+            total_input_dim
+            if student_inferred == total_input_dim
+            else (inferred or total_input_dim)
+        )
 
     @staticmethod
     def _pad_or_trim(obs: torch.Tensor, expected: int | None) -> torch.Tensor:
@@ -852,7 +898,9 @@ def export_inference_cfg(
 
     policy_cfg_dict["output_names"] = ["actions"]
 
-    summary = getattr(env.unwrapped.cfg, "config_summary", None) or getattr(env_cfg, "config_summary", None)
+    summary = getattr(env.unwrapped.cfg, "config_summary", None) or getattr(
+        env_cfg, "config_summary", None
+    )
     env_summary = getattr(summary, "env", None)
     action_summary = getattr(summary, "action", None)
     export_layout = _build_export_input_layout(env, env_cfg, actor_critic=actor_critic)

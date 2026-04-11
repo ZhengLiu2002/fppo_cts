@@ -1,7 +1,7 @@
 {
   "extends": "galileo/base",
   "meta": {
-    "description": "Fast smoke test for verifying config wiring before long training.",
+    "description": "Fast CTS smoke test for verifying config wiring before long training.",
     "tags": [
       "smoke",
       "debug",

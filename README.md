@@ -1,15 +1,26 @@
-# IsaacLab CRL (Constrained RL) Tasks (Teacher-Student)
+# IsaacLab Galileo CTS
 
-面向 Galileo 机器人复杂地形全向移动任务的 FPPO + Teacher-Student 训练与评估说明。
+面向 Galileo 四足机器人复杂地形全向盲走任务的 CTS-only 约束强化学习训练框架。
 
-## 项目结构
-- 任务配置入口：`crl_tasks/crl_tasks/tasks/galileo/`
-- 统一配置默认值：`crl_tasks/crl_tasks/tasks/galileo/config/defaults.py`
-- Gym 注册：`crl_tasks/crl_tasks/tasks/galileo/__init__.py`
-- 算法扩展说明：`docs/ALGORITHMS.md`
-- 结构说明详见：`docs/STRUCTURE.md` / `docs/STYLE.md`
+仓库只保留一条主线：
+
+- 单一任务：`Isaac-Galileo-CTS-v0`
+- 单一评测入口：`Isaac-Galileo-CTS-Eval-v0`
+- 单一回放 / 导出 / 遥控入口：`Isaac-Galileo-CTS-Play-v0`
+- 单一研究目标：在统一 CTS 任务上对比 CRL 算法，重点验证 `FPPO`
+
+## 核心位置
+
+- Gym 注册：[crl_tasks/crl_tasks/tasks/galileo/__init__.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/__init__.py)
+- CTS 环境：[crl_tasks/crl_tasks/tasks/galileo/config/cts_env_cfg.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/cts_env_cfg.py)
+- CTS scene：[crl_tasks/crl_tasks/tasks/galileo/config/scene_cfg.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/scene_cfg.py)
+- MDP 配置：[crl_tasks/crl_tasks/tasks/galileo/config/mdp_cfg.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/mdp_cfg.py)
+- CTS benchmark runner：[crl_tasks/crl_tasks/tasks/galileo/config/agents/rsl_cts_cfg.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/agents/rsl_cts_cfg.py)
+- 算法注册表：[scripts/rsl_rl/algorithms/registry.py](/home/lz/Project/IsaacLab/fppo_ts/scripts/rsl_rl/algorithms/registry.py)
+- 推理 / 导出：[scripts/rsl_rl/play.py](/home/lz/Project/IsaacLab/fppo_ts/scripts/rsl_rl/play.py) [scripts/rsl_rl/exporter.py](/home/lz/Project/IsaacLab/fppo_ts/scripts/rsl_rl/exporter.py)
 
 ## 安装
+
 ```bash
 cd /home/lz/Project/IsaacLab/fppo_ts
 pip install -e .
@@ -17,210 +28,201 @@ pip install -e ".[dev]"
 
 cd /home/lz/Project/IsaacLab/fppo_ts/crl_tasks
 pip install --no-build-isolation -e .
-# 遇到旧版本残留，可先卸载再装：
-# pip uninstall -y crl_tasks && pip install --no-build-isolation -e .
 ```
 
-根包现在会正确安装 `crl_isaaclab`，不再出现 `pip install -e .` 只装到 `tests/` 的问题。
+## 环境准备
 
-## 可选：清理缓存
-```bash
-find . -name "*.pyc" -delete
-find . -name "__pycache__" -delete
-```
-
-## 训练与评估
-### 环境准备
 ```bash
 conda activate isaaclab
 cd /home/lz/Project/IsaacLab/fppo_ts
 ```
 
-### 实验 preset 管理
-- 参数版本建议放在 `experiments/` 下，而不是复制代码目录或频繁新建代码分支。
-- 查看可用 preset：`python scripts/rsl_rl/train.py --list-exp`
-- 训练时加载 preset：`python scripts/rsl_rl/train.py --task Isaac-Galileo-CRL-Teacher-v0 --exp galileo/fppo_smoke --run_name teacher --headless`
-- 详细工作流和 Git 教程见 `docs/EXPERIMENTS.md`
+## 训练
 
-### 单机单卡
-通过 `--algo` 覆盖默认算法（默认使用配置文件内的 `class_name`，当前 Teacher/Student 默认 FPPO）。
+最小 smoke test：
 
-可选值：
-- `fppo` / `np3o` / `ppo` / `ppo_lagrange` / `cpo` / `pcpo` / `focops` / `dagger`（使用 `scripts/rsl_rl/algorithms/` 里的实现）
-
-示例：fppo
 ```bash
-# Teacher
-LOG_RUN_NAME=fppo python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Teacher-v0 \
-  --algo fppo --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
-  --logger wandb --log_project_name galileo_fppo
-
-# Student
-LOG_RUN_NAME=fppo python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Student-v0 \
-  --algo fppo --num_envs 4096 --max_iterations 50000 --run_name student --headless \
-  --logger wandb --log_project_name galileo_fppo
+python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CTS-v0 \
+  --run_name smoke \
+  --headless
 ```
-示例：np3o
-```bash
-# Teacher
-LOG_RUN_NAME=np3o python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Teacher-v0 \
-  --algo np3o --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
-  --logger wandb --log_project_name galileo_np3o
 
-# Student
-LOG_RUN_NAME=np3o python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Student-v0 \
-  --algo np3o --num_envs 4096 --max_iterations 50000 --run_name student --headless \
-  --logger wandb --log_project_name galileo_np3o
+论文主实验常用命令：
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CTS-v0 \
+  --algo fppo \
+  --exp galileo/benchmark/cts_main \
+  --run_name fppo_main \
+  --headless \
+  --logger wandb \
+  --log_project_name galileo_cts
 ```
-示例：ppo_lagrange
-```bash
-# Teacher
-LOG_RUN_NAME=ppo_lagrange python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Teacher-v0 \
-  --algo ppo_lagrange --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
-  --logger wandb --log_project_name galileo_ppo_lagrange
 
-# Student
-LOG_RUN_NAME=ppo_lagrange python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Student-v0 \
-  --algo ppo_lagrange --num_envs 4096 --max_iterations 50000 --run_name student --headless \
-  --logger wandb --log_project_name galileo_ppo_lagrange
+PPO 对比命令：
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CTS-v0 \
+  --algo ppo \
+  --exp galileo/benchmark/cts_main \
+  --run_name ppo_main \
+  --headless \
+  --logger wandb \
+  --log_project_name galileo_cts
 ```
-示例：pcpo
+
+说明：
+
+- `CTS` 是统一任务基座，`--algo` 是 CRL 对比轴
+- 当前默认算法由 [defaults.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/defaults.py) 指定，默认是 `fppo`
+- 支持的主要算法：`ppo`、`fppo`、`np3o`、`ppo_lagrange`、`cpo`、`pcpo`、`focops`
+- 训练结果默认写入 `logs/rsl_rl/<experiment_name>/`
+- 每次训练的最终配置会落到：
+  - `params/env.yaml`
+  - `params/agent.yaml`
+  - `params/experiment.json`
+
+多卡训练：
+
 ```bash
-# Teacher
-LOG_RUN_NAME=pcpo python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Teacher-v0 \
-  --algo pcpo --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
-  --logger wandb --log_project_name galileo_pcpo
-
-# Student
-LOG_RUN_NAME=pcpo python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Student-v0 \
-  --algo pcpo --num_envs 4096 --max_iterations 50000 --run_name student --headless \
-  --logger wandb --log_project_name galileo_pcpo
-```
-示例： cpo
-```bash
-# Teacher
-LOG_RUN_NAME=cpo python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Teacher-v0 \
-  --algo cpo --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
-  --logger wandb --log_project_name galileo_cpo
-
-# Student
-LOG_RUN_NAME=cpo python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Student-v0 \
-  --algo cpo --num_envs 4096 --max_iterations 50000 --run_name student --headless \
-  --logger wandb --log_project_name galileo_cpo
-```
-示例： focops
-```bash
-# Teacher
-LOG_RUN_NAME=focops python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Teacher-v0 \
-  --algo focops --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
-  --logger wandb --log_project_name galileo_focops
-
-# Student
-LOG_RUN_NAME=focops python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Student-v0 \
-  --algo focops --num_envs 4096 --max_iterations 50000 --run_name student --headless \
-  --logger wandb --log_project_name galileo_focops
-```
-示例：ppo
-```bash
-# Teacher
-LOG_RUN_NAME=ppo python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Teacher-v0 \
-  --algo ppo --num_envs 4096 --max_iterations 50000 --run_name teacher --headless \
-  --logger wandb --log_project_name galileo_ppo
-
-# Student
-LOG_RUN_NAME=ppo python scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Student-v0 \
-  --algo ppo --num_envs 4096 --max_iterations 50000 --run_name student --headless \
-  --logger wandb --log_project_name galileo_ppo
-```
-***如果多次用同一个 LOG_RUN_NAME，日志和 checkpoint 会写到同一个目录，可能覆盖或混在一起。***
-
-### 多卡分布式（4 卡示例）
-```bash
-# 环境
-cd /home/lz/Project/IsaacLab/fppo_ts
-
-conda activate isaaclab
-
-# 可选：清理残留
-fuser -k -9 /dev/nvidia0 /dev/nvidia1 /dev/nvidia2 /dev/nvidia3
-
-# 安全模式变量（适配 IOMMU/带宽受限机型）
-export NCCL_P2P_DISABLE=1
-export NCCL_IB_DISABLE=1
-export NCCL_SHM_DISABLE=1
-export NCCL_SOCKET_IFNAME=ens3f3
-export NCCL_ALGO=Ring
-export NCCL_PROTO=Simple
-export NCCL_MIN_NCHANNELS=1
-export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
-export OMP_NUM_THREADS=1
-
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 scripts/rsl_rl/train.py \
-  --task Isaac-Galileo-CRL-Teacher-v0 \
-  --distributed --num_envs 3500 --max_iterations 50000 \
-  --run_name galileo-teacher --device cuda:0
-
-```
-- `LOG_RUN_NAME` 决定日志目录名：`logs/rsl_rl/<exp>/<LOG_RUN_NAME>_<run_name>`。
-- `--num_envs` 为每卡环境数，按显存调整。
-- 查看可用环境：`python list_envs.py`。
-
-### 可视化 / 评估 / 部署命令
-
-**Play（可视化回放）**
-
-使用 `--checkpoint` 参数指定要加载的模型文件（`*.pt`），支持相对路径或绝对路径。
-
-```bash
-# Galileo 教师模型
-python scripts/rsl_rl/play.py \
-  --task Isaac-Galileo-CRL-Teacher-Play-v0 \
-  --num_envs 50 \
-  --checkpoint logs/rsl_rl/galileo_
+  --task Isaac-Galileo-CTS-v0 \
+  --algo fppo \
+  --distributed \
+  --num_envs 3000 \
+  --exp galileo/benchmark/cts_main \
+  --run_name fppo_4gpu \
+  --device cuda:0
 ```
 
-# Galileo 学生模型
+## 评估
+
+PPO 评估示例：
+
+```bash
+python scripts/rsl_rl/evaluation.py \
+  --task Isaac-Galileo-CTS-v0 \
+  --algo fppo \
+  --checkpoint <checkpoint.pt> \
+  --max_episodes 256 \
+  --headless
+```
+
+评估会输出 `summary.json`，包含 reward、episode length、aggregate cost 与 per-term cost 统计。
+
+FPPO 评估示例：
+
+```bash
+python scripts/rsl_rl/evaluation.py \
+  --task Isaac-Galileo-CTS-v0 \
+  --algo fppo \
+  --max_episodes 256 \
+  --headless \
+  --checkpoint 
+```
+
+
+PPO 评估示例：
+
+```bash
+python scripts/rsl_rl/evaluation.py \
+  --task Isaac-Galileo-CTS-v0 \
+  --algo ppo \
+  --max_episodes 256 \
+  --headless \
+  --checkpoint 
+```
+
+## 回放与遥控
+
+GUI 回放：
+
 ```bash
 python scripts/rsl_rl/play.py \
-  --task Isaac-Galileo-CRL-Student-Play-v0 \
-  --algo dagger \
-  --exp galileo/studies/algo_compare_student_distill_tuned \
+  --task Isaac-Galileo-CTS-Play-v0 \
+  --checkpoint <checkpoint.pt> \
   --num_envs 16 \
-  --checkpoint logs/rsl_rl/galileo_
-
+  --force_gui
 ```
 
+键盘遥控：
 
-
-### git 强制覆盖代码
 ```bash
-git fetch --all
-git reset --hard origin/master
+python scripts/rsl_rl/play_keyboard.py \
+  --task Isaac-Galileo-CTS-Play-v0 \
+  --checkpoint <checkpoint.pt> \
+  --force_gui \
+  --real-time
 ```
 
-## 开发与贡献
-- 代码风格说明：`docs/STYLE.md`
-- 目录设计说明：`docs/STRUCTURE.md`
-- 贡献流程：`CONTRIBUTING.md`
+PPO 回放示例：
 
-推荐在提交前执行：
+```bash
+python scripts/rsl_rl/play.py \
+  --task Isaac-Galileo-CTS-Play-v0 \
+  --algo ppo \
+  --checkpoint <checkpoint.pt> \
+  --num_envs 16 \
+  --force_gui
+```
+
+## 导出
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Isaac-Galileo-CTS-Play-v0 \
+  --checkpoint <checkpoint.pt> \
+  --num_envs 1 \
+  --export_only \
+  --headless
+```
+
+默认输出：
+
+- `exported_policy/policy.onnx`
+- `exported_policy/policy.yaml`
+
+导出接口面向最终 blind policy，核心输入按 `policy.yaml` 为准。
+
+PPO 导出示例：
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Isaac-Galileo-CTS-Play-v0 \
+  --algo ppo \
+  --checkpoint <checkpoint.pt> \
+  --num_envs 1 \
+  --export_only \
+  --headless
+```
+
+## 实验 preset
+
+查看可用 preset：
+
+```bash
+python scripts/rsl_rl/train.py --list-exp
+```
+
+推荐起点：
+
+- `galileo/fppo_smoke`
+- `galileo/studies/algo_compare_cts_fair`
+- `galileo/benchmark/cts_main`
+
+## 开发
+
+- 算法接入说明：`docs/ALGORITHMS.md`
+- 实验工作流：`docs/EXPERIMENTS.md`
+- 对比计划：`docs/ALGO_COMPARISON_PLAN.md`
+- 目录结构：`docs/STRUCTURE.md`
+
+建议提交前执行：
 
 ```bash
 ./scripts/run_tests.sh -q
-python -m black scripts/rsl_rl/runtime.py scripts/rsl_rl/train.py scripts/rsl_rl/play.py \
-  scripts/rsl_rl/evaluation.py scripts/rsl_rl/demo.py list_envs.py tests/test_runtime_utils.py
+python -m black scripts/rsl_rl tests
 ```

@@ -4,48 +4,36 @@ from . import agents
 from .defaults import GalileoDefaults
 from .mdp_cfg import (
     ActionsCfg,
+    CTSCostsCfg,
+    CTSCurriculumCfg,
+    CTSObservationsCfg,
+    CTSRewardsCfg,
     CommandsCfg,
     CurriculumCfg,
     EventCfg,
-    StudentCurriculumCfg,
-    StudentCostsCfg,
-    StudentObservationsCfg,
-    StudentRewardsCfg,
-    TeacherCostsCfg,
-    TeacherObservationsCfg,
-    TeacherRewardsCfg,
     TerminationsCfg,
 )
-from .student_env_cfg import (
-    GalileoStudentCRLEnvCfg,
-    GalileoStudentCRLEnvCfg_EVAL,
-    GalileoStudentCRLEnvCfg_PLAY,
+from .cts_env_cfg import (
+    GalileoCTSCRLEnvCfg,
+    GalileoCTSCRLEnvCfg_EVAL,
+    GalileoCTSCRLEnvCfg_PLAY,
 )
-from .teacher_env_cfg import (
-    GalileoCRLSceneCfg,
-    GalileoTeacherCRLEnvCfg,
-    GalileoTeacherCRLEnvCfg_PLAY,
-)
+from .scene_cfg import GalileoCTSSceneCfg
 
 __all__ = [
     "agents",
     "GalileoDefaults",
     "ActionsCfg",
+    "CTSCostsCfg",
+    "CTSObservationsCfg",
+    "CTSRewardsCfg",
+    "CTSCurriculumCfg",
     "CommandsCfg",
     "CurriculumCfg",
     "EventCfg",
-    "StudentCurriculumCfg",
-    "StudentCostsCfg",
-    "StudentObservationsCfg",
-    "StudentRewardsCfg",
-    "TeacherCostsCfg",
-    "TeacherObservationsCfg",
-    "TeacherRewardsCfg",
     "TerminationsCfg",
-    "GalileoCRLSceneCfg",
-    "GalileoTeacherCRLEnvCfg",
-    "GalileoTeacherCRLEnvCfg_PLAY",
-    "GalileoStudentCRLEnvCfg",
-    "GalileoStudentCRLEnvCfg_EVAL",
-    "GalileoStudentCRLEnvCfg_PLAY",
+    "GalileoCTSSceneCfg",
+    "GalileoCTSCRLEnvCfg",
+    "GalileoCTSCRLEnvCfg_EVAL",
+    "GalileoCTSCRLEnvCfg_PLAY",
 ]

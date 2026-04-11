@@ -196,7 +196,7 @@ def main(
         env = multi_agent_to_single_agent(env)
 
     # save resume path before creating a new log_dir
-    if agent_cfg.resume or algorithm_training_type == "dagger":
+    if agent_cfg.resume:
         resume_path = resolve_checkpoint_path(
             task_name=args_cli.task,
             log_root_path=log_root_path,
@@ -227,7 +227,7 @@ def main(
     # # write git state to logs
     runner.add_git_repo_to_log(__file__)
     # load the checkpoint
-    if agent_cfg.resume or algorithm_training_type == "dagger":
+    if agent_cfg.resume:
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
@@ -253,7 +253,7 @@ def main(
             extra={
                 "run_dir_name": run_dir_name,
                 "distributed": bool(args_cli.distributed),
-                "resume_path": resume_path if agent_cfg.resume or algorithm_training_type == "dagger" else None,
+                "resume_path": resume_path if agent_cfg.resume else None,
             },
         ),
     )

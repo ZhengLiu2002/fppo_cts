@@ -1,9 +1,8 @@
 {
-  "extends": "galileo/studies/algo_compare_student_fair",
+  "extends": "galileo/studies/algo_compare_cts_fair",
   "meta": {
-    "description": "Main student benchmark preset for paper-grade algorithm comparison.",
-    "benchmark": "student_main",
-    "role": "student",
+    "description": "Main CTS benchmark preset for paper-grade constrained RL comparison.",
+    "benchmark": "cts_main",
     "recommended_seeds": [
       11,
       22,
@@ -19,7 +18,7 @@
     ]
   },
   "agent": {
-    "experiment_name": "galileo_benchmark_student_main",
+    "experiment_name": "galileo_benchmark_cts_main",
     "save_interval": 100,
     "max_iterations": 100000
   },

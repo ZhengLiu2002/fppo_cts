@@ -264,7 +264,7 @@ class CTSRewardsCfg:
 
     track_lin_vel_xy_exp = RewTerm(
         func=rewards.track_lin_vel_xy_exp,
-        weight=1.0,
+        weight=5.0,
         params={
             "command_name": "base_velocity",
             "std": 0.25,
@@ -273,7 +273,7 @@ class CTSRewardsCfg:
     )
     track_ang_vel_z_exp = RewTerm(
         func=rewards.track_ang_vel_z_exp,
-        weight=0.5,
+        weight=2.5,
         params={
             "command_name": "base_velocity",
             "std": 0.25,
@@ -330,7 +330,7 @@ class CTSRewardsCfg:
     )
     feet_air_time = RewTerm(
         func=rewards.feet_air_time,
-        weight=3.0,
+        weight=1.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
@@ -349,7 +349,7 @@ class CTSRewardsCfg:
     )
     gait_contact_symmetry = RewTerm(
         func=rewards.gait_contact_symmetry,
-        weight=0.2,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "left_foot_names": LEFT_FOOT_BODY_NAMES,

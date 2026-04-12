@@ -48,13 +48,14 @@ python scripts/rsl_rl/train.py \
   --headless
 ```
 
-论文主实验常用命令：
+FPPO 对比命令：
 
 ```bash
 python scripts/rsl_rl/train.py \
   --task Isaac-Galileo-CTS-v0 \
   --algo fppo \
   --exp galileo/benchmark/cts_main \
+  --num_envs 4096 \
   --run_name fppo_main \
   --headless \
   --logger wandb \
@@ -68,6 +69,7 @@ python scripts/rsl_rl/train.py \
   --task Isaac-Galileo-CTS-v0 \
   --algo ppo \
   --exp galileo/benchmark/cts_main \
+  --num_envs 4096 \
   --run_name ppo_main \
   --headless \
   --logger wandb \
@@ -100,19 +102,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 scripts/rsl_rl/train.py
 
 ## 评估
 
-PPO 评估示例：
-
-```bash
-python scripts/rsl_rl/evaluation.py \
-  --task Isaac-Galileo-CTS-v0 \
-  --algo fppo \
-  --checkpoint <checkpoint.pt> \
-  --max_episodes 256 \
-  --headless
-```
-
-评估会输出 `summary.json`，包含 reward、episode length、aggregate cost 与 per-term cost 统计。
-
 FPPO 评估示例：
 
 ```bash
@@ -124,6 +113,7 @@ python scripts/rsl_rl/evaluation.py \
   --checkpoint 
 ```
 
+评估会输出 `summary.json`，包含 reward、episode length、aggregate cost 与 per-term cost 统计。
 
 PPO 评估示例：
 
@@ -150,12 +140,15 @@ python scripts/rsl_rl/play.py \
 
 键盘遥控：
 
+FPPO 回放示例：
+
 ```bash
-python scripts/rsl_rl/play_keyboard.py \
+python scripts/rsl_rl/play.py \
   --task Isaac-Galileo-CTS-Play-v0 \
-  --checkpoint <checkpoint.pt> \
+  --algo fppo \
+  --num_envs 16 \
   --force_gui \
-  --real-time
+  --checkpoint 
 ```
 
 PPO 回放示例：
@@ -164,9 +157,9 @@ PPO 回放示例：
 python scripts/rsl_rl/play.py \
   --task Isaac-Galileo-CTS-Play-v0 \
   --algo ppo \
-  --checkpoint <checkpoint.pt> \
   --num_envs 16 \
-  --force_gui
+  --force_gui \
+  --checkpoint 
 ```
 
 ## 导出
@@ -174,10 +167,10 @@ python scripts/rsl_rl/play.py \
 ```bash
 python scripts/rsl_rl/play.py \
   --task Isaac-Galileo-CTS-Play-v0 \
-  --checkpoint <checkpoint.pt> \
   --num_envs 1 \
   --export_only \
-  --headless
+  --headless \
+  --checkpoint 
 ```
 
 默认输出：

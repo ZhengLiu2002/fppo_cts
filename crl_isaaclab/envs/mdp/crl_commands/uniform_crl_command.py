@@ -25,6 +25,8 @@ class UniformCRLCommand(CommandTerm):
         self.is_standing_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["commanded_lin_vel_path"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["actual_lin_vel_path"] = torch.zeros(self.num_envs, device=self.device)
 
         # Import GalileoDefaults to access terrain-specific command ranges.
         try:
@@ -52,6 +54,7 @@ class UniformCRLCommand(CommandTerm):
         # time for which the command was executed
         max_command_time = self.cfg.resampling_time_range[1]
         max_command_step = max_command_time / self._env.step_dt
+        step_dt = float(self._env.step_dt)
         # logs data
         self.metrics["error_vel_xy"] += (
             torch.norm(self.vel_command_b[:, :2] - self.robot.data.root_lin_vel_b[:, :2], dim=-1)
@@ -61,40 +64,64 @@ class UniformCRLCommand(CommandTerm):
             torch.abs(self.vel_command_b[:, 2] - self.robot.data.root_ang_vel_b[:, 2])
             / max_command_step
         )
+        self.metrics["commanded_lin_vel_path"] += (
+            torch.norm(self.vel_command_b[:, :2], dim=-1) * step_dt
+        )
+        self.metrics["actual_lin_vel_path"] += (
+            torch.norm(self.robot.data.root_lin_vel_b[:, :2], dim=-1) * step_dt
+        )
 
-    def _get_terrain_name(self, env_ids: Sequence[int]) -> str | None:
-        """获取指定环境的地形名称。"""
+    def _resolve_env_id_tensor(self, env_ids: Sequence[int]) -> torch.Tensor:
+        """Return environment ids as a 1-D tensor on this command's device."""
+        if isinstance(env_ids, torch.Tensor):
+            return env_ids.to(device=self.device, dtype=torch.long).flatten()
+        return torch.as_tensor(list(env_ids), device=self.device, dtype=torch.long).flatten()
+
+    def _get_env_terrain_names(self, env_id_tensor: torch.Tensor) -> list[str | None]:
+        """Resolve terrain names for each environment id in the batch."""
+        if env_id_tensor.numel() == 0 or not hasattr(self._env.scene, "terrain"):
+            return [None] * int(env_id_tensor.numel())
+
+        env_id_list = env_id_tensor.detach().cpu().tolist()
         if not hasattr(self._env.scene, "terrain"):
-            return None
+            return [None] * len(env_id_list)
 
         terrain = self._env.scene.terrain
-        # 尝试从 crl_event 获取地形名称
+        resolved_names: list[str | None] | None = None
+
+        # 尝试从 crl_event 获取逐环境地形名称
         if hasattr(self._env, "crl_manager") and self._env.crl_manager is not None:
             try:
                 crl_event = self._env.crl_manager._terms.get("base_crl")
                 if crl_event is not None and hasattr(crl_event, "env_per_terrain_name"):
                     terrain_names = crl_event.env_per_terrain_name
-                    if len(env_ids) > 0:
-                        # 获取第一个环境的地形名称（假设同一批次环境在同一地形）
-                        first_env_id = (
-                            env_ids[0] if isinstance(env_ids, (list, tuple)) else env_ids[0].item()
-                        )
-                        if first_env_id < len(terrain_names):
-                            return str(terrain_names[first_env_id])
+                    resolved_names = []
+                    for env_id in env_id_list:
+                        if 0 <= env_id < len(terrain_names):
+                            resolved_names.append(str(terrain_names[env_id]))
+                        else:
+                            resolved_names.append(None)
             except Exception:
-                pass
+                resolved_names = None
+
+        if resolved_names is not None:
+            return resolved_names
 
         # 如果无法从 crl_event 获取，尝试直接从 terrain 获取
         try:
             env_names = resolve_env_terrain_names(terrain)
-            if env_names is not None and len(env_ids) > 0:
-                first_env_id = env_ids[0] if isinstance(env_ids, (list, tuple)) else env_ids[0].item()
-                if first_env_id < len(env_names):
-                    return str(env_names[first_env_id])
+            if env_names is not None:
+                resolved_names = []
+                for env_id in env_id_list:
+                    if 0 <= env_id < len(env_names):
+                        resolved_names.append(str(env_names[env_id]))
+                    else:
+                        resolved_names.append(None)
+                return resolved_names
         except Exception:
             pass
 
-        return None
+        return [None] * len(env_id_list)
 
     def _get_terrain_specific_ranges(self, terrain_name: str | None):
         """根据地形名称获取对应的指令范围配置。
@@ -123,9 +150,8 @@ class UniformCRLCommand(CommandTerm):
         # 返回 None，强制使用 cfg.ranges 中的默认值
         return None
 
-    def _resample_command(self, env_ids: Sequence[int]):
+    def _resample_command_group(self, env_id_tensor: torch.Tensor, terrain_name: str | None):
         # 获取地形名称并选择对应的指令配置
-        terrain_name = self._get_terrain_name(env_ids)
         terrain_ranges = self._get_terrain_specific_ranges(terrain_name)
         # Terrain-specific curriculum endpoints define the x/yaw command ranges.
         use_lin_x_cfg_range = (
@@ -174,7 +200,7 @@ class UniformCRLCommand(CommandTerm):
             max_curriculum_ang_z = self.cfg.ranges.max_curriculum_ang_z
 
         # sample velocity commands
-        r = torch.empty(len(env_ids), device=self.device)
+        r = torch.empty(len(env_id_tensor), device=self.device)
         lin_x_range = lin_vel_x_base
         ang_z_range = ang_vel_z_base
         lin_x_level = float(getattr(self.cfg, "lin_x_level", 0.0))
@@ -216,7 +242,7 @@ class UniformCRLCommand(CommandTerm):
             and hasattr(self._env.scene, "terrain")
             and getattr(self._env.scene.terrain, "terrain_levels", None) is not None
         ):
-            levels = self._env.scene.terrain.terrain_levels[env_ids].float()
+            levels = self._env.scene.terrain.terrain_levels[env_id_tensor].float()
             terrain_gen = getattr(self._env.scene.terrain, "terrain_generator_class", None)
             num_rows = float(getattr(terrain_gen, "num_rows", 1))
             denom = max(num_rows - 1.0, 1.0)
@@ -243,27 +269,27 @@ class UniformCRLCommand(CommandTerm):
                 float(start_max + (max_max - start_max) * progress.mean().item()),
             )
         # -- linear velocity - x direction
-        self.vel_command_b[env_ids, 0] = r.uniform_(*lin_x_range)
+        self.vel_command_b[env_id_tensor, 0] = r.uniform_(*lin_x_range)
         # -- linear velocity - y direction
-        self.vel_command_b[env_ids, 1] = r.uniform_(*lin_vel_y_base)
+        self.vel_command_b[env_id_tensor, 1] = r.uniform_(*lin_vel_y_base)
         # -- ang vel yaw - rotation around z
-        self.vel_command_b[env_ids, 2] = r.uniform_(*ang_z_range)
+        self.vel_command_b[env_id_tensor, 2] = r.uniform_(*ang_z_range)
         # update standing envs
         # 使用地形特定的 standing_command_prob，如果存在；否则使用配置中的值
         standing_prob = (
             standing_command_prob if terrain_ranges is not None else self.cfg.rel_standing_envs
         )
-        self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= standing_prob
+        self.is_standing_env[env_id_tensor] = r.uniform_(0.0, 1.0) <= standing_prob
 
         # update standing envs
         if self.cfg.small_commands_to_zero:
-            xy_norm = torch.norm(self.vel_command_b[env_ids, :2], dim=1, keepdim=True)
-            self.vel_command_b[env_ids, :2] *= (xy_norm > self.cfg.clips.lin_vel_clip)
+            xy_norm = torch.norm(self.vel_command_b[env_id_tensor, :2], dim=1, keepdim=True)
+            self.vel_command_b[env_id_tensor, :2] *= (xy_norm > self.cfg.clips.lin_vel_clip)
 
         # enforce minimum absolute command magnitudes (optional)
         min_abs_x = self.cfg.min_abs_lin_vel_x
         if min_abs_x is not None and min_abs_x > 0.0:
-            x_vals = self.vel_command_b[env_ids, 0]
+            x_vals = self.vel_command_b[env_id_tensor, 0]
             x_abs = torch.abs(x_vals)
             mask = x_abs < min_abs_x
             if mask.any():
@@ -271,11 +297,11 @@ class UniformCRLCommand(CommandTerm):
                 zeros = signs == 0
                 if zeros.any():
                     signs[zeros] = torch.sign(torch.rand_like(signs[zeros]) - 0.5)
-                self.vel_command_b[env_ids[mask], 0] = signs * min_abs_x
+                self.vel_command_b[env_id_tensor[mask], 0] = signs * min_abs_x
 
         min_abs_y = self.cfg.min_abs_lin_vel_y
         if min_abs_y is not None and min_abs_y > 0.0:
-            y_vals = self.vel_command_b[env_ids, 1]
+            y_vals = self.vel_command_b[env_id_tensor, 1]
             y_abs = torch.abs(y_vals)
             mask = y_abs < min_abs_y
             if mask.any():
@@ -283,7 +309,21 @@ class UniformCRLCommand(CommandTerm):
                 zeros = signs == 0
                 if zeros.any():
                     signs[zeros] = torch.sign(torch.rand_like(signs[zeros]) - 0.5)
-                self.vel_command_b[env_ids[mask], 1] = signs * min_abs_y
+                self.vel_command_b[env_id_tensor[mask], 1] = signs * min_abs_y
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        env_id_tensor = self._resolve_env_id_tensor(env_ids)
+        if env_id_tensor.numel() == 0:
+            return
+
+        terrain_names = self._get_env_terrain_names(env_id_tensor)
+        terrain_groups: dict[str | None, list[int]] = {}
+        for local_idx, terrain_name in enumerate(terrain_names):
+            terrain_groups.setdefault(terrain_name, []).append(local_idx)
+
+        for terrain_name, local_indices in terrain_groups.items():
+            group_env_ids = env_id_tensor[torch.as_tensor(local_indices, device=self.device)]
+            self._resample_command_group(group_env_ids, terrain_name)
 
     def _update_command(self):
         # Optionally zero very small yaw-rate commands, matching lin_vel_clip behavior.

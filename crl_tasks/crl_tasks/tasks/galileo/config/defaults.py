@@ -298,6 +298,10 @@ class GalileoDefaults:
         curriculum = True
         random_difficulty = False
         difficulty_range = (0.0, 1.0)
+        # Flat-only pretraining mode keeps the CTS task on plane terrain until
+        # FPPO stabilizes, while preserving the rough-terrain generator for later.
+        flat_only_pretrain = True
+        flat_subterrain_name = "crl_flat"
 
     class command:
         lin_x_level: float = 0.3
@@ -543,7 +547,7 @@ class GalileoDefaults:
         constraint_adapter_base = dict()
         constraint_adapter_per_algo = {
             "fppo": dict(
-                enabled=True,
+                enabled=False,
                 ema_beta=0.9,
                 min_scale=1e-3,
                 max_scale=10.0,
@@ -589,15 +593,15 @@ class GalileoDefaults:
             "fppo": dict(
                 cost_value_loss_coef=1.0,
                 num_learning_epochs=4,
-                learning_rate=3.0e-4,
-                desired_kl=0.004,
-                delta_kl=0.006,
-                predictor_desired_kl=0.01,
-                predictor_kl_hard_limit=0.02,
-                step_size=1.5e-4,
+                learning_rate=5.0e-4,
+                desired_kl=0.006,
+                delta_kl=0.010,
+                predictor_desired_kl=0.015,
+                predictor_kl_hard_limit=0.03,
+                step_size=4.0e-4,
                 cost_gamma=None,
                 cost_lam=None,
-                epsilon_safe=0.01,
+                epsilon_safe=0.002,
                 backtrack_coeff=0.5,
                 max_backtracks=10,
                 projection_eps=1e-6,
@@ -609,15 +613,14 @@ class GalileoDefaults:
                 adaptive_constraint_curriculum=True,
                 constraint_curriculum_names=[
                     "prob_joint_pos",
-                    "prob_com_height",
-                    "prob_com_angle",
-                    "prob_gait_pattern",
+                    "prob_joint_vel",
+                    "prob_joint_torque",
                 ],
                 constraint_curriculum_ema_decay=0.95,
                 constraint_curriculum_check_interval=40,
                 constraint_curriculum_alpha=0.7,
                 constraint_curriculum_shrink=0.985,
-                step_size_adaptive=True,
+                step_size_adaptive=False,
             ),
             # NP3O
             "np3o": dict(

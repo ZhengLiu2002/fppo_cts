@@ -26,23 +26,45 @@ def terrain_levels_vel(
     move_up_ratio: float = 0.5,
     move_down_ratio: float = 0.5,
 ) -> torch.Tensor:
-    """Update terrain levels based on distance walked under velocity commands.
+    """Update terrain levels using episode path statistics from the command term.
 
-    - If the robot walks farther than terrain.size * move_up_ratio -> move up.
-    - If it walks much less than commanded distance * move_down_ratio -> move down.
+    Using the current command at reset is unreliable because velocity commands are
+    resampled multiple times within an episode. Instead, use path statistics
+    accumulated over the whole episode before the command manager resets.
     """
     asset: Articulation = env.scene[asset_cfg.name]
     terrain: TerrainImporter = env.scene.terrain
-    command = env.command_manager.get_command("base_velocity")
+    command_term = env.command_manager.get_term("base_velocity")
 
-    distance = torch.norm(
-        asset.data.root_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1
+    env_id_tensor = (
+        env_ids.to(device=env.device, dtype=torch.long).flatten()
+        if isinstance(env_ids, torch.Tensor)
+        else torch.as_tensor(list(env_ids), device=env.device, dtype=torch.long).flatten()
     )
-    move_up = distance > terrain.cfg.terrain_generator.size[0] * move_up_ratio
-    move_down = distance < torch.norm(command[env_ids, :2], dim=1) * env.max_episode_length_s * move_down_ratio
+    if env_id_tensor.numel() == 0:
+        return torch.mean(terrain.terrain_levels.float())
+
+    net_displacement = torch.norm(
+        asset.data.root_pos_w[env_id_tensor, :2] - env.scene.env_origins[env_id_tensor, :2], dim=1
+    )
+    commanded_path = command_term.metrics.get("commanded_lin_vel_path")
+    actual_path = command_term.metrics.get("actual_lin_vel_path")
+
+    if commanded_path is not None and actual_path is not None:
+        commanded_path = commanded_path[env_id_tensor].to(device=env.device)
+        actual_path = actual_path[env_id_tensor].to(device=env.device)
+    else:
+        command = env.command_manager.get_command("base_velocity")
+        commanded_path = (
+            torch.norm(command[env_id_tensor, :2], dim=1) * env.max_episode_length_s
+        )
+        actual_path = net_displacement
+
+    move_up = actual_path > terrain.cfg.terrain_generator.size[0] * move_up_ratio
+    move_down = actual_path < commanded_path * move_down_ratio
     move_down *= ~move_up
 
-    terrain.update_env_origins(env_ids, move_up, move_down)
+    terrain.update_env_origins(env_id_tensor, move_up, move_down)
     return torch.mean(terrain.terrain_levels.float())
 
 

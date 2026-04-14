@@ -77,15 +77,7 @@ from scripts.rsl_rl.runtime import capture_rng_state, restore_rng_state
 
 _RUNNER_ONLY_ALG_KEYS = {
     "class_name",
-    "adaptive_constraint_curriculum",
-    "constraint_curriculum_alpha",
-    "constraint_curriculum_check_interval",
-    "constraint_curriculum_ema_decay",
-    "constraint_curriculum_names",
-    "constraint_curriculum_shrink",
     "rnd_cfg",
-    "constraint_limits_final",
-    "constraint_limits_start",
 }
 
 _TERMINAL_LOSS_KEYS = (
@@ -126,28 +118,38 @@ _KEY_CURVE_MIRROR_MAP = {
     "Cost/cost_limit_margin": "Compare/Cost/cost_limit_margin",
     "Cost/cost_violation_rate": "Compare/Cost/cost_violation_rate",
     "Cost/accept_rate": "Compare/FPPO/accept_rate",
-    "Cost/reject_rate": "Compare/FPPO/reject_rate",
     "Cost/step_size": "Compare/FPPO/effective_step_size",
-    "Cost/base_step_size": "Compare/FPPO/base_step_size",
     "Cost/effective_step_ratio": "Compare/FPPO/effective_step_ratio",
     "Cost/active_constraints": "Compare/FPPO/active_constraints",
     "Cost/kl": "Compare/FPPO/kl",
-    "Cost/reject_kl_rate": "Compare/FPPO/reject_kl_rate",
-    "Cost/infeasible_batch_rate": "Compare/FPPO/infeasible_batch_rate",
-    "Cost/recovery_accept_rate": "Compare/FPPO/recovery_accept_rate",
+    "Cost/fallback_rate": "Compare/FPPO/fallback_rate",
+    "Cost/accepted_backtrack_factor": "Compare/FPPO/accepted_backtrack_factor",
+    "Cost/backtrack_steps": "Compare/FPPO/backtrack_steps",
+    "Cost/nominal_step_norm": "Compare/FPPO/nominal_step_norm",
+    "Cost/projected_step_norm": "Compare/FPPO/projected_step_norm",
+    "Cost/accepted_step_norm": "Compare/FPPO/accepted_step_norm",
+    "Cost/predicted_violation_max": "Compare/FPPO/predicted_violation_max",
+    "Cost/qp_condition": "Compare/FPPO/qp_condition",
+    "Cost/margin_mean": "Compare/FPPO/margin_mean",
+    "Cost/margin_max": "Compare/FPPO/margin_max",
+    "Cost/margin_to_slack_ratio": "Compare/FPPO/margin_to_slack_ratio",
+    "Cost/sigma_j_mean": "Compare/FPPO/sigma_j_mean",
+    "Cost/sigma_a_mean": "Compare/FPPO/sigma_a_mean",
     "Cost/current_max_violation": "Compare/FPPO/current_max_violation",
-    "Cost/boundary_mode_rate": "Compare/FPPO/boundary_mode_rate",
-    "Cost/recovery_mode_rate": "Compare/FPPO/recovery_mode_rate",
-    "Cost/predictor_lr": "Compare/FPPO/predictor_lr",
     "Cost/predictor_kl": "Compare/FPPO/predictor_kl",
     "Cost/predictor_stop_rate": "Compare/FPPO/predictor_stop_rate",
     "Cost/predictor_updates": "Compare/FPPO/predictor_updates",
-    "Cost/curriculum_progress": "Compare/FPPO/curriculum_progress",
-    "Cost/curriculum_perf_gate_ready": "Compare/FPPO/curriculum_perf_gate_ready",
-    "Cost/curriculum_gate_max_ratio": "Compare/FPPO/curriculum_gate_max_ratio",
-    "Cost/curriculum_gate_min_margin": "Compare/FPPO/curriculum_gate_min_margin",
-    "Cost/curriculum_reward_ema": "Compare/FPPO/curriculum_reward_ema",
-    "Cost/curriculum_tighten_count": "Compare/FPPO/curriculum_tighten_count",
+    "Cost/predictor_lr": "Compare/FPPO/predictor_lr",
+    "Cost/projection_applied_rate": "Compare/FPPO/projection_applied_rate",
+    "Cost/projection_radius_scale": "Compare/FPPO/projection_radius_scale",
+    "Cost/uncertainty_cache_age": "Compare/FPPO/uncertainty_cache_age",
+    "Cost/constraint_grad_norm_mean": "Compare/FPPO/constraint_grad_norm_mean",
+    "Cost/constraint_grad_norm_max": "Compare/FPPO/constraint_grad_norm_max",
+    "Cost/fisher_diag_mean": "Compare/FPPO/fisher_diag_mean",
+    "Cost/fisher_diag_min": "Compare/FPPO/fisher_diag_min",
+    "Cost/fisher_diag_max": "Compare/FPPO/fisher_diag_max",
+    "Cost/raw_cost_adv_std": "Compare/FPPO/raw_cost_adv_std",
+    "Cost/norm_cost_adv_std": "Compare/FPPO/norm_cost_adv_std",
     "Cost/constraint_ratio/prob_joint_pos": "Compare/Diag/constraint_ratio_prob_joint_pos",
     "Cost/constraint_ratio/prob_joint_torque": "Compare/Diag/constraint_ratio_prob_joint_torque",
     "Cost/constraint_margin/prob_joint_pos": "Compare/Diag/constraint_margin_prob_joint_pos",
@@ -327,7 +329,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         ordered_constraint_names = self._constraint_term_names
         if ordered_constraint_names is None:
             ordered_name_set: set[str] = set()
-            for key in ("constraint_limits", "constraint_limits_start", "constraint_limits_final"):
+            for key in ("constraint_limits",):
                 named_limits = self.alg_cfg_full.get(key, None)
                 if isinstance(named_limits, dict):
                     ordered_name_set.update(str(name) for name in named_limits.keys())
@@ -335,7 +337,7 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 ordered_constraint_names = sorted(ordered_name_set)
         if ordered_constraint_names is not None:
             default_limit = float(self.alg_cfg_full.get("cost_limit", 0.0))
-            for key in ("constraint_limits", "constraint_limits_start", "constraint_limits_final"):
+            for key in ("constraint_limits",):
                 named_limits = self.alg_cfg_full.get(key, None)
                 if not isinstance(named_limits, dict):
                     continue

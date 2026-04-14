@@ -300,7 +300,7 @@ class GalileoDefaults:
         difficulty_range = (0.0, 1.0)
         # Flat-only pretraining mode keeps the CTS task on plane terrain until
         # FPPO stabilizes, while preserving the rough-terrain generator for later.
-        flat_only_pretrain = True
+        flat_only_pretrain = False
         flat_subterrain_name = "crl_flat"
 
     class command:
@@ -541,9 +541,6 @@ class GalileoDefaults:
             prob_joint_vel=0.08,
             symmetric=0.10,
         )
-        shared_constraint_limits_start = {
-            name: float(limit * 2.0) for name, limit in shared_constraint_limits.items()
-        }
         constraint_adapter_base = dict()
         constraint_adapter_per_algo = {
             "fppo": dict(
@@ -589,38 +586,41 @@ class GalileoDefaults:
                     "prob_joint_torque": 0.04,
                 },
             ),
-            # FPPO（更激进参数：更大步长、更松约束、更少回溯）
+            # FPPO predictor-corrector with robust margins and diagonal-Fisher projection.
             "fppo": dict(
                 cost_value_loss_coef=1.0,
                 num_learning_epochs=4,
-                learning_rate=5.0e-4,
-                desired_kl=0.006,
-                delta_kl=0.010,
-                predictor_desired_kl=0.015,
-                predictor_kl_hard_limit=0.03,
-                step_size=4.0e-4,
+                learning_rate=2.0e-4,
+                desired_kl=0.010,
                 cost_gamma=None,
                 cost_lam=None,
-                epsilon_safe=0.002,
                 backtrack_coeff=0.5,
                 max_backtracks=10,
                 projection_eps=1e-6,
-                softproj_max_iters=40,
-                softproj_tol=1e-6,
+                fisher_damping=1e-3,
+                fisher_num_chunks=4,
+                fisher_min_diag=1e-6,
+                cost_confidence=1.0,
+                gradient_confidence=0.2,
+                curvature_proxy=0.0,
+                gradient_uncertainty_mode="shards",
+                gradient_uncertainty_shards=4,
+                uncertainty_update_interval=4,
+                uncertainty_ema_decay=0.9,
+                predictor_kl_target=0.0075,
+                predictor_kl_hard_limit=0.02,
+                predictor_adaptive_lr=True,
+                predictor_lr_min=5.0e-5,
+                predictor_lr_max=3.0e-4,
+                qp_max_iters=64,
+                qp_tol=1e-6,
+                exact_qp_max_constraints=8,
+                max_sigma_a=2.0,
+                max_margin_abs=None,
+                max_margin_ratio=0.5,
+                projection_radius_cap=1.0,
+                projection_radius_mode="kl",
                 constraint_limits=dict(shared_constraint_limits),
-                constraint_limits_start=dict(shared_constraint_limits_start),
-                constraint_limits_final=dict(shared_constraint_limits),
-                adaptive_constraint_curriculum=True,
-                constraint_curriculum_names=[
-                    "prob_joint_pos",
-                    "prob_joint_vel",
-                    "prob_joint_torque",
-                ],
-                constraint_curriculum_ema_decay=0.95,
-                constraint_curriculum_check_interval=40,
-                constraint_curriculum_alpha=0.7,
-                constraint_curriculum_shrink=0.985,
-                step_size_adaptive=False,
             ),
             # NP3O
             "np3o": dict(

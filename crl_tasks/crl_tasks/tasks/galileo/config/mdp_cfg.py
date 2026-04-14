@@ -264,7 +264,7 @@ class CTSRewardsCfg:
 
     track_lin_vel_xy_exp = RewTerm(
         func=rewards.track_lin_vel_xy_exp,
-        weight=5.0,
+        weight=1.0,
         params={
             "command_name": "base_velocity",
             "std": 0.25,
@@ -273,7 +273,7 @@ class CTSRewardsCfg:
     )
     track_ang_vel_z_exp = RewTerm(
         func=rewards.track_ang_vel_z_exp,
-        weight=2.5,
+        weight=0.5,
         params={
             "command_name": "base_velocity",
             "std": 0.25,
@@ -292,7 +292,7 @@ class CTSRewardsCfg:
     )
     dof_error_l2 = RewTerm(
         func=rewards.dof_error_l2,
-        weight=-0.5,
+        weight=-0.1,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "command_name": "base_velocity",
@@ -304,7 +304,7 @@ class CTSRewardsCfg:
     )
     hip_pos_l2 = RewTerm(
         func=rewards.hip_pos_l2,
-        weight=-0.1,
+        weight=-0.05,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint"),
             "command_name": "base_velocity",
@@ -334,7 +334,7 @@ class CTSRewardsCfg:
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.5,
+            "threshold": 0.35,
             "low_speed_threshold": 0.1,
         },
     )

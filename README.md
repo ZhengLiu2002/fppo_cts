@@ -17,7 +17,7 @@
 - MDP 配置：[crl_tasks/crl_tasks/tasks/galileo/config/mdp_cfg.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/mdp_cfg.py)
 - CTS benchmark runner：[crl_tasks/crl_tasks/tasks/galileo/config/agents/rsl_cts_cfg.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/agents/rsl_cts_cfg.py)
 - 算法注册表：[scripts/rsl_rl/algorithms/registry.py](/home/lz/Project/IsaacLab/fppo_ts/scripts/rsl_rl/algorithms/registry.py)
-- 推理 / 导出：[scripts/rsl_rl/play.py](/home/lz/Project/IsaacLab/fppo_ts/scripts/rsl_rl/play.py) [scripts/rsl_rl/exporter.py](/home/lz/Project/IsaacLab/fppo_ts/scripts/rsl_rl/exporter.py)
+- 推理 / 导出 / 遥控：[scripts/rsl_rl/play.py](/home/lz/Project/IsaacLab/fppo_ts/scripts/rsl_rl/play.py) [scripts/rsl_rl/play_keyboard.py](/home/lz/Project/IsaacLab/fppo_ts/scripts/rsl_rl/play_keyboard.py) [scripts/rsl_rl/exporter.py](/home/lz/Project/IsaacLab/fppo_ts/scripts/rsl_rl/exporter.py)
 
 ## 安装
 
@@ -140,27 +140,34 @@ python scripts/rsl_rl/play.py \
 
 键盘遥控：
 
-FPPO 回放示例：
+FPPO 键盘遥控示例：
 
 ```bash
-python scripts/rsl_rl/play.py \
+python scripts/rsl_rl/play_keyboard.py \
   --task Isaac-Galileo-CTS-Play-v0 \
   --algo fppo \
-  --num_envs 16 \
   --force_gui \
   --checkpoint 
 ```
 
-PPO 回放示例：
+PPO 键盘遥控示例：
 
 ```bash
-python scripts/rsl_rl/play.py \
+python scripts/rsl_rl/play_keyboard.py \
   --task Isaac-Galileo-CTS-Play-v0 \
   --algo ppo \
-  --num_envs 16 \
   --force_gui \
   --checkpoint 
 ```
+
+常用控制：
+
+- `W/S` 或方向键 `Up/Down`：前进 / 后退
+- `A/D`：左右横移
+- `Q/E` 或方向键 `Left/Right`：左 / 右转
+- `Space`：清空当前目标速度
+- `R`：重置机器人
+- `Esc`：退出
 
 ## 导出
 

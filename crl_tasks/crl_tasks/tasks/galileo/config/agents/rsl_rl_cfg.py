@@ -106,30 +106,36 @@ class CRLRslRlFppoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     reconstruction_loss_coef: float = 0.0
 
     cost_value_loss_coef: float = 1.0
-    step_size: float = 1e-3
     cost_gamma: float | None = None
     cost_lam: float | None = None
     cost_limit: float = 0.0
     backtrack_coeff: float = 0.5
     max_backtracks: int = 10
     projection_eps: float = 1e-8
-    epsilon_safe: float = 0.0
-    delta_kl: float | None = None
-    predictor_desired_kl: float | None = None
+    fisher_damping: float = 1e-3
+    fisher_num_chunks: int = 4
+    fisher_min_diag: float = 1e-6
+    cost_confidence: float = 1.0
+    gradient_confidence: float = 0.2
+    curvature_proxy: float = 0.0
+    gradient_uncertainty_mode: str = "shards"
+    gradient_uncertainty_shards: int = 4
+    uncertainty_update_interval: int = 4
+    uncertainty_ema_decay: float = 0.9
+    predictor_kl_target: float | None = None
     predictor_kl_hard_limit: float | None = None
-    softproj_max_iters: int = 40
-    softproj_tol: float = 1e-6
+    predictor_adaptive_lr: bool = True
+    predictor_lr_min: float | None = None
+    predictor_lr_max: float | None = None
+    qp_max_iters: int = 64
+    qp_tol: float = 1e-6
+    exact_qp_max_constraints: int = 8
+    max_sigma_a: float | None = 2.0
+    max_margin_abs: float | None = None
+    max_margin_ratio: float | None = 0.5
+    projection_radius_cap: float | None = 1.0
+    projection_radius_mode: str = "kl"
     constraint_limits: dict[str, float] | list[float] | None = None
-    constraint_limits_start: dict[str, float] | list[float] | None = None
-    constraint_limits_final: dict[str, float] | list[float] | None = None
-    adaptive_constraint_curriculum: bool = False
-    constraint_curriculum_names: list[str] | None = None
-    constraint_curriculum_ema_decay: float = 0.95
-    constraint_curriculum_check_interval: int = 20
-    constraint_curriculum_alpha: float = 0.8
-    constraint_curriculum_shrink: float = 0.97
-    use_clipped_surrogate: bool = True
-    step_size_adaptive: bool = True
 
 
 @configclass

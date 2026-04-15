@@ -292,7 +292,7 @@ class CTSRewardsCfg:
     )
     dof_error_l2 = RewTerm(
         func=rewards.dof_error_l2,
-        weight=-0.1,
+        weight=-0.5,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "command_name": "base_velocity",
@@ -304,7 +304,7 @@ class CTSRewardsCfg:
     )
     hip_pos_l2 = RewTerm(
         func=rewards.hip_pos_l2,
-        weight=-0.05,
+        weight=-0.1,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint"),
             "command_name": "base_velocity",
@@ -319,7 +319,7 @@ class CTSRewardsCfg:
         weight=-1.0e-3,
     )
     lin_vel_z_l2 = RewTerm(func=rewards.lin_vel_z_l2, weight=-2.0)
-    ang_vel_xy_l2 = RewTerm(func=rewards.ang_vel_xy_l2, weight=-0.5)
+    ang_vel_xy_l2 = RewTerm(func=rewards.ang_vel_xy_l2, weight=-0.4)
     flat_orientation_l2 = RewTerm(
         func=rewards.flat_orientation_l2,
         weight=-2.0,
@@ -330,11 +330,11 @@ class CTSRewardsCfg:
     )
     feet_air_time = RewTerm(
         func=rewards.feet_air_time,
-        weight=1.0,
+        weight=3.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.35,
+            "threshold": 0.5,
             "low_speed_threshold": 0.1,
         },
     )
@@ -349,7 +349,7 @@ class CTSRewardsCfg:
     )
     gait_contact_symmetry = RewTerm(
         func=rewards.gait_contact_symmetry,
-        weight=0.0,
+        weight=0.2,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "left_foot_names": LEFT_FOOT_BODY_NAMES,

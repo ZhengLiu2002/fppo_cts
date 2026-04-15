@@ -259,7 +259,7 @@ class GalileoDefaults:
             actor_num_priv_explicit = 0
             actor_num_priv_latent = 185
             actor_history_latent_dim = 32
-            actor_num_hist = 20
+            actor_num_hist = 15
             num_actor_obs = (
                 actor_num_prop
                 + actor_num_scan
@@ -282,7 +282,7 @@ class GalileoDefaults:
             )
 
         # 观测历史相关（如需）
-        obs_history_length = 20
+        obs_history_length = 5
         action_history_length = 3
         clip_actions = 100.0
         clip_obs = 100.0

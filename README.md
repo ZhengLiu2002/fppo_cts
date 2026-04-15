@@ -55,7 +55,7 @@ python scripts/rsl_rl/train.py \
   --task Isaac-Galileo-CTS-v0 \
   --algo fppo \
   --exp galileo/benchmark/cts_main \
-  --num_envs 4096 \
+  --num_envs 2048 \
   --run_name fppo_main \
   --headless \
   --logger wandb \
@@ -69,7 +69,7 @@ python scripts/rsl_rl/train.py \
   --task Isaac-Galileo-CTS-v0 \
   --algo ppo \
   --exp galileo/benchmark/cts_main \
-  --num_envs 4096 \
+  --num_envs 2048 \
   --run_name ppo_main \
   --headless \
   --logger wandb \

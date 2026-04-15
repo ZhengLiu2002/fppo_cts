@@ -111,15 +111,15 @@ class _TemporalResidualBlock(nn.Module):
 
 
 class TCNHistoryEncoder(nn.Module):
-    """TCN-20 encoder for student proprio history."""
+    """TCN encoder for student proprio history with configurable sequence length."""
 
     def __init__(self, activation_fn, input_size, tsteps, output_size, channel_size):
         super().__init__()
-        if int(tsteps) != 20:
-            raise ValueError(f"TCNHistoryEncoder expects 20 history steps, got {tsteps}.")
+        self.tsteps = int(tsteps)
+        if self.tsteps <= 0:
+            raise ValueError(f"TCNHistoryEncoder expects a positive history length, got {tsteps}.")
 
         hidden_channels = max(int(channel_size), int(output_size), 32)
-        self.tsteps = int(tsteps)
         self.input_projection = nn.Sequential(
             nn.Linear(input_size, hidden_channels),
             copy.deepcopy(activation_fn),

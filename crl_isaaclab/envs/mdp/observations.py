@@ -44,7 +44,8 @@ class ExtremeCRLObservations(ManagerTermBase):
         self._obs_history_buffer = None
         self.delta_yaw = torch.zeros(self.num_envs, device=self.device)
         self.delta_next_yaw = torch.zeros(self.num_envs, device=self.device)
-        self.measured_heights = torch.zeros(self.num_envs, 132, device=self.device)
+        num_rays = int(self.ray_sensor.data.ray_hits_w.shape[1])
+        self.measured_heights = torch.zeros(self.num_envs, num_rays, device=self.device)
         self.env = env
         # Galileo uses base_link; keep regex flexible.
         base_candidates = ["base", "base_link"]

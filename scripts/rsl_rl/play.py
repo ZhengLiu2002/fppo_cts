@@ -7,6 +7,7 @@
 
 import argparse
 import os
+import shutil
 import sys
 import warnings
 
@@ -275,15 +276,20 @@ def main():
         export_model_dir = args_cli.export_dir or os.path.join(
             os.path.dirname(resume_path), "exported_policy"
         )
+        run_policy_cfg_path = os.path.join(log_dir, "policy.yaml")
+        if not os.path.isfile(run_policy_cfg_path):
+            raise FileNotFoundError(
+                "Run-local policy.yaml is missing. Re-train this run with the current pipeline "
+                "so deployment config is generated from the live training config."
+            )
         export_cfg = export_inference_cfg(
             env,
             env_cfg,
             export_model_dir,
-            load_run=agent_cfg.load_run or ".*",
-            checkpoint=resume_path,
             agent_cfg=agent_cfg,
             actor_critic=policy_nn,
         )
+        shutil.copy2(run_policy_cfg_path, os.path.join(export_model_dir, "policy.yaml"))
         export_input_order = list(export_cfg.get("export_input_order") or export_cfg["input_names"])
         export_input_dims = {
             name: int(export_cfg["export_input_dims"][name]) for name in export_input_order

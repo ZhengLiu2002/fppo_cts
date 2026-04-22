@@ -18,12 +18,14 @@ class CRLRslRlBaseCfg:
 
     # base_lin_vel(3) + base_ang_vel(3) + projected_gravity(3)
     # + joint_pos(12) + joint_vel(12) + actions(12) + commands(3)
-    # + height_scan(132) = 180
+    # + height_scan(182) = 230
     num_priv_hurdles: int = 0
     num_priv_explicit: int = 0
     num_priv_latent: int = 0
     history_latent_dim: int = 0
     history_reconstruction_dim: int = 0
+    velocity_estimation_dim: int = 0
+    velocity_estimator_channel_size: int = 0
     num_prop: int = 180
     num_scan: int = 0
     num_hist: int = 0
@@ -50,11 +52,18 @@ class CRLRslRlPpoActorCriticCfg(RslRlPpoActorCriticCfg):
     num_priv_explicit: int = 0
     num_priv_latent: int = 0
     history_latent_dim: int = 0
+    history_reconstruction_mode: str = "hidden_privileged"
     num_hist: int = 0
     normalize_latent: bool = False
     tanh_encoder_output: bool = False
+    scan_encoder_type: str = "mlp"
+    scan_grid_shape: tuple[int, int] | None = None
     scan_encoder_dims: list[int] = MISSING
     priv_encoder_dims: list[int] = MISSING
+    priv_terrain_scan_start: int = 0
+    priv_terrain_scan_dim: int = 0
+    priv_terrain_scan_shape: tuple[int, int] | None = None
+    priv_terrain_encoder_output_dim: int | None = None
     cost_critic_hidden_dims: list[int] | None = None
     encode_scan_for_critic: bool = False
     critic_use_latent: bool = False
@@ -70,7 +79,18 @@ class CRLRslRlPpoActorCriticCfg(RslRlPpoActorCriticCfg):
 @configclass
 class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     class_name: str = "PPO"
-    reconstruction_loss_coef: float = 0.0
+    velocity_estimation_loss_coef: float = 0.05
+    # CTS framework controls shared by all optimizer variants.
+    student_group_ratio: float = 0.25
+    reconstruction_learning_rate: float = 3e-4
+    num_reconstruction_epochs: int = 1
+    detach_student_encoder_during_rl: bool = True
+    roa_teacher_reg_coef_start: float = 0.0
+    roa_teacher_reg_coef_end: float = 0.05
+    roa_teacher_reg_warmup_updates: int = 5000
+    roa_teacher_reg_ramp_updates: int = 5000
+    roa_teacher_reg_scope: str = "teacher"
+    roa_teacher_reg_loss: str = "mse"
 
     # Constrained RL extensions shared by non-FPPO algorithms.
     cost_value_loss_coef: float = 1.0
@@ -101,9 +121,9 @@ class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
 
 @configclass
-class CRLRslRlFppoAlgorithmCfg(RslRlPpoAlgorithmCfg):
+class CRLRslRlFppoAlgorithmCfg(CRLRslRlPpoAlgorithmCfg):
     class_name: str = "FPPO"
-    reconstruction_loss_coef: float = 0.0
+    velocity_estimation_loss_coef: float = 0.05
 
     cost_value_loss_coef: float = 1.0
     cost_gamma: float | None = None
@@ -135,29 +155,27 @@ class CRLRslRlFppoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     max_margin_ratio: float | None = 0.5
     projection_radius_cap: float | None = 1.0
     projection_radius_mode: str = "kl"
+    active_constraint_threshold: float = 0.0
+    constraint_advantage_key: str = "cost_terms_adv_norm"
     constraint_limits: dict[str, float] | list[float] | None = None
 
 
 @configclass
 class CRLConstraintAdapterCfg:
     enabled: bool = False
-    ema_beta: float = 0.99
+    ema_beta: float = 0.9
     min_scale: float = 1e-3
     max_scale: float = 10.0
     clip: float = 5.0
-    huber_delta: float = 0.1
+    huber_delta: float = 0.2
     agg_tau: float = 0.5
-    scale_by_gamma: bool = False
+    scale_by_gamma: bool = True
     cost_scale: float | None = None
 
 
 @configclass
 class CRLRslRlCTSAlgorithmCfg(CRLRslRlPpoAlgorithmCfg):
     class_name: str = "CTS"
-    student_group_ratio: float = 0.25
-    reconstruction_learning_rate: float = 1e-3
-    num_reconstruction_epochs: int = 2
-    detach_student_encoder_during_rl: bool = True
 
 
 @configclass
@@ -167,6 +185,7 @@ class CRLRslRlOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
         MISSING
     )
     constraint_adapter: CRLConstraintAdapterCfg = CRLConstraintAdapterCfg()
+    framework_type: str | None = None
     force_student_history_rollout: bool = False
 
 

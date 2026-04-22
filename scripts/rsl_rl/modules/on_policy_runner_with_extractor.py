@@ -66,6 +66,7 @@ except ImportError:
 from .actor_critic_with_encoder import ActorCriticRMA
 from rsl_rl.utils import store_code_state
 from rsl_rl.runners.on_policy_runner import OnPolicyRunner
+from scripts.rsl_rl.algorithms.contracts import resolve_cts_runtime_contract
 from scripts.rsl_rl.algorithms.registry import (
     get_algorithm_class,
     get_algorithm_spec,
@@ -86,7 +87,8 @@ _TERMINAL_LOSS_KEYS = (
     "cost_value_function",
     "surrogate",
     "viol",
-    "reconstruction",
+    "velocity_estimation",
+    "teacher_latent_reg",
     "entropy",
 )
 
@@ -252,7 +254,13 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
 
     @staticmethod
     def _build_cts_student_mask(num_envs: int, student_group_ratio: float, device) -> torch.Tensor:
+        if num_envs <= 0:
+            return torch.zeros(0, device=device, dtype=torch.bool)
         ratio = float(student_group_ratio)
+        if ratio <= 0.0:
+            return torch.zeros(num_envs, device=device, dtype=torch.bool)
+        if ratio >= 1.0:
+            return torch.ones(num_envs, device=device, dtype=torch.bool)
         if num_envs <= 1:
             return torch.ones(num_envs, device=device, dtype=torch.bool)
         num_student = int(round(num_envs * ratio))
@@ -326,6 +334,9 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             train_cfg.get("force_student_history_rollout", False)
         )
         alg_class_name = self.alg_cfg["class_name"]
+        alg_spec = get_algorithm_spec(alg_class_name)
+        alg_class = get_algorithm_class(alg_class_name)
+        alg_contract = resolve_cts_runtime_contract(alg_class)
         ordered_constraint_names = self._constraint_term_names
         if ordered_constraint_names is None:
             ordered_name_set: set[str] = set()
@@ -347,12 +358,13 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
                 ]
                 self.alg_cfg[key] = ordered_limits
                 self.alg_cfg_full[key] = ordered_limits
-        if alg_class_name.lower() == "fppo" and ordered_constraint_names is not None:
+        if alg_contract.inject_constraint_names and ordered_constraint_names is not None:
             self.alg_cfg["constraint_names"] = list(ordered_constraint_names)
             self.alg_cfg_full["constraint_names"] = list(ordered_constraint_names)
-
-        alg_spec = get_algorithm_spec(alg_class_name)
-        self.training_type = alg_spec.training_type
+        framework_type = train_cfg.get("framework_type", None)
+        if framework_type is not None:
+            framework_type = str(framework_type).strip().lower() or None
+        self.training_type = framework_type or alg_spec.training_type
 
         obs, extras = self.env.get_observations()
         num_obs = obs.shape[1]
@@ -453,7 +465,6 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         # 纯算法训练
         alg_cfg = dict(self.alg_cfg)
         alg_cfg.pop("class_name", None)
-        alg_class = get_algorithm_class(alg_class_name)
         validate_algorithm_cfg(
             alg_class,
             self.alg_cfg_full,
@@ -492,18 +503,26 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             (num_privileged_obs,),
             (self.env.num_actions,),
         )
+        self._cts_student_ratio = 0.0
         self._cts_student_mask = None
         if self.training_type == "cts":
+            self._cts_student_ratio = max(
+                min(float(self.alg_cfg_full.get("student_group_ratio", 0.25) or 0.25), 1.0),
+                0.0,
+            )
             self._cts_student_mask = self._build_cts_student_mask(
                 self.env.num_envs,
-                float(self.alg_cfg_full.get("student_group_ratio", 0.25) or 0.25),
+                self._cts_student_ratio,
                 self.device,
             )
+            if hasattr(self.alg, "student_group_ratio"):
+                self.alg.student_group_ratio = float(self._cts_student_ratio)
             num_student = int(self._cts_student_mask.sum().item())
             num_teacher = int(self.env.num_envs - num_student)
             print(
                 "[INFO] CTS env partition:"
-                f" teacher={num_teacher}, student={num_student}, total={self.env.num_envs}"
+                f" teacher={num_teacher}, student={num_student}, total={self.env.num_envs},"
+                f" student_ratio={self._cts_student_ratio:.3f}"
             )
 
         self.disable_logs = self.is_distributed and self.gpu_global_rank != 0
@@ -687,6 +706,12 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
             # update policy
             loss_dict = self.alg.update()
             cost_metrics = getattr(self.alg, "train_metrics", None)
+            if cts_mode:
+                if not isinstance(cost_metrics, dict):
+                    cost_metrics = {}
+                    self.alg.train_metrics = cost_metrics
+                cost_metrics["student_group_ratio"] = self._cts_student_ratio
+                cost_metrics["teacher_group_ratio"] = 1.0 - self._cts_student_ratio
 
             _sync_cuda_for_timing(self.device)
             stop = time.time()

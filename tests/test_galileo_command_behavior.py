@@ -65,8 +65,10 @@ def test_training_command_pipeline_keeps_small_command_deadzone_enabled() -> Non
     uniform_source = UNIFORM_COMMAND_FILE.read_text(encoding="utf-8")
 
     assert "small_commands_to_zero: bool = True" in command_cfg_source
-    assert "self.is_standing_env[env_ids] = r.uniform_(0.0, 1.0) <= standing_prob" in uniform_source
-    assert "xy_norm = torch.norm(self.vel_command_b[env_ids, :2]" in uniform_source
+    assert "standing_prob" in uniform_source
+    assert "self.is_standing_env[" in uniform_source
+    assert "r.uniform_(0.0, 1.0) <= standing_prob" in uniform_source
+    assert "xy_norm = torch.norm(self.vel_command_b[" in uniform_source
     assert "torch.abs(self.vel_command_b[:, 2]) > self.cfg.clips.ang_vel_clip" in uniform_source
 
 

@@ -54,7 +54,17 @@ class CPO(PPO):
         k_value: float = 1.0,
         k_growth: float = 1.0,
         k_max: float = 1.0,
-        reconstruction_loss_coef: float = 0.0,
+        velocity_estimation_loss_coef: float = 0.0,
+        student_group_ratio: float = 0.25,
+        reconstruction_learning_rate: float | None = None,
+        num_reconstruction_epochs: int = 2,
+        detach_student_encoder_during_rl: bool = True,
+        roa_teacher_reg_coef_start: float = 0.0,
+        roa_teacher_reg_coef_end: float = 0.0,
+        roa_teacher_reg_warmup_updates: int = 5000,
+        roa_teacher_reg_ramp_updates: int = 5000,
+        roa_teacher_reg_scope: str = "teacher",
+        roa_teacher_reg_loss: str = "mse",
         cg_iters: int = 10,
         cg_damping: float = 1e-2,
         fvp_sample_freq: int = 1,
@@ -86,7 +96,17 @@ class CPO(PPO):
             k_value=k_value,
             k_growth=k_growth,
             k_max=k_max,
-            reconstruction_loss_coef=reconstruction_loss_coef,
+            velocity_estimation_loss_coef=velocity_estimation_loss_coef,
+            student_group_ratio=student_group_ratio,
+            reconstruction_learning_rate=reconstruction_learning_rate,
+            num_reconstruction_epochs=num_reconstruction_epochs,
+            detach_student_encoder_during_rl=detach_student_encoder_during_rl,
+            roa_teacher_reg_coef_start=roa_teacher_reg_coef_start,
+            roa_teacher_reg_coef_end=roa_teacher_reg_coef_end,
+            roa_teacher_reg_warmup_updates=roa_teacher_reg_warmup_updates,
+            roa_teacher_reg_ramp_updates=roa_teacher_reg_ramp_updates,
+            roa_teacher_reg_scope=roa_teacher_reg_scope,
+            roa_teacher_reg_loss=roa_teacher_reg_loss,
             constraint_limits=constraint_limits,
             multi_gpu_cfg=multi_gpu_cfg,
         )
@@ -134,17 +154,24 @@ class CPO(PPO):
             raise RuntimeError("CPO requires critic parameters for value updates.")
         return unique_params
 
-    def _make_distribution(self, obs_batch: torch.Tensor) -> torch.distributions.Normal:
-        self._policy_act(obs_batch)
+    def _make_distribution(
+        self,
+        obs_batch: torch.Tensor,
+        actor_is_student: torch.Tensor | None = None,
+    ) -> torch.distributions.Normal:
+        _, _, mean, std, _ = self._evaluate_actor_batch(
+            obs_batch,
+            actor_is_student=actor_is_student,
+        )
         mean = self._sanitize_tensor(
-            self.policy.action_mean,
+            mean,
             nan=0.0,
             posinf=1.0e4,
             neginf=-1.0e4,
             clamp=1.0e4,
         )
         std = self._sanitize_tensor(
-            self.policy.action_std,
+            std,
             nan=1.0e-6,
             posinf=1.0e2,
             neginf=1.0e-6,
@@ -168,9 +195,13 @@ class CPO(PPO):
         actions_batch: torch.Tensor,
         old_log_prob_batch: torch.Tensor,
         reward_advantages: torch.Tensor,
+        actor_is_student: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self._make_distribution(obs_batch)
-        actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
+        _, actions_log_prob_batch, _, _, _ = self._evaluate_actor_batch(
+            obs_batch,
+            actions=actions_batch,
+            actor_is_student=actor_is_student,
+        )
         ratio = self._safe_ratio(actions_log_prob_batch, old_log_prob_batch)
         return -(ratio * reward_advantages).mean()
 
@@ -180,9 +211,13 @@ class CPO(PPO):
         actions_batch: torch.Tensor,
         old_log_prob_batch: torch.Tensor,
         cost_advantages: torch.Tensor,
+        actor_is_student: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        self._make_distribution(obs_batch)
-        actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
+        _, actions_log_prob_batch, _, _, _ = self._evaluate_actor_batch(
+            obs_batch,
+            actions=actions_batch,
+            actor_is_student=actor_is_student,
+        )
         ratio = self._safe_ratio(actions_log_prob_batch, old_log_prob_batch)
         return (ratio * cost_advantages).mean()
 
@@ -190,10 +225,14 @@ class CPO(PPO):
         self,
         obs_batch: torch.Tensor,
         vector: torch.Tensor,
+        actor_is_student: torch.Tensor | None = None,
     ) -> torch.Tensor:
         sample_obs = obs_batch[:: self.fvp_sample_freq]
+        sample_actor_is_student = None
+        if actor_is_student is not None:
+            sample_actor_is_student = actor_is_student[:: self.fvp_sample_freq]
         self.policy.zero_grad(set_to_none=True)
-        q_dist = self._make_distribution(sample_obs)
+        q_dist = self._make_distribution(sample_obs, actor_is_student=sample_actor_is_student)
         with torch.no_grad():
             p_dist = torch.distributions.Normal(q_dist.mean.detach(), q_dist.stddev.detach())
         kl = torch.distributions.kl_divergence(p_dist, q_dist).sum(dim=-1).mean()
@@ -248,6 +287,7 @@ class CPO(PPO):
 
         cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
         cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
+        actor_is_student_batch = extra_batch[4] if len(extra_batch) > 4 else None
         cost_terms_ret, cost_terms_adv, _ = self._prepare_cost_term_batches(
             cost_returns_batch=cost_returns_batch,
             cost_advantages_batch=cost_advantages_batch,
@@ -295,6 +335,7 @@ class CPO(PPO):
             "cost_adv": active_cost_adv,
             "cost_adv_all": cost_terms_adv,
             "old_dist": torch.distributions.Normal(old_mu_batch, old_sigma_batch),
+            "actor_is_student": actor_is_student_batch,
             "cost_return": constraint_stats["aggregate_cost_return"],
             "cost_violation": constraint_stats["batch_cost_violation"],
             "cost_limit_margin": constraint_stats["min_cost_margin"],
@@ -336,14 +377,19 @@ class CPO(PPO):
                     actor_batch["actions"],
                     actor_batch["old_logp"],
                     actor_batch["reward_adv"],
+                    actor_batch.get("actor_is_student"),
                 )
                 loss_cost = self._loss_pi_cost(
                     actor_batch["obs"],
                     actor_batch["actions"],
                     actor_batch["old_logp"],
                     actor_batch["cost_adv"],
+                    actor_batch.get("actor_is_student"),
                 )
-                q_dist = self._make_distribution(actor_batch["obs"])
+                q_dist = self._make_distribution(
+                    actor_batch["obs"],
+                    actor_is_student=actor_batch.get("actor_is_student"),
+                )
                 kl = self._mean_kl(old_distribution, q_dist)
 
             loss_reward_improve = self._all_reduce_mean(loss_reward_before - loss_reward)
@@ -479,6 +525,7 @@ class CPO(PPO):
             actor_batch["actions"],
             actor_batch["old_logp"],
             actor_batch["reward_adv"],
+            actor_batch.get("actor_is_student"),
         )
         loss_reward_before = loss_reward.detach()
         loss_reward.backward()
@@ -487,11 +534,22 @@ class CPO(PPO):
         grads = -get_flat_gradients_from(self._policy_parameters)
 
         x = conjugate_gradients(
-            lambda vec: self._fisher_vector_product(actor_batch["obs"], vec),
+            lambda vec: self._fisher_vector_product(
+                actor_batch["obs"],
+                vec,
+                actor_is_student=actor_batch.get("actor_is_student"),
+            ),
             grads,
             num_steps=self.cg_iters,
         )
-        xHx = torch.dot(x, self._fisher_vector_product(actor_batch["obs"], x))
+        xHx = torch.dot(
+            x,
+            self._fisher_vector_product(
+                actor_batch["obs"],
+                x,
+                actor_is_student=actor_batch.get("actor_is_student"),
+            ),
+        )
         alpha = torch.sqrt(2 * self.target_kl / (xHx + 1e-8))
 
         self.policy.zero_grad(set_to_none=True)
@@ -500,6 +558,7 @@ class CPO(PPO):
             actor_batch["actions"],
             actor_batch["old_logp"],
             actor_batch["cost_adv"],
+            actor_batch.get("actor_is_student"),
         )
         loss_cost_before = loss_cost.detach()
         loss_cost.backward()
@@ -508,7 +567,11 @@ class CPO(PPO):
         b_grads = get_flat_gradients_from(self._policy_parameters)
 
         p = conjugate_gradients(
-            lambda vec: self._fisher_vector_product(actor_batch["obs"], vec),
+            lambda vec: self._fisher_vector_product(
+                actor_batch["obs"],
+                vec,
+                actor_is_student=actor_batch.get("actor_is_student"),
+            ),
             b_grads,
             num_steps=self.cg_iters,
         )
@@ -547,15 +610,21 @@ class CPO(PPO):
                 actor_batch["actions"],
                 actor_batch["old_logp"],
                 actor_batch["reward_adv"],
+                actor_batch.get("actor_is_student"),
             )
             cost_loss = self._loss_pi_cost(
                 actor_batch["obs"],
                 actor_batch["actions"],
                 actor_batch["old_logp"],
                 actor_batch["cost_adv"],
+                actor_batch.get("actor_is_student"),
             )
-            _ = self._make_distribution(actor_batch["obs"])
-            entropy = self.policy.entropy.mean().item()
+            _, _, _mu, _sigma, entropy_batch = self._evaluate_actor_batch(
+                actor_batch["obs"],
+                actions=actor_batch["actions"],
+                actor_is_student=actor_batch.get("actor_is_student"),
+            )
+            entropy = entropy_batch.mean().item()
 
         return {
             "surrogate": float(reward_loss.item()),
@@ -596,7 +665,7 @@ class CPO(PPO):
         )
 
         for (
-            _obs_batch,
+            obs_batch,
             critic_obs_batch,
             _actions_batch,
             target_values_batch,
@@ -612,9 +681,13 @@ class CPO(PPO):
             masks_batch,
             *extra_batch,
         ) in generator:
-            cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
-            cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
-            cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
+            (
+                cost_term_returns_batch,
+                cost_term_advantages_batch,
+                _cost_term_rewards_batch,
+                cost_term_values_batch,
+                actor_is_student_batch,
+            ) = self._unpack_extra_batch(extra_batch)
 
             returns_batch = self._sanitize_tensor(
                 returns_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
@@ -636,19 +709,23 @@ class CPO(PPO):
                 cost_term_values_batch=cost_term_values_batch,
             )
 
-            value_batch = self.policy.evaluate(
-                critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
+            (
+                _actions_log_prob_batch,
+                value_batch,
+                cost_value_batch,
+                _mu_batch,
+                _sigma_batch,
+                _entropy_batch,
+            ) = self._evaluate_training_batch(
+                obs_batch,
+                critic_obs_batch,
+                actions=_actions_batch,
+                actor_is_student=actor_is_student_batch,
+                masks=masks_batch,
+                hidden_states=hid_states_batch[0],
+                value_hidden_states=hid_states_batch[1],
+                cost_hidden_states=hid_states_batch[2],
             )
-            cost_value_batch = self.policy.evaluate_cost(
-                critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[2]
-            )
-            cost_value_batch = self._sanitize_tensor(
-                cost_value_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
-            )
-            if cost_value_batch.ndim == 1:
-                cost_value_batch = cost_value_batch.unsqueeze(-1)
-            elif cost_value_batch.ndim > 2:
-                cost_value_batch = cost_value_batch.view(cost_value_batch.shape[0], -1)
             pred_cost_terms = self._match_cost_heads(cost_value_batch, cost_terms_ret.shape[1])
             old_cost_terms = self._match_cost_heads(cost_terms_val, cost_terms_ret.shape[1])
 
@@ -692,13 +769,18 @@ class CPO(PPO):
 
         actor_metrics = self._update_actor()
         mean_value_loss, mean_cost_value_loss = self._update_value_functions()
+        latent_alignment_loss = self._latent_alignment_epoch()
 
         self.storage.clear()
         self.train_metrics = actor_metrics
+        if self._cts_enabled():
+            self.train_metrics["student_group_ratio"] = self.student_group_ratio
+            self.train_metrics["latent_alignment"] = latent_alignment_loss
         return {
             "value_function": mean_value_loss,
             "cost_value_function": mean_cost_value_loss,
             "surrogate": actor_metrics["surrogate"],
             "cost_surrogate": actor_metrics["cost_surrogate"],
             "entropy": actor_metrics["entropy"],
+            "latent_alignment": latent_alignment_loss,
         }

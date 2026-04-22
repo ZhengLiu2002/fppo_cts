@@ -17,6 +17,7 @@ class AlgorithmSpec:
     module: str
     class_name: str
     training_type: str = "rl"
+    config_family: str = "ppo"
     aliases: tuple[str, ...] = ()
     extra_cfg_keys: tuple[str, ...] = ()
 
@@ -117,6 +118,7 @@ register_algorithm(
         module="scripts.rsl_rl.algorithms.ppo",
         class_name="PPO",
         training_type="rl",
+        config_family="ppo",
     )
 )
 register_algorithm(
@@ -125,6 +127,7 @@ register_algorithm(
         module="scripts.rsl_rl.algorithms.fppo",
         class_name="FPPO",
         training_type="rl",
+        config_family="fppo",
     )
 )
 register_algorithm(
@@ -133,6 +136,7 @@ register_algorithm(
         module="scripts.rsl_rl.algorithms.np3o",
         class_name="NP3O",
         training_type="rl",
+        config_family="ppo",
     )
 )
 register_algorithm(
@@ -141,6 +145,7 @@ register_algorithm(
         module="scripts.rsl_rl.algorithms.ppo_lagrange",
         class_name="PPOLagrange",
         training_type="rl",
+        config_family="ppo",
         aliases=("ppo_lag", "ppolag", "ppolagrange"),
     )
 )
@@ -150,6 +155,7 @@ register_algorithm(
         module="scripts.rsl_rl.algorithms.cpo",
         class_name="CPO",
         training_type="rl",
+        config_family="ppo",
     )
 )
 register_algorithm(
@@ -158,6 +164,7 @@ register_algorithm(
         module="scripts.rsl_rl.algorithms.pcpo",
         class_name="PCPO",
         training_type="rl",
+        config_family="ppo",
     )
 )
 register_algorithm(
@@ -166,6 +173,7 @@ register_algorithm(
         module="scripts.rsl_rl.algorithms.focops",
         class_name="FOCOPS",
         training_type="rl",
+        config_family="ppo",
     )
 )
 register_algorithm(
@@ -174,6 +182,7 @@ register_algorithm(
         module="scripts.rsl_rl.algorithms.cts",
         class_name="CTS",
         training_type="cts",
+        config_family="cts",
     )
 )
 

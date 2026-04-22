@@ -9,12 +9,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from .contracts import CTSRuntimeContract
 from scripts.rsl_rl.modules.actor_critic_with_encoder import ActorCriticRMA as ActorCritic
 from scripts.rsl_rl.storage.rollout_storage import RolloutStorage
 
 
 class PPO:
     """Proximal Policy Optimization algorithm (https://arxiv.org/abs/1707.06347)."""
+
+    cts_runtime_contract = CTSRuntimeContract()
 
     policy: ActorCritic
     """The actor critic module."""
@@ -52,7 +55,17 @@ class PPO:
         k_decay: float = 1.0,
         k_min: float = 0.0,
         k_violation_threshold: float = 0.02,
-        reconstruction_loss_coef: float = 0.0,
+        velocity_estimation_loss_coef: float = 0.0,
+        student_group_ratio: float = 0.25,
+        reconstruction_learning_rate: float | None = None,
+        num_reconstruction_epochs: int = 2,
+        detach_student_encoder_during_rl: bool = True,
+        roa_teacher_reg_coef_start: float = 0.0,
+        roa_teacher_reg_coef_end: float = 0.0,
+        roa_teacher_reg_warmup_updates: int = 5000,
+        roa_teacher_reg_ramp_updates: int = 5000,
+        roa_teacher_reg_scope: str = "teacher",
+        roa_teacher_reg_loss: str = "mse",
         cost_ratio_clip: float | None = None,
         log_ratio_clip: float = 6.0,
         kl_hard_ratio: float = 4.0,
@@ -75,9 +88,13 @@ class PPO:
         self.policy.to(self.device)
         # Create optimizer
         self.optimizer = optim.Adam(self.policy.parameters(), lr=learning_rate)
+        self.reconstruction_optimizer: torch.optim.Optimizer | None = None
         # Create rollout storage
         self.storage: RolloutStorage = None  # type: ignore
         self.transition = RolloutStorage.Transition()
+        self.training_type = "rl"
+        self._action_dim = 0
+        self._update_counter = 0
 
         # PPO parameters
         self.clip_param = clip_param
@@ -105,7 +122,29 @@ class PPO:
         self.k_decay = float(k_decay)
         self.k_min = float(k_min)
         self.k_violation_threshold = float(k_violation_threshold)
-        self.reconstruction_loss_coef = float(reconstruction_loss_coef)
+        self.velocity_estimation_loss_coef = float(velocity_estimation_loss_coef)
+        self.student_group_ratio = float(student_group_ratio)
+        self.reconstruction_learning_rate = (
+            None if reconstruction_learning_rate is None else float(reconstruction_learning_rate)
+        )
+        self.num_reconstruction_epochs = max(int(num_reconstruction_epochs), 0)
+        self.detach_student_encoder_during_rl = bool(detach_student_encoder_during_rl)
+        self.roa_teacher_reg_coef_start = max(float(roa_teacher_reg_coef_start), 0.0)
+        self.roa_teacher_reg_coef_end = max(float(roa_teacher_reg_coef_end), 0.0)
+        self.roa_teacher_reg_warmup_updates = max(int(roa_teacher_reg_warmup_updates), 0)
+        self.roa_teacher_reg_ramp_updates = max(int(roa_teacher_reg_ramp_updates), 0)
+        self.roa_teacher_reg_scope = str(roa_teacher_reg_scope).strip().lower()
+        if self.roa_teacher_reg_scope not in {"teacher", "all"}:
+            raise ValueError(
+                "Unsupported ROA teacher regularization scope: "
+                f"{roa_teacher_reg_scope}. Expected 'teacher' or 'all'."
+            )
+        self.roa_teacher_reg_loss = str(roa_teacher_reg_loss).strip().lower()
+        if self.roa_teacher_reg_loss not in {"mse", "l2"}:
+            raise ValueError(
+                "Unsupported ROA teacher regularization loss: "
+                f"{roa_teacher_reg_loss}. Expected 'mse' or 'l2'."
+            )
         self.cost_ratio_clip = float(cost_ratio_clip) if cost_ratio_clip is not None else clip_param
         self.log_ratio_clip = float(log_ratio_clip)
         self.kl_hard_ratio = float(kl_hard_ratio)
@@ -126,6 +165,7 @@ class PPO:
         critic_obs_shape,
         actions_shape,
     ):
+        self.training_type = str(training_type).strip().lower()
         # create rollout storage
         self.storage = RolloutStorage(
             training_type,
@@ -136,6 +176,17 @@ class PPO:
             actions_shape,
             self.device,
         )
+        self._action_dim = int(actions_shape[0])
+        self.reconstruction_optimizer = None
+        if self._cts_enabled():
+            student_params = list(getattr(self.policy, "student_encoder_parameters", lambda: [])())
+            if student_params and self.num_reconstruction_epochs > 0:
+                recon_lr = (
+                    self.reconstruction_learning_rate
+                    if self.reconstruction_learning_rate is not None
+                    else self.learning_rate
+                )
+                self.reconstruction_optimizer = optim.Adam(student_params, lr=float(recon_lr))
 
     def _all_reduce_mean(self, value: torch.Tensor) -> torch.Tensor:
         if self.is_multi_gpu:
@@ -162,7 +213,9 @@ class PPO:
         actions_log_prob_batch: torch.Tensor,
         old_actions_log_prob_batch: torch.Tensor,
     ) -> torch.Tensor:
-        log_ratio = actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch)
+        actions_log_prob_batch = torch.squeeze(actions_log_prob_batch)
+        old_actions_log_prob_batch = torch.squeeze(old_actions_log_prob_batch)
+        log_ratio = actions_log_prob_batch - old_actions_log_prob_batch
         log_ratio = self._sanitize_tensor(
             log_ratio,
             nan=0.0,
@@ -246,6 +299,366 @@ class PPO:
         actor = getattr(self.policy, "actor", None)
         return bool(getattr(actor, "num_hist", 0) > 0)
 
+    def _cts_enabled(self) -> bool:
+        return self.training_type == "cts"
+
+    @staticmethod
+    def _student_mask(actor_is_student: torch.Tensor) -> torch.Tensor:
+        if actor_is_student.ndim > 1:
+            actor_is_student = actor_is_student.view(actor_is_student.shape[0], -1)[:, 0]
+        return actor_is_student.to(dtype=torch.bool)
+
+    def _roa_teacher_reg_coefficient(self) -> float:
+        if not self._cts_enabled():
+            return 0.0
+        start = float(getattr(self, "roa_teacher_reg_coef_start", 0.0) or 0.0)
+        end = float(getattr(self, "roa_teacher_reg_coef_end", 0.0) or 0.0)
+        if start <= 0.0 and end <= 0.0:
+            return 0.0
+        warmup = max(int(getattr(self, "roa_teacher_reg_warmup_updates", 0) or 0), 0)
+        ramp = int(getattr(self, "roa_teacher_reg_ramp_updates", 0) or 0)
+        update_index = max(int(getattr(self, "_update_counter", 0) or 0), 0)
+        if ramp <= 0:
+            return end if update_index >= warmup else start
+        progress = min(max((update_index - warmup) / float(ramp), 0.0), 1.0)
+        return start + (end - start) * progress
+
+    def _teacher_latent_regularization_loss(
+        self,
+        obs_batch: torch.Tensor,
+        actor_is_student_batch: torch.Tensor | None,
+        *,
+        coefficient: float | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        zero = torch.zeros((), device=obs_batch.device)
+        coefficient = (
+            self._roa_teacher_reg_coefficient()
+            if coefficient is None
+            else max(float(coefficient), 0.0)
+        )
+        if (
+            coefficient <= 0.0
+            or not self._cts_enabled()
+            or not hasattr(self.policy, "teacher_latent")
+            or not hasattr(self.policy, "student_latent")
+        ):
+            return zero, zero, 0
+
+        if self.roa_teacher_reg_scope == "all":
+            reg_idx = torch.arange(obs_batch.shape[0], device=obs_batch.device)
+        else:
+            actor_is_student = self._resolve_actor_is_student_batch(
+                actor_is_student_batch,
+                obs_batch.shape[0],
+                obs_batch.device,
+            )
+            reg_idx = self._role_indices(actor_is_student)[0]
+        if reg_idx.numel() <= 0:
+            return zero, zero, 0
+
+        reg_obs = obs_batch[reg_idx]
+        teacher_latent = self.policy.teacher_latent(reg_obs)
+        student_latent = self.policy.student_latent(reg_obs).detach()
+        if self.roa_teacher_reg_loss == "l2":
+            latent_reg_loss = torch.linalg.vector_norm(
+                teacher_latent - student_latent, dim=-1
+            ).mean()
+        else:
+            latent_reg_loss = torch.nn.functional.mse_loss(teacher_latent, student_latent)
+        latent_reg_loss = self._sanitize_tensor(
+            latent_reg_loss,
+            nan=0.0,
+            posinf=1.0e6,
+            neginf=0.0,
+            clamp=1.0e6,
+        )
+        return latent_reg_loss, latent_reg_loss * coefficient, int(reg_idx.numel())
+
+    def _resolve_actor_is_student_batch(
+        self,
+        actor_is_student: torch.Tensor | None,
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if actor_is_student is None:
+            return torch.zeros(batch_size, 1, device=device, dtype=torch.bool)
+        actor_is_student = actor_is_student.to(device=device)
+        if actor_is_student.numel() == 1:
+            return actor_is_student.bool().expand(batch_size, 1)
+        return actor_is_student.view(batch_size, -1).bool()
+
+    def _role_indices(self, actor_is_student: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        student_mask = self._student_mask(actor_is_student)
+        student_idx = torch.nonzero(student_mask, as_tuple=False).flatten()
+        teacher_idx = torch.nonzero(~student_mask, as_tuple=False).flatten()
+        return teacher_idx, student_idx
+
+    def _evaluate_cts_group(
+        self,
+        obs_batch: torch.Tensor,
+        critic_obs_batch: torch.Tensor,
+        actor_mode: str,
+        *,
+        actions: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        detach_student = actor_mode == "student" and self.detach_student_encoder_during_rl
+        latent = self.policy.actor_mode_latent(
+            obs_batch,
+            actor_mode,
+            detach_student_encoder=detach_student,
+        )
+        velocity_feature = self.policy.actor_mode_velocity_feature(obs_batch, actor_mode)
+        self.policy.update_distribution_with_latent(
+            obs_batch,
+            latent,
+            velocity_feature=velocity_feature,
+        )
+        if actions is None:
+            actions = self.policy.distribution.sample()
+        log_prob = self.policy.get_actions_log_prob(actions)
+        values = self.policy.evaluate(
+            critic_obs_batch,
+            observations=obs_batch,
+            actor_mode=actor_mode,
+            latent=latent,
+            detach_student_encoder=detach_student,
+        )
+        cost_pred = self.policy.evaluate_cost(
+            critic_obs_batch,
+            observations=obs_batch,
+            actor_mode=actor_mode,
+            latent=latent,
+            detach_student_encoder=detach_student,
+        )
+        cost_values, cost_term_values = self._split_cost_value_heads(cost_pred)
+        return (
+            actions,
+            log_prob,
+            values,
+            cost_values,
+            cost_term_values,
+            self.policy.entropy,
+        )
+
+    def _evaluate_cts_policy_batch(
+        self,
+        obs_batch: torch.Tensor,
+        critic_obs_batch: torch.Tensor,
+        actor_is_student: torch.Tensor | None,
+        *,
+        actions: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, ...]:
+        actor_is_student = self._resolve_actor_is_student_batch(
+            actor_is_student,
+            obs_batch.shape[0],
+            obs_batch.device,
+        )
+        batch_size = obs_batch.shape[0]
+        action_dim = int(actions.shape[-1]) if actions is not None else self._action_dim
+        device = obs_batch.device
+        dtype = obs_batch.dtype
+
+        batched_actions = torch.zeros(batch_size, action_dim, device=device, dtype=dtype)
+        log_prob = torch.zeros(batch_size, device=device, dtype=dtype)
+        values = torch.zeros(batch_size, 1, device=device, dtype=dtype)
+        cost_values = torch.zeros(batch_size, 1, device=device, dtype=dtype)
+        mu = torch.zeros(batch_size, action_dim, device=device, dtype=dtype)
+        sigma = torch.zeros(batch_size, action_dim, device=device, dtype=dtype)
+        entropy = torch.zeros(batch_size, device=device, dtype=dtype)
+        cost_term_values = None
+
+        for actor_mode, batch_idx in (
+            ("teacher", self._role_indices(actor_is_student)[0]),
+            ("student", self._role_indices(actor_is_student)[1]),
+        ):
+            if batch_idx.numel() <= 0:
+                continue
+            group_actions = actions[batch_idx] if actions is not None else None
+            (
+                group_actions,
+                group_log_prob,
+                group_values,
+                group_cost_values,
+                group_cost_term_values,
+                group_entropy,
+            ) = self._evaluate_cts_group(
+                obs_batch[batch_idx],
+                critic_obs_batch[batch_idx],
+                actor_mode,
+                actions=group_actions,
+            )
+            batched_actions[batch_idx] = group_actions
+            log_prob[batch_idx] = group_log_prob
+            values[batch_idx] = group_values
+            cost_values[batch_idx] = group_cost_values
+            mu[batch_idx] = self.policy.action_mean
+            sigma[batch_idx] = self.policy.action_std
+            entropy[batch_idx] = group_entropy
+            if group_cost_term_values is not None:
+                if cost_term_values is None:
+                    cost_term_values = torch.zeros(
+                        batch_size,
+                        group_cost_term_values.shape[-1],
+                        device=device,
+                        dtype=group_cost_term_values.dtype,
+                    )
+                cost_term_values[batch_idx] = group_cost_term_values
+
+        if cost_term_values is None:
+            cost_term_values = cost_values.clone()
+        return batched_actions, log_prob, values, cost_values, cost_term_values, mu, sigma, entropy
+
+    def _evaluate_actor_batch(
+        self,
+        obs_batch: torch.Tensor,
+        *,
+        actions: torch.Tensor | None = None,
+        actor_is_student: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self._cts_enabled():
+            actor_is_student = self._resolve_actor_is_student_batch(
+                actor_is_student,
+                obs_batch.shape[0],
+                obs_batch.device,
+            )
+            batch_size = obs_batch.shape[0]
+            action_dim = int(actions.shape[-1]) if actions is not None else self._action_dim
+            batched_actions = torch.zeros(
+                batch_size, action_dim, device=obs_batch.device, dtype=obs_batch.dtype
+            )
+            log_prob = torch.zeros(batch_size, device=obs_batch.device, dtype=obs_batch.dtype)
+            mu = torch.zeros(batch_size, action_dim, device=obs_batch.device, dtype=obs_batch.dtype)
+            sigma = torch.zeros(
+                batch_size, action_dim, device=obs_batch.device, dtype=obs_batch.dtype
+            )
+            entropy = torch.zeros(batch_size, device=obs_batch.device, dtype=obs_batch.dtype)
+
+            for actor_mode, batch_idx in (
+                ("teacher", self._role_indices(actor_is_student)[0]),
+                ("student", self._role_indices(actor_is_student)[1]),
+            ):
+                if batch_idx.numel() <= 0:
+                    continue
+                detach_student = actor_mode == "student" and self.detach_student_encoder_during_rl
+                latent = self.policy.actor_mode_latent(
+                    obs_batch[batch_idx],
+                    actor_mode,
+                    detach_student_encoder=detach_student,
+                )
+                velocity_feature = self.policy.actor_mode_velocity_feature(
+                    obs_batch[batch_idx],
+                    actor_mode,
+                )
+                self.policy.update_distribution_with_latent(
+                    obs_batch[batch_idx],
+                    latent,
+                    velocity_feature=velocity_feature,
+                )
+                group_actions = actions[batch_idx] if actions is not None else None
+                if group_actions is None:
+                    group_actions = self.policy.distribution.sample()
+                batched_actions[batch_idx] = group_actions
+                log_prob[batch_idx] = self.policy.get_actions_log_prob(group_actions)
+                mu[batch_idx] = self.policy.action_mean
+                sigma[batch_idx] = self.policy.action_std
+                entropy[batch_idx] = self.policy.entropy
+            return batched_actions, log_prob, mu, sigma, entropy
+
+        self._policy_act(obs_batch, **kwargs)
+        if actions is None:
+            actions = self.policy.distribution.sample()
+        return (
+            actions,
+            self.policy.get_actions_log_prob(actions),
+            self.policy.action_mean,
+            self.policy.action_std,
+            self.policy.entropy,
+        )
+
+    def _evaluate_training_batch(
+        self,
+        obs_batch: torch.Tensor,
+        critic_obs_batch: torch.Tensor,
+        *,
+        actions: torch.Tensor,
+        actor_is_student: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self._cts_enabled():
+            (
+                _current_actions,
+                actions_log_prob_batch,
+                value_batch,
+                _cost_value_batch_agg,
+                pred_cost_terms,
+                mu_batch,
+                sigma_batch,
+                entropy_batch,
+            ) = self._evaluate_cts_policy_batch(
+                obs_batch,
+                critic_obs_batch,
+                actor_is_student,
+                actions=actions,
+            )
+            return (
+                actions_log_prob_batch,
+                value_batch,
+                pred_cost_terms,
+                mu_batch,
+                sigma_batch,
+                entropy_batch,
+            )
+
+        self._policy_act(obs_batch, **kwargs)
+        actions_log_prob_batch = self.policy.get_actions_log_prob(actions)
+        value_batch = self.policy.evaluate(
+            critic_obs_batch,
+            masks=kwargs.get("masks"),
+            hidden_states=kwargs.get("value_hidden_states"),
+        )
+        cost_value_batch = self.policy.evaluate_cost(
+            critic_obs_batch,
+            masks=kwargs.get("masks"),
+            hidden_states=kwargs.get("cost_hidden_states"),
+        )
+        cost_value_batch = self._sanitize_tensor(
+            cost_value_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
+        )
+        if cost_value_batch.ndim == 1:
+            cost_value_batch = cost_value_batch.unsqueeze(-1)
+        elif cost_value_batch.ndim > 2:
+            cost_value_batch = cost_value_batch.view(cost_value_batch.shape[0], -1)
+        return (
+            actions_log_prob_batch,
+            value_batch,
+            cost_value_batch,
+            self.policy.action_mean,
+            self.policy.action_std,
+            self.policy.entropy,
+        )
+
+    @staticmethod
+    def _unpack_extra_batch(extra_batch: list[torch.Tensor]) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
+        cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
+        cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
+        cost_term_rewards_batch = extra_batch[2] if len(extra_batch) > 2 else None
+        cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
+        actor_is_student_batch = extra_batch[4] if len(extra_batch) > 4 else None
+        return (
+            cost_term_returns_batch,
+            cost_term_advantages_batch,
+            cost_term_rewards_batch,
+            cost_term_values_batch,
+            actor_is_student_batch,
+        )
+
     def _policy_act(self, obs_batch: torch.Tensor, **kwargs):
         hist_encoding = kwargs.pop("hist_encoding", self._use_history_encoding())
         try:
@@ -255,29 +668,92 @@ class PPO:
                 raise
             return self.policy.act(obs_batch, **kwargs)
 
-    def _history_reconstruction_loss(
+    def _velocity_estimation_loss(
         self,
         obs_batch: torch.Tensor,
         critic_obs_batch: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         zero = torch.zeros((), device=obs_batch.device)
-        reconstruction_loss_coef = float(getattr(self, "reconstruction_loss_coef", 0.0) or 0.0)
+        velocity_estimation_loss_coef = float(
+            getattr(self, "velocity_estimation_loss_coef", 0.0) or 0.0
+        )
         if (
-            reconstruction_loss_coef <= 0.0
+            velocity_estimation_loss_coef <= 0.0
             or critic_obs_batch is None
             or not self._use_history_encoding()
         ):
             return zero, zero
-        if not hasattr(self.policy, "history_reconstruction"):
+        if not hasattr(self.policy, "velocity_estimation"):
             return zero, zero
-        prediction, target = self.policy.history_reconstruction(obs_batch, critic_obs_batch)
+        prediction, target = self.policy.velocity_estimation(obs_batch, critic_obs_batch)
         if prediction is None or target is None:
             return zero, zero
-        reconstruction_loss = torch.nn.functional.mse_loss(prediction, target.detach())
-        reconstruction_loss = self._sanitize_tensor(
-            reconstruction_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
+        velocity_estimation_loss = torch.nn.functional.mse_loss(prediction, target.detach())
+        velocity_estimation_loss = self._sanitize_tensor(
+            velocity_estimation_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
         )
-        return reconstruction_loss, reconstruction_loss * reconstruction_loss_coef
+        return (
+            velocity_estimation_loss,
+            velocity_estimation_loss * velocity_estimation_loss_coef,
+        )
+
+    def _latent_alignment_epoch(self) -> float:
+        if (
+            not self._cts_enabled()
+            or self.reconstruction_optimizer is None
+            or self.num_reconstruction_epochs <= 0
+        ):
+            return 0.0
+
+        total_loss = 0.0
+        num_updates = 0
+        generator = self.storage.mini_batch_generator(
+            self.num_mini_batches,
+            self.num_reconstruction_epochs,
+        )
+        for (
+            obs_batch,
+            _critic_obs_batch,
+            _actions_batch,
+            _target_values_batch,
+            _advantages_batch,
+            _returns_batch,
+            _cost_values_batch,
+            _cost_returns_batch,
+            _cost_advantages_batch,
+            _old_actions_log_prob_batch,
+            _old_mu_batch,
+            _old_sigma_batch,
+            _hid_states_batch,
+            _masks_batch,
+            *extra_batch,
+        ) in generator:
+            _, _, _, _, actor_is_student_batch = self._unpack_extra_batch(extra_batch)
+            if actor_is_student_batch is None:
+                continue
+            student_mask = self._student_mask(actor_is_student_batch)
+            if not torch.any(student_mask):
+                continue
+            student_obs = obs_batch[student_mask]
+            student_latent, teacher_latent = self.policy.latent_alignment_targets(student_obs)
+            reconstruction_loss = torch.nn.functional.mse_loss(student_latent, teacher_latent)
+            reconstruction_loss = self._sanitize_tensor(
+                reconstruction_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
+            )
+            self.reconstruction_optimizer.zero_grad()
+            reconstruction_loss.backward()
+            if self.is_multi_gpu:
+                self.reduce_parameters()
+            student_params = list(self.policy.student_encoder_parameters())
+            if student_params:
+                nn.utils.clip_grad_norm_(student_params, self.max_grad_norm)
+            self.reconstruction_optimizer.step()
+            total_loss += reconstruction_loss.item()
+            num_updates += 1
+
+        if num_updates <= 0:
+            return 0.0
+        return total_loss / float(num_updates)
 
     def _split_cost_value_heads(
         self, cost_values: torch.Tensor
@@ -492,18 +968,47 @@ class PPO:
     def act(self, obs, critic_obs, hist_encoding=False):
         if self.policy.is_recurrent:
             self.transition.hidden_states = self.policy.get_hidden_states()
-        # compute the actions and values
-        self.transition.actions = self.policy.act(obs, hist_encoding).detach()
-        self.transition.values = self.policy.evaluate(critic_obs).detach()
-        cost_value_pred = self.policy.evaluate_cost(critic_obs).detach()
-        self.transition.cost_values, self.transition.cost_term_values = (
-            self._split_cost_value_heads(cost_value_pred)
-        )
-        self.transition.actions_log_prob = self.policy.get_actions_log_prob(
-            self.transition.actions
-        ).detach()
-        self.transition.action_mean = self.policy.action_mean.detach()
-        self.transition.action_sigma = self.policy.action_std.detach()
+        if self._cts_enabled():
+            actor_is_student = hist_encoding
+            (
+                actions,
+                actions_log_prob,
+                values,
+                cost_values,
+                cost_term_values,
+                action_mean,
+                action_sigma,
+                _entropy,
+            ) = self._evaluate_cts_policy_batch(
+                obs,
+                critic_obs,
+                actor_is_student,
+                actions=None,
+            )
+            self.transition.actions = actions.detach()
+            self.transition.values = values.detach()
+            self.transition.cost_values = cost_values.detach()
+            self.transition.cost_term_values = cost_term_values.detach()
+            self.transition.actions_log_prob = actions_log_prob.unsqueeze(-1).detach()
+            self.transition.action_mean = action_mean.detach()
+            self.transition.action_sigma = action_sigma.detach()
+            self.transition.actor_is_student = self._resolve_actor_is_student_batch(
+                actor_is_student,
+                obs.shape[0],
+                obs.device,
+            ).detach()
+        else:
+            self.transition.actions = self.policy.act(obs, hist_encoding).detach()
+            self.transition.values = self.policy.evaluate(critic_obs).detach()
+            cost_value_pred = self.policy.evaluate_cost(critic_obs).detach()
+            self.transition.cost_values, self.transition.cost_term_values = (
+                self._split_cost_value_heads(cost_value_pred)
+            )
+            self.transition.actions_log_prob = self.policy.get_actions_log_prob(
+                self.transition.actions
+            ).detach()
+            self.transition.action_mean = self.policy.action_mean.detach()
+            self.transition.action_sigma = self.policy.action_std.detach()
         # need to record obs and critic_obs before env.step()
         self.transition.observations = obs
         self.transition.privileged_observations = critic_obs
@@ -582,11 +1087,38 @@ class PPO:
         self.transition.clear()
         self.policy.reset(dones)
 
-    def compute_returns(self, last_critic_obs):
-        # compute value for the last step
-        last_values = self.policy.evaluate(last_critic_obs).detach()
-        last_cost_pred = self.policy.evaluate_cost(last_critic_obs).detach()
-        last_cost_values, last_cost_term_values = self._split_cost_value_heads(last_cost_pred)
+    def compute_returns(self, last_obs, last_critic_obs=None, actor_is_student=None):
+        if self._cts_enabled():
+            if last_critic_obs is None:
+                raise ValueError("CTS returns require both actor and critic observations.")
+            (
+                _actions,
+                _actions_log_prob,
+                last_values,
+                last_cost_values,
+                last_cost_term_values,
+                _mu,
+                _sigma,
+                _entropy,
+            ) = self._evaluate_cts_policy_batch(
+                last_obs,
+                last_critic_obs,
+                actor_is_student,
+                actions=torch.zeros(
+                    last_obs.shape[0],
+                    self._action_dim,
+                    device=last_obs.device,
+                    dtype=last_obs.dtype,
+                ),
+            )
+            last_values = last_values.detach()
+            last_cost_values = last_cost_values.detach()
+            last_cost_term_values = last_cost_term_values.detach()
+        else:
+            critic_obs = last_obs if last_critic_obs is None else last_critic_obs
+            last_values = self.policy.evaluate(critic_obs).detach()
+            last_cost_pred = self.policy.evaluate_cost(critic_obs).detach()
+            last_cost_values, last_cost_term_values = self._split_cost_value_heads(last_cost_pred)
         self.storage.compute_returns(
             last_values,
             self.gamma,
@@ -601,6 +1133,7 @@ class PPO:
         )
 
     def update(self):  # noqa: C901
+        self._update_counter += 1
         mean_value_loss = 0
         mean_cost_value_loss = 0
         mean_surrogate_loss = 0
@@ -611,8 +1144,12 @@ class PPO:
         mean_cost_margin = 0.0
         mean_current_max_violation = 0.0
         mean_kl = 0.0
-        mean_reconstruction_loss = 0.0
+        mean_velocity_estimation_loss = 0.0
+        mean_teacher_latent_reg_loss = 0.0
+        mean_teacher_latent_reg_weighted = 0.0
+        mean_teacher_latent_reg_row_ratio = 0.0
         skipped_updates = 0
+        teacher_latent_reg_coef = self._roa_teacher_reg_coefficient()
 
         if self.policy.is_recurrent:
             generator = self.storage.recurrent_mini_batch_generator(
@@ -640,9 +1177,13 @@ class PPO:
             masks_batch,
             *extra_batch,
         ) in generator:
-            cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
-            cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
-            cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
+            (
+                cost_term_returns_batch,
+                cost_term_advantages_batch,
+                _cost_term_rewards_batch,
+                cost_term_values_batch,
+                actor_is_student_batch,
+            ) = self._unpack_extra_batch(extra_batch)
 
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
@@ -691,30 +1232,25 @@ class PPO:
             batch_cost_margin = constraint_stats["min_cost_margin"]
             current_max_violation = constraint_stats["max_c_hat"]
 
-            self._policy_act(
+            (
+                actions_log_prob_batch,
+                value_batch,
+                cost_value_batch,
+                mu_batch,
+                sigma_batch,
+                entropy_batch,
+            ) = self._evaluate_training_batch(
                 obs_batch,
+                critic_obs_batch,
+                actions=actions_batch,
+                actor_is_student=actor_is_student_batch,
                 masks=masks_batch,
                 hidden_states=hid_states_batch[0],
+                value_hidden_states=hid_states_batch[1],
+                cost_hidden_states=hid_states_batch[2],
             )
-            actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
-            value_batch = self.policy.evaluate(
-                critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
-            )
-            cost_value_batch = self.policy.evaluate_cost(
-                critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[2]
-            )
-            cost_value_batch = self._sanitize_tensor(
-                cost_value_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
-            )
-            if cost_value_batch.ndim == 1:
-                cost_value_batch = cost_value_batch.unsqueeze(-1)
-            elif cost_value_batch.ndim > 2:
-                cost_value_batch = cost_value_batch.view(cost_value_batch.shape[0], -1)
             pred_cost_terms = self._match_cost_heads(cost_value_batch, cost_terms_ret.shape[1])
             old_cost_terms = self._match_cost_heads(cost_terms_val, cost_terms_ret.shape[1])
-            mu_batch = self.policy.action_mean
-            sigma_batch = self.policy.action_std
-            entropy_batch = self.policy.entropy
 
             with torch.inference_mode():
                 kl = self._safe_kl(mu_batch, sigma_batch, old_mu_batch, old_sigma_batch)
@@ -800,8 +1336,15 @@ class PPO:
             cost_value_loss = self._sanitize_tensor(
                 cost_value_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
             )
-            reconstruction_loss, weighted_reconstruction_loss = self._history_reconstruction_loss(
-                obs_batch, critic_obs_batch
+            velocity_estimation_loss, weighted_velocity_estimation_loss = (
+                self._velocity_estimation_loss(obs_batch, critic_obs_batch)
+            )
+            teacher_latent_reg_loss, weighted_teacher_latent_reg_loss, teacher_reg_rows = (
+                self._teacher_latent_regularization_loss(
+                    obs_batch,
+                    actor_is_student_batch,
+                    coefficient=teacher_latent_reg_coef,
+                )
             )
 
             loss = (
@@ -809,7 +1352,8 @@ class PPO:
                 + viol_loss
                 + self.value_loss_coef * value_loss
                 + self.cost_value_loss_coef * cost_value_loss
-                + weighted_reconstruction_loss
+                + weighted_velocity_estimation_loss
+                + weighted_teacher_latent_reg_loss
                 - self.entropy_coef * entropy_batch.mean()
             )
             loss = self._sanitize_tensor(loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6)
@@ -836,8 +1380,14 @@ class PPO:
             mean_cost_margin += batch_cost_margin.item()
             mean_current_max_violation += current_max_violation.item()
             mean_kl += kl_mean.item()
-            mean_reconstruction_loss += reconstruction_loss.item()
+            mean_velocity_estimation_loss += velocity_estimation_loss.item()
+            mean_teacher_latent_reg_loss += teacher_latent_reg_loss.item()
+            mean_teacher_latent_reg_weighted += weighted_teacher_latent_reg_loss.item()
+            mean_teacher_latent_reg_row_ratio += teacher_reg_rows / float(
+                max(obs_batch.shape[0], 1)
+            )
 
+        latent_alignment_loss = self._latent_alignment_epoch()
         num_updates = self.num_learning_epochs * self.num_mini_batches
         mean_value_loss /= num_updates
         mean_cost_value_loss /= num_updates
@@ -849,7 +1399,10 @@ class PPO:
         mean_cost_margin /= num_updates
         mean_current_max_violation /= num_updates
         mean_kl /= num_updates
-        mean_reconstruction_loss /= num_updates
+        mean_velocity_estimation_loss /= num_updates
+        mean_teacher_latent_reg_loss /= num_updates
+        mean_teacher_latent_reg_weighted /= num_updates
+        mean_teacher_latent_reg_row_ratio /= num_updates
         kl_skip_rate = skipped_updates / num_updates
         self.storage.clear()
 
@@ -863,6 +1416,10 @@ class PPO:
             "kl_skip_rate": kl_skip_rate,
             "current_max_violation": mean_current_max_violation,
         }
+        if self._cts_enabled():
+            self.train_metrics["student_group_ratio"] = self.student_group_ratio
+            self.train_metrics["teacher_latent_reg_coef"] = teacher_latent_reg_coef
+            self.train_metrics["teacher_latent_reg_row_ratio"] = mean_teacher_latent_reg_row_ratio
 
         loss_dict = {
             "value_function": mean_value_loss,
@@ -870,7 +1427,10 @@ class PPO:
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
             "viol": mean_viol_loss,
-            "reconstruction": mean_reconstruction_loss,
+            "velocity_estimation": mean_velocity_estimation_loss,
+            "teacher_latent_reg": mean_teacher_latent_reg_loss,
+            "teacher_latent_reg_weighted": mean_teacher_latent_reg_weighted,
+            "latent_alignment": latent_alignment_loss,
         }
         return loss_dict
 
@@ -896,6 +1456,8 @@ class PPO:
         grads = [
             param.grad.view(-1) for param in self.policy.parameters() if param.grad is not None
         ]
+        if not grads:
+            return
         all_grads = torch.cat(grads)
 
         # Average the gradients across all GPUs
@@ -914,3 +1476,28 @@ class PPO:
                 param.grad.data.copy_(all_grads[offset : offset + numel].view_as(param.grad.data))
                 # update the offset for the next parameter
                 offset += numel
+
+    def state_dict(self) -> dict:
+        state = {
+            "learning_rate": float(self.learning_rate),
+        }
+        if self.reconstruction_optimizer is not None:
+            state["reconstruction_optimizer_state_dict"] = (
+                self.reconstruction_optimizer.state_dict()
+            )
+        return state
+
+    def load_state_dict(self, state_dict: dict) -> None:
+        if not isinstance(state_dict, dict):
+            return
+        learning_rate = state_dict.get("learning_rate")
+        if learning_rate is not None:
+            self.learning_rate = float(learning_rate)
+            optimizer = getattr(self, "optimizer", None)
+            if hasattr(optimizer, "param_groups"):
+                for param_group in optimizer.param_groups:
+                    param_group["lr"] = self.learning_rate
+        if self.reconstruction_optimizer is not None:
+            recon_state = state_dict.get("reconstruction_optimizer_state_dict")
+            if recon_state is not None:
+                self.reconstruction_optimizer.load_state_dict(recon_state)

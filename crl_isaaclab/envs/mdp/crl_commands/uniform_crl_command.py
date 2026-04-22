@@ -25,8 +25,6 @@ class UniformCRLCommand(CommandTerm):
         self.is_standing_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
-        self.metrics["commanded_lin_vel_path"] = torch.zeros(self.num_envs, device=self.device)
-        self.metrics["actual_lin_vel_path"] = torch.zeros(self.num_envs, device=self.device)
 
         # Import GalileoDefaults to access terrain-specific command ranges.
         try:
@@ -54,7 +52,6 @@ class UniformCRLCommand(CommandTerm):
         # time for which the command was executed
         max_command_time = self.cfg.resampling_time_range[1]
         max_command_step = max_command_time / self._env.step_dt
-        step_dt = float(self._env.step_dt)
         # logs data
         self.metrics["error_vel_xy"] += (
             torch.norm(self.vel_command_b[:, :2] - self.robot.data.root_lin_vel_b[:, :2], dim=-1)
@@ -63,12 +60,6 @@ class UniformCRLCommand(CommandTerm):
         self.metrics["error_vel_yaw"] += (
             torch.abs(self.vel_command_b[:, 2] - self.robot.data.root_ang_vel_b[:, 2])
             / max_command_step
-        )
-        self.metrics["commanded_lin_vel_path"] += (
-            torch.norm(self.vel_command_b[:, :2], dim=-1) * step_dt
-        )
-        self.metrics["actual_lin_vel_path"] += (
-            torch.norm(self.robot.data.root_lin_vel_b[:, :2], dim=-1) * step_dt
         )
 
     def _resolve_env_id_tensor(self, env_ids: Sequence[int]) -> torch.Tensor:

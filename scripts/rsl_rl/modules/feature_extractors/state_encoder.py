@@ -141,3 +141,38 @@ class TCNHistoryEncoder(nn.Module):
         temporal = projected.reshape(batch_size, self.tsteps, -1).permute(0, 2, 1)
         encoded = self.temporal_backbone(temporal)
         return self.output_head(encoded)
+
+
+class TCNVelocityEstimator(nn.Module):
+    """Dedicated TCN for estimating base linear velocity from proprio history."""
+
+    def __init__(self, activation_fn, input_size, tsteps, output_size, channel_size):
+        super().__init__()
+        self.tsteps = int(tsteps)
+        if self.tsteps <= 0:
+            raise ValueError(f"TCNVelocityEstimator expects a positive history length, got {tsteps}.")
+
+        hidden_channels = max(int(channel_size), 32)
+        self.input_projection = nn.Sequential(
+            nn.Linear(input_size, hidden_channels),
+            copy.deepcopy(activation_fn),
+        )
+        self.temporal_backbone = nn.Sequential(
+            _TemporalResidualBlock(hidden_channels, dilation=1, activation_fn=activation_fn),
+            _TemporalResidualBlock(hidden_channels, dilation=2, activation_fn=activation_fn),
+            _TemporalResidualBlock(hidden_channels, dilation=4, activation_fn=activation_fn),
+        )
+        self.output_head = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(hidden_channels, hidden_channels),
+            copy.deepcopy(activation_fn),
+            nn.Linear(hidden_channels, output_size),
+        )
+
+    def forward(self, obs: torch.Tensor) -> torch.Tensor:
+        batch_size = obs.shape[0]
+        projected = self.input_projection(obs.reshape(batch_size * self.tsteps, -1))
+        temporal = projected.reshape(batch_size, self.tsteps, -1).permute(0, 2, 1)
+        encoded = self.temporal_backbone(temporal)
+        return self.output_head(encoded)

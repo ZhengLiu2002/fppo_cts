@@ -22,6 +22,13 @@ class CRLCommandCfg(CommandTermCfg):
     ang_z_level: float = 0.0
     max_ang_z_level: float = 1.0
     ang_z_level_step: float = 0.1
+    # deployment-facing command limits/scales; keep aligned with the actual
+    # training command ranges to avoid export-time ambiguity.
+    velocity_x_forward_scale: float = 1.0
+    velocity_x_backward_scale: float = 1.0
+    velocity_y_scale: float = 1.0
+    velocity_yaw_scale: float = 1.0
+    max_velocity: tuple[float, float, float] | None = None
     # minimum absolute command magnitudes (optional)
     min_abs_lin_vel_x: float | None = None
     min_abs_lin_vel_y: float | None = None

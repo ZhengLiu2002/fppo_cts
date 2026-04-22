@@ -23,11 +23,11 @@ try:
         build_run_manifest,
         configure_torch_backends,
         create_run_directory_name,
-        dump_pickle,
         ensure_min_rsl_rl_version,
         resolve_checkpoint_path,
         write_run_manifest,
     )
+    from scripts.rsl_rl.exporter import export_inference_cfg
 except ImportError:
     from experiment_manager import (  # type: ignore
         apply_experiment_preset,
@@ -42,11 +42,11 @@ except ImportError:
         build_run_manifest,
         configure_torch_backends,
         create_run_directory_name,
-        dump_pickle,
         ensure_min_rsl_rl_version,
         resolve_checkpoint_path,
         write_run_manifest,
     )
+    from exporter import export_inference_cfg  # type: ignore
 
 REPO_ROOT = bootstrap_repo_paths(__file__)
 
@@ -159,7 +159,11 @@ def main(
     agent_cfg.max_iterations = (
         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
     )
-    algorithm_training_type = get_algorithm_spec(agent_cfg.algorithm.class_name).training_type
+    framework_type = getattr(agent_cfg, "framework_type", None)
+    if framework_type is not None and str(framework_type).strip():
+        algorithm_training_type = str(framework_type).strip().lower()
+    else:
+        algorithm_training_type = get_algorithm_spec(agent_cfg.algorithm.class_name).training_type
 
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -231,11 +235,16 @@ def main(
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
+    export_inference_cfg(
+        env,
+        env_cfg,
+        log_dir,
+        agent_cfg=agent_cfg,
+        actor_critic=runner.alg.policy,
+    )
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
-    dump_pickle(os.path.join(log_dir, "params", "env.pkl"), env_cfg)
-    dump_pickle(os.path.join(log_dir, "params", "agent.pkl"), agent_cfg)
     if experiment_preset is not None:
         write_experiment_metadata(log_dir, experiment_preset, args=args_cli)
     write_run_manifest(

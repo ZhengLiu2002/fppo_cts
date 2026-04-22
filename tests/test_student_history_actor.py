@@ -24,6 +24,7 @@ def _make_student_policy() -> ActorCriticRMA:
         num_priv_explicit=0,
         num_priv_latent=0,
         history_latent_dim=32,
+        history_reconstruction_mode="hidden_privileged",
         num_hist=20,
         encode_scan_for_critic=False,
         critic_num_prop=48,
@@ -39,6 +40,52 @@ def _make_student_policy() -> ActorCriticRMA:
             "num_priv_latent": 0,
             "history_latent_dim": 32,
             "history_reconstruction_dim": 140,
+            "num_hist": 20,
+            "state_history_encoder": {
+                "class_name": "TCNHistoryEncoder",
+                "num_prop": 45,
+                "num_hist": 20,
+                "history_latent_dim": 32,
+                "channel_size": 32,
+            },
+        },
+    )
+
+
+def _make_velocity_estimator_policy() -> ActorCriticRMA:
+    return ActorCriticRMA(
+        num_critic_obs=185,
+        num_actions=12,
+        actor_hidden_dims=[64, 32],
+        critic_hidden_dims=[64, 32],
+        cost_critic_hidden_dims=[64, 32],
+        activation="elu",
+        init_noise_std=1.0,
+        tanh_encoder_output=False,
+        scan_encoder_dims=[],
+        priv_encoder_dims=[],
+        num_prop=45,
+        num_scan=0,
+        num_priv_explicit=0,
+        num_priv_latent=0,
+        history_latent_dim=32,
+        num_hist=20,
+        encode_scan_for_critic=False,
+        critic_num_prop=48,
+        critic_num_scan=132,
+        critic_num_priv_explicit=5,
+        critic_num_priv_latent=0,
+        critic_num_hist=0,
+        actor={
+            "class_name": "Actor",
+            "num_prop": 45,
+            "num_scan": 0,
+            "num_priv_explicit": 0,
+            "num_priv_latent": 0,
+            "history_latent_dim": 32,
+            "history_reconstruction_dim": 0,
+            "velocity_estimation_dim": 3,
+            "velocity_estimator_channel_size": 32,
             "num_hist": 20,
             "state_history_encoder": {
                 "class_name": "TCNHistoryEncoder",
@@ -74,4 +121,19 @@ def test_student_history_reconstruction_targets_hidden_privileged_terms() -> Non
     assert target is not None
     assert prediction.shape == (3, 140)
     assert target.shape == (3, 140)
+    assert torch.allclose(target, expected)
+
+
+def test_student_velocity_estimator_targets_base_linear_velocity() -> None:
+    policy = _make_velocity_estimator_policy()
+    obs = torch.randn(3, 45 + 20 * 45)
+    critic_obs = torch.randn(3, 48 + 132 + 5)
+
+    prediction, target = policy.velocity_estimation(obs, critic_obs)
+
+    assert prediction is not None
+    assert target is not None
+    assert prediction.shape == (3, 3)
+    assert target.shape == (3, 3)
+    expected = torch.cat([critic_obs[:, :2], critic_obs[:, 5:6]], dim=1)
     assert torch.allclose(target, expected)

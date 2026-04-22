@@ -44,6 +44,8 @@ def _make_cts_policy() -> ActorCriticRMA:
             "num_priv_latent": 8,
             "history_latent_dim": 4,
             "history_reconstruction_dim": 0,
+            "velocity_estimation_dim": 3,
+            "velocity_estimator_channel_size": 32,
             "num_hist": 20,
             "normalize_latent": True,
             "state_history_encoder": {
@@ -97,6 +99,10 @@ def test_cts_algorithm_runs_joint_rl_and_reconstruction_update() -> None:
         learning_rate=3.0e-4,
         reconstruction_learning_rate=1.0e-3,
         num_reconstruction_epochs=1,
+        velocity_estimation_loss_coef=0.1,
+        roa_teacher_reg_coef_end=0.05,
+        roa_teacher_reg_warmup_updates=0,
+        roa_teacher_reg_ramp_updates=1,
         student_group_ratio=0.5,
         constraint_limits=[1.0],
     )
@@ -118,6 +124,16 @@ def test_cts_algorithm_runs_joint_rl_and_reconstruction_update() -> None:
     algorithm.compute_returns(obs, critic_obs, actor_is_student)
     loss_dict = algorithm.update()
 
-    assert set(loss_dict).issuperset({"surrogate", "value_function", "reconstruction"})
+    assert set(loss_dict).issuperset(
+        {
+            "surrogate",
+            "value_function",
+            "velocity_estimation",
+            "teacher_latent_reg",
+            "teacher_latent_reg_weighted",
+        }
+    )
     for value in loss_dict.values():
         assert math.isfinite(float(value))
+    assert math.isfinite(float(algorithm.train_metrics["teacher_latent_reg_coef"]))
+    assert algorithm.train_metrics["teacher_latent_reg_coef"] > 0.0

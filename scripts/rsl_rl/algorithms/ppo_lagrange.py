@@ -48,7 +48,17 @@ class PPOLagrange(PPO):
         k_decay: float = 1.0,
         k_min: float = 0.0,
         k_violation_threshold: float = 0.02,
-        reconstruction_loss_coef: float = 0.0,
+        velocity_estimation_loss_coef: float = 0.0,
+        student_group_ratio: float = 0.25,
+        reconstruction_learning_rate: float | None = None,
+        num_reconstruction_epochs: int = 2,
+        detach_student_encoder_during_rl: bool = True,
+        roa_teacher_reg_coef_start: float = 0.0,
+        roa_teacher_reg_coef_end: float = 0.0,
+        roa_teacher_reg_warmup_updates: int = 5000,
+        roa_teacher_reg_ramp_updates: int = 5000,
+        roa_teacher_reg_scope: str = "teacher",
+        roa_teacher_reg_loss: str = "mse",
         constraint_limits: list[float] | tuple[float, ...] | None = None,
         multi_gpu_cfg: dict | None = None,
     ):
@@ -80,7 +90,17 @@ class PPOLagrange(PPO):
             k_decay=k_decay,
             k_min=k_min,
             k_violation_threshold=k_violation_threshold,
-            reconstruction_loss_coef=reconstruction_loss_coef,
+            velocity_estimation_loss_coef=velocity_estimation_loss_coef,
+            student_group_ratio=student_group_ratio,
+            reconstruction_learning_rate=reconstruction_learning_rate,
+            num_reconstruction_epochs=num_reconstruction_epochs,
+            detach_student_encoder_during_rl=detach_student_encoder_during_rl,
+            roa_teacher_reg_coef_start=roa_teacher_reg_coef_start,
+            roa_teacher_reg_coef_end=roa_teacher_reg_coef_end,
+            roa_teacher_reg_warmup_updates=roa_teacher_reg_warmup_updates,
+            roa_teacher_reg_ramp_updates=roa_teacher_reg_ramp_updates,
+            roa_teacher_reg_scope=roa_teacher_reg_scope,
+            roa_teacher_reg_loss=roa_teacher_reg_loss,
             constraint_limits=constraint_limits,
             multi_gpu_cfg=multi_gpu_cfg,
         )
@@ -186,6 +206,7 @@ class PPOLagrange(PPO):
         )
 
     def state_dict(self) -> dict:
+        state = super().state_dict()
         lagrange_state = None
         if self._lagrange_multiplier is not None:
             lagrange_state = {
@@ -196,14 +217,18 @@ class PPOLagrange(PPO):
                     else None
                 ),
             }
-        return {
-            "lagrange": lagrange_state,
-            "learning_rate": self.learning_rate,
-        }
+        state.update(
+            {
+                "lagrange": lagrange_state,
+                "learning_rate": self.learning_rate,
+            }
+        )
+        return state
 
     def load_state_dict(self, state_dict: dict) -> None:
         if not state_dict:
             return
+        super().load_state_dict(state_dict)
         lagrange_state = state_dict.get("lagrange")
         if lagrange_state is not None:
             multiplier = lagrange_state.get("lagrangian_multiplier")
@@ -265,9 +290,13 @@ class PPOLagrange(PPO):
             masks_batch,
             *extra_batch,
         ) in generator:
-            cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
-            cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
-            cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
+            (
+                cost_term_returns_batch,
+                cost_term_advantages_batch,
+                _cost_term_rewards_batch,
+                cost_term_values_batch,
+                actor_is_student_batch,
+            ) = self._unpack_extra_batch(extra_batch)
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
                     advantages_batch = (advantages_batch - advantages_batch.mean()) / (
@@ -309,30 +338,25 @@ class PPOLagrange(PPO):
             batch_cost_margin = constraint_stats["min_cost_margin"]
             current_max_violation = constraint_stats["max_c_hat"]
 
-            self._policy_act(
+            (
+                actions_log_prob_batch,
+                value_batch,
+                cost_value_batch,
+                mu_batch,
+                sigma_batch,
+                entropy_batch,
+            ) = self._evaluate_training_batch(
                 obs_batch,
+                critic_obs_batch,
+                actions=actions_batch,
+                actor_is_student=actor_is_student_batch,
                 masks=masks_batch,
                 hidden_states=hid_states_batch[0],
+                value_hidden_states=hid_states_batch[1],
+                cost_hidden_states=hid_states_batch[2],
             )
-            actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
-            value_batch = self.policy.evaluate(
-                critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[1]
-            )
-            cost_value_batch = self.policy.evaluate_cost(
-                critic_obs_batch, masks=masks_batch, hidden_states=hid_states_batch[2]
-            )
-            cost_value_batch = self._sanitize_tensor(
-                cost_value_batch, nan=0.0, posinf=1.0e4, neginf=-1.0e4, clamp=1.0e4
-            )
-            if cost_value_batch.ndim == 1:
-                cost_value_batch = cost_value_batch.unsqueeze(-1)
-            elif cost_value_batch.ndim > 2:
-                cost_value_batch = cost_value_batch.view(cost_value_batch.shape[0], -1)
             pred_cost_terms = self._match_cost_heads(cost_value_batch, cost_terms_ret.shape[1])
             old_cost_terms = self._match_cost_heads(cost_terms_val, cost_terms_ret.shape[1])
-            mu_batch = self.policy.action_mean
-            sigma_batch = self.policy.action_std
-            entropy_batch = self.policy.entropy
 
             with torch.inference_mode():
                 kl = self._safe_kl(mu_batch, sigma_batch, old_mu_batch, old_sigma_batch)
@@ -419,7 +443,7 @@ class PPOLagrange(PPO):
             cost_value_loss = self._sanitize_tensor(
                 cost_value_loss, nan=0.0, posinf=1.0e6, neginf=0.0, clamp=1.0e6
             )
-            reconstruction_loss, weighted_reconstruction_loss = self._history_reconstruction_loss(
+            reconstruction_loss, weighted_reconstruction_loss = self._velocity_estimation_loss(
                 obs_batch, critic_obs_batch
             )
 
@@ -455,6 +479,7 @@ class PPOLagrange(PPO):
             mean_kl += kl_mean.item()
             mean_reconstruction_loss += reconstruction_loss.item()
 
+        latent_alignment_loss = self._latent_alignment_epoch()
         mean_value_loss /= num_updates
         mean_cost_value_loss /= num_updates
         mean_surrogate_loss /= num_updates
@@ -481,6 +506,8 @@ class PPOLagrange(PPO):
             "lagrange_multiplier_max": float(self.lagrange_multiplier.max().item()),
             "current_max_violation": mean_current_max_violation,
         }
+        if self._cts_enabled():
+            self.train_metrics["student_group_ratio"] = self.student_group_ratio
 
         return {
             "value_function": mean_value_loss,
@@ -488,5 +515,6 @@ class PPOLagrange(PPO):
             "surrogate": mean_surrogate_loss,
             "entropy": mean_entropy,
             "viol": mean_viol_loss,
-            "reconstruction": mean_reconstruction_loss,
+            "velocity_estimation": mean_reconstruction_loss,
+            "latent_alignment": latent_alignment_loss,
         }

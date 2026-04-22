@@ -74,6 +74,11 @@ class CommandsCfg:
         ang_z_level=GalileoDefaults.command.ang_z_level,
         max_ang_z_level=GalileoDefaults.command.max_ang_z_level,
         ang_z_level_step=GalileoDefaults.command.ang_z_level_step,
+        velocity_x_forward_scale=GalileoDefaults.command.velocity_x_forward_scale,
+        velocity_x_backward_scale=GalileoDefaults.command.velocity_x_backward_scale,
+        velocity_y_scale=GalileoDefaults.command.velocity_y_scale,
+        velocity_yaw_scale=GalileoDefaults.command.velocity_yaw_scale,
+        max_velocity=GalileoDefaults.command.max_velocity,
         min_abs_lin_vel_x=GalileoDefaults.command.min_abs_lin_vel_x,
         min_abs_lin_vel_y=GalileoDefaults.command.min_abs_lin_vel_y,
         rel_standing_envs=GalileoDefaults.command.default.standing_command_prob,
@@ -271,18 +276,26 @@ class CTSRewardsCfg:
             "min_command_speed": None,
         },
     )
+    # P3: yaw tracking is the bottleneck residual (error_vel_yaw ~0.4 vs xy
+    # ~0.18 at 24K iters). Bumping the angular tracking weight from 0.5 to
+    # 0.75 increases gradient signal for the lagging axis without dwarfing
+    # the linear tracking term.
     track_ang_vel_z_exp = RewTerm(
         func=rewards.track_ang_vel_z_exp,
-        weight=0.5,
+        weight=0.75,
         params={
             "command_name": "base_velocity",
             "std": 0.25,
             "min_command_speed": None,
         },
     )
+    # P1-1 soft companion: when the prob_joint_torque hard-constraint limit
+    # is relaxed (0.04 -> 0.06), the l2 torque penalty is doubled (-5e-7 ->
+    # -1e-6) so the policy still has a continuous incentive to keep torques
+    # low rather than only avoiding the new cost ceiling.
     joint_torques_l2 = RewTerm(
         func=rewards.joint_torque_l2,
-        weight=-5.0e-7,
+        weight=-1.0e-6,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
@@ -290,9 +303,13 @@ class CTSRewardsCfg:
         func=rewards.joint_acc_l2,
         weight=-6.0e-9,
     )
+    # P3: dof_error_l2 was overpowering the tracking signal at high command
+    # speeds, locking the policy into a default-pose bias. Reducing the
+    # weight from -0.5 to -0.3 frees the policy to deviate from neutral when
+    # tracking demands it, while keeping standing/low-speed regularization.
     dof_error_l2 = RewTerm(
         func=rewards.dof_error_l2,
-        weight=-0.5,
+        weight=-0.3,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "command_name": "base_velocity",
@@ -325,12 +342,12 @@ class CTSRewardsCfg:
         weight=-2.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "flat_terrain_name": "crl_flat",
+            "flat_terrain_name": "crl_flat",                                                                                                                                                                
         },
     )
     feet_air_time = RewTerm(
         func=rewards.feet_air_time,
-        weight=3.0,
+        weight=1.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",

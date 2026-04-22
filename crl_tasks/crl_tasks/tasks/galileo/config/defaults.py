@@ -51,17 +51,17 @@ def _build_galileo_robot_cfg() -> ArticulationCfg:
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.45),
             joint_pos={
-                "FL_hip_joint": -0.05,
-                "FL_thigh_joint": 0.75,
+                "FL_hip_joint": 0.0,
+                "FL_thigh_joint": 0.8,
                 "FL_calf_joint": -1.5,
-                "FR_hip_joint": 0.05,
-                "FR_thigh_joint": 0.75,
+                "FR_hip_joint": 0.0,
+                "FR_thigh_joint": 0.8,
                 "FR_calf_joint": -1.5,
-                "RL_hip_joint": -0.05,
-                "RL_thigh_joint": 0.75,
+                "RL_hip_joint": 0.0,
+                "RL_thigh_joint": 0.8,
                 "RL_calf_joint": -1.5,
-                "RR_hip_joint": 0.05,
-                "RR_thigh_joint": 0.75,
+                "RR_hip_joint": 0.0,
+                "RR_thigh_joint": 0.8,
                 "RR_calf_joint": -1.5,
             },
         ),
@@ -123,6 +123,10 @@ class GalileoBaseSceneCfg(InteractiveSceneCfg):
 
     def __post_init__(self):
         self.robot.spawn.articulation_props.enabled_self_collisions = True
+        # The upstream Galileo asset ships with a catch-all implicit actuator.
+        # CTS owns the leg actuator settings here, so clear inherited groups first
+        # to avoid double-configuring the same 12 joints (24 counted joints warning).
+        self.robot.actuators = {}
         self.robot.actuators["base_legs"] = CRLDCMotorCfg(
             joint_names_expr=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"],
             effort_limit={
@@ -218,7 +222,7 @@ class GalileoDefaults:
     class general:
         decimation = 8
         episode_length_s = 20.0
-        render_interval = 4
+        render_interval = 8
 
     class curriculum:
         # Command curriculum uses a gated progression policy:
@@ -249,43 +253,19 @@ class GalileoDefaults:
     class obs:
         """CTS-only actor/critic observation layout."""
 
-        # 通用环境/动作维度
-        num_envs = 4096
-        num_actions = 12
-
         class cts:
             actor_num_prop = 45
             actor_num_scan = 0
             actor_num_priv_explicit = 0
-            actor_num_priv_latent = 185
+            actor_num_priv_latent = 235
             actor_history_latent_dim = 32
-            actor_num_hist = 15
-            num_actor_obs = (
-                actor_num_prop
-                + actor_num_scan
-                + actor_num_priv_explicit
-                + actor_num_priv_latent
-                + actor_num_prop * actor_num_hist
-            )
+            actor_num_hist = 10
 
             critic_num_prop = 48
-            critic_num_scan = 132
+            critic_num_scan = 182
             critic_num_priv_explicit = 5
             critic_num_priv_latent = 0
             critic_num_hist = 0
-            num_critic_obs = (
-                critic_num_prop
-                + critic_num_scan
-                + critic_num_priv_explicit
-                + critic_num_priv_latent
-                + critic_num_prop * critic_num_hist
-            )
-
-        # 观测历史相关（如需）
-        obs_history_length = 5
-        action_history_length = 3
-        clip_actions = 100.0
-        clip_obs = 100.0
 
     class terrain:
         size = (8.0, 8.0)
@@ -296,7 +276,6 @@ class GalileoDefaults:
         vertical_scale = 0.005
         slope_threshold = 0.75
         curriculum = True
-        random_difficulty = False
         difficulty_range = (0.0, 1.0)
         # Flat-only pretraining mode keeps the CTS task on plane terrain until
         # FPPO stabilizes, while preserving the rough-terrain generator for later.
@@ -304,6 +283,11 @@ class GalileoDefaults:
         flat_subterrain_name = "crl_flat"
 
     class command:
+        velocity_x_forward_scale: float = 1.0
+        velocity_x_backward_scale: float = 0.8
+        velocity_y_scale: float = 0.4
+        velocity_yaw_scale: float = 1.0
+        max_velocity: tuple[float, float, float] = (1.0, 0.4, 1.5)
         lin_x_level: float = 0.3
         max_lin_x_level: float = 1.0
         ang_z_level: float = 0.3
@@ -316,84 +300,84 @@ class GalileoDefaults:
         # 默认配置（用于 CommandsCfg 的初始化，不在地形特定配置中）
         class default:
             standing_command_prob: float = 0.10
-            lin_vel_x = (-0.5, 1.0)
-            lin_vel_y = (-0.5, 0.5)
-            ang_vel_z = (-0.5, 0.5)
+            lin_vel_x = (-0.8, 1.0)
+            lin_vel_y = (-0.4, 0.4)
+            ang_vel_z = (-1.5, 1.5)
             start_curriculum_lin_x = (-0.15, 0.3)
             start_curriculum_ang_z = (-0.08, 0.08)
-            max_curriculum_lin_x = (-0.5, 1.0)
-            max_curriculum_ang_z = (-0.5, 0.5)
+            max_curriculum_lin_x = (-0.8, 1.0)
+            max_curriculum_ang_z = (-1.5, 1.5)
 
         ranges = {
             "pyramid_stairs": dict(
-                lin_vel_x=(-0.5, 1.0),
-                lin_vel_y=(-0.5, 0.5),
-                ang_vel_z=(-0.5, 0.5),
+                lin_vel_x=(-0.8, 1.0),
+                lin_vel_y=(-0.4, 0.4),
+                ang_vel_z=(-1.5, 1.5),
                 standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.5, 1.0),
-                max_curriculum_ang_z=(-0.5, 0.5),
+                max_curriculum_lin_x=(-0.8, 1.0),
+                max_curriculum_ang_z=(-1.5, 1.5),
             ),
             "pyramid_stairs_inv": dict(
-                lin_vel_x=(-0.5, 1.0),
-                lin_vel_y=(-0.5, 0.5),
-                ang_vel_z=(-0.5, 0.5),
+                lin_vel_x=(-0.8, 1.0),
+                lin_vel_y=(-0.4, 0.4),
+                ang_vel_z=(-1.5, 1.5),
                 standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.12, 0.25),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.5, 1.0),
-                max_curriculum_ang_z=(-0.5, 0.5),
+                max_curriculum_lin_x=(-0.8, 1.0),
+                max_curriculum_ang_z=(-1.5, 1.5),
             ),
             "boxes": dict(
-                lin_vel_x=(-0.5, 1.0),
-                lin_vel_y=(-0.5, 0.5),
-                ang_vel_z=(-0.5, 0.5),
+                lin_vel_x=(-0.8, 1.0),
+                lin_vel_y=(-0.4, 0.4),
+                ang_vel_z=(-1.5, 1.5),
                 standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.5, 1.0),
-                max_curriculum_ang_z=(-0.5, 0.5),
+                max_curriculum_lin_x=(-0.8, 1.0),
+                max_curriculum_ang_z=(-1.5, 1.5),
             ),
             "random_rough": dict(
-                lin_vel_x=(-0.5, 1.0),
-                lin_vel_y=(-0.5, 0.5),
-                ang_vel_z=(-0.5, 0.5),
+                lin_vel_x=(-0.8, 1.0),
+                lin_vel_y=(-0.4, 0.4),
+                ang_vel_z=(-1.5, 1.5),
                 standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.5, 1.0),
-                max_curriculum_ang_z=(-0.5, 0.5),
+                max_curriculum_lin_x=(-0.8, 1.0),
+                max_curriculum_ang_z=(-1.5, 1.5),
             ),
             "hf_pyramid_slope": dict(
-                lin_vel_x=(-0.5, 1.0),
-                lin_vel_y=(-0.5, 0.5),
-                ang_vel_z=(-0.5, 0.5),
+                lin_vel_x=(-0.8, 1.0),
+                lin_vel_y=(-0.4, 0.4),
+                ang_vel_z=(-1.5, 1.5),
                 standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.5, 1.0),
-                max_curriculum_ang_z=(-0.5, 0.5),
+                max_curriculum_lin_x=(-0.8, 1.0),
+                max_curriculum_ang_z=(-1.5, 1.5),
             ),
             "hf_pyramid_slope_inv": dict(
-                lin_vel_x=(-0.5, 1.0),
-                lin_vel_y=(-0.5, 0.5),
-                ang_vel_z=(-0.5, 0.5),
+                lin_vel_x=(-0.8, 1.0),
+                lin_vel_y=(-0.4, 0.4),
+                ang_vel_z=(-1.5, 1.5),
                 standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.15, 0.3),
                 start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.5, 1.0),
-                max_curriculum_ang_z=(-0.5, 0.5),
+                max_curriculum_lin_x=(-0.8, 1.0),
+                max_curriculum_ang_z=(-1.5, 1.5),
             ),
             "crl_flat": dict(
-                lin_vel_x=(-0.5, 1.5),
-                lin_vel_y=(-1.0, 1.0),
-                ang_vel_z=(-0.5, 0.5),
+                lin_vel_x=(-0.8, 1.0),
+                lin_vel_y=(-0.4, 0.4),
+                ang_vel_z=(-1.5, 1.5),
                 standing_command_prob=0.10,
                 start_curriculum_lin_x=(-0.2, 0.5),
                 start_curriculum_ang_z=(-0.12, 0.12),
-                max_curriculum_lin_x=(-0.5, 1.5),
-                max_curriculum_ang_z=(-0.5, 0.5),
+                max_curriculum_lin_x=(-0.8, 1.0),
+                max_curriculum_ang_z=(-1.5, 1.5),
             ),
         }
 
@@ -481,26 +465,33 @@ class GalileoDefaults:
     class algorithm:
         """CTS benchmark algorithm profiles.
 
-        The CTS task is the only training scaffold in the repo. Algorithm
-        selection changes the constrained-RL update rule while keeping the same
-        blind omni-directional locomotion task, observation layout, reward, and
+        The CTS task is the only training scaffold in the repo. CTS itself is
+        the shared teacher-student training framework; algorithm selection only
+        swaps the optimizer/projection rule while keeping the same blind
+        omni-directional locomotion task, observation layout, reward, and
         constraint definitions.
         """
 
-        # 与 CLI `--algo` 对齐：{"cts","fppo","np3o","ppo","ppo_lagrange","cpo","pcpo","focops"}
+        # 与 CLI `--algo` 对齐：{"ppo","fppo","np3o","ppo_lagrange","cpo","pcpo","focops"}
+        # Legacy `cts` remains available as an alias for PPO-on-CTS.
         name: str = "fppo"
 
-        # CLI/代码中的 class_name 映射（最终写入 agent_cfg.algorithm.class_name）
-        class_name_map = {
-            "cts": "CTS",
-            "fppo": "FPPO",
-            "np3o": "NP3O",
-            "ppo": "PPO",
-            "ppo_lagrange": "PPOLagrange",
-            "cpo": "CPO",
-            "pcpo": "PCPO",
-            "focops": "FOCOPS",
-        }
+        # Shared CTS framework controls kept identical across optimizers for
+        # fair algorithm comparison. Only optimizer-specific update knobs
+        # should live in ``per_algo`` below.
+        shared_cts_framework = dict(
+            student_group_ratio=0.25,
+            reconstruction_learning_rate=3.0e-4,
+            num_reconstruction_epochs=1,
+            detach_student_encoder_during_rl=True,
+            velocity_estimation_loss_coef=0.05,
+            roa_teacher_reg_coef_start=0.0,
+            roa_teacher_reg_coef_end=0.05,
+            roa_teacher_reg_warmup_updates=5000,
+            roa_teacher_reg_ramp_updates=5000,
+            roa_teacher_reg_scope="teacher",
+            roa_teacher_reg_loss="mse",
+        )
 
         # 共享默认值（两边都通用）
         base = dict(
@@ -524,8 +515,16 @@ class GalileoDefaults:
             k_value=0.2,
             k_growth=1.0003,
             k_max=1.0,
+            # CTS framework shared defaults
+            # P2-3: trim student reconstruction training to one cheaper pass per
+            # update so the velocity estimator no longer overfits each rollout.
+            **shared_cts_framework,
         )
 
+        # P1-1: relax prob_joint_torque from 0.04 -> 0.06 since it is the only
+        # binding constraint and was being micro-violated at steady state. The
+        # joint_torques_l2 reward weight in mdp_cfg is bumped in tandem so the
+        # policy still has a soft incentive to stay torque-efficient.
         shared_constraint_limits = dict(
             base_contact_force=0.02,
             contact_velocity=0.025,
@@ -537,24 +536,22 @@ class GalileoDefaults:
             prob_com_height=0.18,
             prob_gait_pattern=0.05,
             prob_joint_pos=0.15,
-            prob_joint_torque=0.04,
+            prob_joint_torque=0.06,
             prob_joint_vel=0.08,
             symmetric=0.10,
         )
-        constraint_adapter_base = dict()
-        constraint_adapter_per_algo = {
-            "fppo": dict(
-                enabled=False,
-                ema_beta=0.9,
-                min_scale=1e-3,
-                max_scale=10.0,
-                clip=5.0,
-                huber_delta=0.2,
-                agg_tau=0.5,
-                scale_by_gamma=True,
-                cost_scale=None,
-            ),
-        }
+        constraint_adapter_base = dict(
+            enabled=False,
+            ema_beta=0.9,
+            min_scale=1e-3,
+            max_scale=10.0,
+            clip=5.0,
+            huber_delta=0.2,
+            agg_tau=0.5,
+            scale_by_gamma=True,
+            cost_scale=None,
+        )
+        constraint_adapter_per_algo = {}
         # 各算法差异化字段（只写需要的即可）
         per_algo = {
             "cts": dict(
@@ -566,15 +563,11 @@ class GalileoDefaults:
                 num_learning_epochs=5,
                 num_mini_batches=4,
                 learning_rate=3.0e-4,
-                reconstruction_learning_rate=1.0e-3,
-                num_reconstruction_epochs=2,
                 schedule="adaptive",
                 gamma=0.99,
                 lam=0.95,
                 max_grad_norm=1.0,
                 entropy_coef=0.01,
-                student_group_ratio=0.25,
-                detach_student_encoder_during_rl=True,
                 cost_limit=1.3,
                 cost_viol_loss_coef=0.1,
                 k_value=0.2,
@@ -587,11 +580,23 @@ class GalileoDefaults:
                 },
             ),
             # FPPO predictor-corrector with robust margins and diagonal-Fisher projection.
+            # Tuning notes (Galileo CTS, 24K-iter run analysis):
+            # - P0-1: switch projection gradient base to normalized cost
+            #   advantage to suppress per-rollout magnitude spikes.
+            # - P0-3: align predictor KL target with desired_kl so adaptive
+            #   LR no longer collapses to lr_min within the first few k iters.
+            # - P0-4: lift fisher_min_diag two orders of magnitude to bound
+            #   the 1/Fisher amplification of weakly-explored params.
+            # - P1-2 (method B): only invest constraint gradient/Fisher cost
+            #   on constraints whose (cost + sigma) crosses 50% of their limit.
+            # - P2-1: stretch uncertainty refresh and halve shard count.
+            # - P2-2: clip sigma_a so margin spikes do not eat budget headroom.
+            # - P3: widen trust region by 20% for faster reward improvement.
             "fppo": dict(
                 cost_value_loss_coef=1.0,
                 num_learning_epochs=4,
                 learning_rate=2.0e-4,
-                desired_kl=0.010,
+                desired_kl=0.012,
                 cost_gamma=None,
                 cost_lam=None,
                 backtrack_coeff=0.5,
@@ -599,27 +604,29 @@ class GalileoDefaults:
                 projection_eps=1e-6,
                 fisher_damping=1e-3,
                 fisher_num_chunks=4,
-                fisher_min_diag=1e-6,
+                fisher_min_diag=1e-4,
                 cost_confidence=1.0,
                 gradient_confidence=0.2,
                 curvature_proxy=0.0,
                 gradient_uncertainty_mode="shards",
-                gradient_uncertainty_shards=4,
-                uncertainty_update_interval=4,
+                gradient_uncertainty_shards=2,
+                uncertainty_update_interval=8,
                 uncertainty_ema_decay=0.9,
-                predictor_kl_target=0.0075,
-                predictor_kl_hard_limit=0.02,
+                predictor_kl_target=0.010,
+                predictor_kl_hard_limit=0.025,
                 predictor_adaptive_lr=True,
                 predictor_lr_min=5.0e-5,
                 predictor_lr_max=3.0e-4,
                 qp_max_iters=64,
                 qp_tol=1e-6,
                 exact_qp_max_constraints=8,
-                max_sigma_a=2.0,
+                max_sigma_a=0.5,
                 max_margin_abs=None,
                 max_margin_ratio=0.5,
                 projection_radius_cap=1.0,
                 projection_radius_mode="kl",
+                active_constraint_threshold=0.5,
+                constraint_advantage_key="cost_terms_adv_norm",
                 constraint_limits=dict(shared_constraint_limits),
             ),
             # NP3O

@@ -6,6 +6,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from scripts.rsl_rl.algorithms.contracts import (
+    CTSRuntimeContract,
+    resolve_cts_runtime_contract,
+)
 from scripts.rsl_rl.algorithms.fppo import FPPO
 from scripts.rsl_rl.algorithms.omnisafe_utils import (
     Lagrange,
@@ -14,7 +18,11 @@ from scripts.rsl_rl.algorithms.omnisafe_utils import (
     get_flat_params_from,
     set_param_values_to_parameters,
 )
-from scripts.rsl_rl.algorithms.registry import get_algorithm_spec
+from scripts.rsl_rl.algorithms.registry import (
+    get_algorithm_class,
+    get_algorithm_spec,
+    list_algorithm_names,
+)
 
 
 def test_conjugate_gradients_matches_linear_solve() -> None:
@@ -67,6 +75,26 @@ def test_registry_accepts_omnisafe_style_aliases() -> None:
     assert get_algorithm_spec("ppolag").class_name == "PPOLagrange"
     assert get_algorithm_spec("ppo_lag").class_name == "PPOLagrange"
     assert get_algorithm_spec("focops").class_name == "FOCOPS"
+
+
+@pytest.mark.parametrize("algo_name", list_algorithm_names())
+def test_registered_algorithms_resolve_cts_runtime_contract(algo_name: str) -> None:
+    contract = resolve_cts_runtime_contract(get_algorithm_class(algo_name))
+
+    assert isinstance(contract, CTSRuntimeContract)
+
+
+def test_algorithm_registry_declares_cts_config_family() -> None:
+    assert get_algorithm_spec("fppo").config_family == "fppo"
+    assert get_algorithm_spec("cts").config_family == "cts"
+
+    for algo_name in ("ppo", "np3o", "ppo_lagrange", "cpo", "pcpo", "focops"):
+        assert get_algorithm_spec(algo_name).config_family == "ppo"
+
+
+def test_fppo_declares_constraint_name_runtime_hook() -> None:
+    assert resolve_cts_runtime_contract(get_algorithm_class("ppo")).inject_constraint_names is False
+    assert resolve_cts_runtime_contract(get_algorithm_class("fppo")).inject_constraint_names is True
 
 
 def test_fppo_constraint_cost_stats_use_env_axis() -> None:
@@ -371,8 +399,14 @@ def test_fppo_predictor_hard_limit_stops_and_adapts_lr() -> None:
     fppo._sanitize_tensor = lambda tensor, **_kwargs: tensor
     fppo._all_reduce_mean = lambda tensor: tensor
     fppo._safe_ratio = lambda new, old: torch.exp(new - old)
-    fppo._history_reconstruction_loss = (
-        lambda *_args, **_kwargs: (torch.tensor(0.0), torch.tensor(0.0))
+    fppo._velocity_estimation_loss = lambda *_args, **_kwargs: (
+        torch.tensor(0.0),
+        torch.tensor(0.0),
+    )
+    fppo._teacher_latent_regularization_loss = lambda *_args, **_kwargs: (
+        torch.tensor(0.2),
+        torch.tensor(0.1),
+        1,
     )
     fppo._policy_act = lambda obs_batch, **kwargs: fppo.policy.act(obs_batch, **kwargs)
     fppo._set_predictor_learning_rate = FPPO._set_predictor_learning_rate.__get__(fppo, FPPO)
@@ -385,4 +419,6 @@ def test_fppo_predictor_hard_limit_stops_and_adapts_lr() -> None:
     assert metrics["updates"] == 1.0
     assert abs(metrics["update_ratio"] - 0.25) < 1.0e-12
     assert abs(metrics["stop_rate"] - 0.75) < 1.0e-12
+    assert abs(metrics["mean_teacher_latent_reg"] - 0.2) < 1.0e-12
+    assert abs(metrics["mean_teacher_latent_reg_weighted"] - 0.1) < 1.0e-12
     assert fppo.predictor_lr < 1.0e-3

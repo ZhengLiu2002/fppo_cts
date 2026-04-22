@@ -12,11 +12,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
+from .contracts import CTSRuntimeContract
 from .ppo import PPO
 
 
 class FPPO(PPO):
     """First-Order Projected PPO with robust margins and geometry-aware correction."""
+
+    cts_runtime_contract = CTSRuntimeContract(inject_constraint_names=True)
 
     def __init__(
         self,
@@ -58,13 +61,25 @@ class FPPO(PPO):
         max_margin_ratio: float | None = 0.5,
         projection_radius_cap: float | None = 1.0,
         projection_radius_mode: str = "kl",
+        active_constraint_threshold: float = 0.0,
+        constraint_advantage_key: str = "cost_terms_adv_norm",
         max_grad_norm=1.0,
         use_clipped_value_loss=True,
         schedule="fixed",
         desired_kl=0.01,
         device="cpu",
         normalize_advantage_per_mini_batch=False,
-        reconstruction_loss_coef: float = 0.0,
+        velocity_estimation_loss_coef: float = 0.0,
+        student_group_ratio: float = 0.25,
+        reconstruction_learning_rate: float | None = None,
+        num_reconstruction_epochs: int = 2,
+        detach_student_encoder_during_rl: bool = True,
+        roa_teacher_reg_coef_start: float = 0.0,
+        roa_teacher_reg_coef_end: float = 0.0,
+        roa_teacher_reg_warmup_updates: int = 5000,
+        roa_teacher_reg_ramp_updates: int = 5000,
+        roa_teacher_reg_scope: str = "teacher",
+        roa_teacher_reg_loss: str = "mse",
         constraint_limits: list[float] | tuple[float, ...] | None = None,
         constraint_names: list[str] | tuple[str, ...] | None = None,
         multi_gpu_cfg: dict | None = None,
@@ -90,7 +105,17 @@ class FPPO(PPO):
             normalize_advantage_per_mini_batch=normalize_advantage_per_mini_batch,
             normalize_cost_advantage=False,
             constraint_limits=constraint_limits,
-            reconstruction_loss_coef=reconstruction_loss_coef,
+            velocity_estimation_loss_coef=velocity_estimation_loss_coef,
+            student_group_ratio=student_group_ratio,
+            reconstruction_learning_rate=reconstruction_learning_rate,
+            num_reconstruction_epochs=num_reconstruction_epochs,
+            detach_student_encoder_during_rl=detach_student_encoder_during_rl,
+            roa_teacher_reg_coef_start=roa_teacher_reg_coef_start,
+            roa_teacher_reg_coef_end=roa_teacher_reg_coef_end,
+            roa_teacher_reg_warmup_updates=roa_teacher_reg_warmup_updates,
+            roa_teacher_reg_ramp_updates=roa_teacher_reg_ramp_updates,
+            roa_teacher_reg_scope=roa_teacher_reg_scope,
+            roa_teacher_reg_loss=roa_teacher_reg_loss,
             multi_gpu_cfg=multi_gpu_cfg,
         )
         self.backtrack_coeff = float(backtrack_coeff)
@@ -140,6 +165,14 @@ class FPPO(PPO):
             None if projection_radius_cap is None else max(float(projection_radius_cap), 0.0)
         )
         self.projection_radius_mode = str(projection_radius_mode).strip().lower()
+        self.active_constraint_threshold = max(float(active_constraint_threshold), 0.0)
+        self.constraint_advantage_key = str(constraint_advantage_key).strip()
+        if self.constraint_advantage_key not in {"cost_terms_adv_raw", "cost_terms_adv_norm"}:
+            raise ValueError(
+                "constraint_advantage_key must be one of "
+                "{'cost_terms_adv_raw', 'cost_terms_adv_norm'}; "
+                f"got {constraint_advantage_key!r}."
+            )
         self.constraint_names = (
             [str(name) for name in constraint_names] if constraint_names is not None else None
         )
@@ -156,6 +189,7 @@ class FPPO(PPO):
 
         self._update_counter = 0
         self._sigma_a_cache: torch.Tensor | None = None
+        self._sigma_a_active_indices: torch.Tensor | None = None
         self._uncertainty_cache_age = 0
 
     def update(self):
@@ -172,6 +206,7 @@ class FPPO(PPO):
             theta_predictor=theta_predictor,
         )
         mean_value_loss, mean_cost_value_loss = self._update_value_functions()
+        latent_alignment_loss = self._latent_alignment_epoch()
 
         cost_terms_rollout = projection_batch["cost_terms_rollout"]
         d_limits = projection_state["d_limits"]
@@ -210,6 +245,8 @@ class FPPO(PPO):
             "current_max_violation": current_max_violation,
             "active_constraints": corrector_metrics["active_constraints"],
             "accept_rate": corrector_metrics["accept_rate"],
+            "corrector_accept_rate": corrector_metrics["corrector_accept_rate"],
+            "fallback_to_predictor_rate": corrector_metrics["fallback_to_predictor"],
             "accepted_backtrack_factor": corrector_metrics["accepted_backtrack_factor"],
             "backtrack_steps": corrector_metrics["backtrack_steps"],
             "step_size": corrector_metrics["accepted_step_norm"],
@@ -245,8 +282,13 @@ class FPPO(PPO):
             "fisher_diag_max": float(fisher_diag.max().item()),
             "raw_cost_adv_std": float(projection_batch["cost_terms_adv_raw"].std().item()),
             "norm_cost_adv_std": float(projection_batch["cost_terms_adv_norm"].std().item()),
-            "reconstruction": predictor_metrics["mean_reconstruction"],
+            "velocity_estimation": predictor_metrics["mean_reconstruction"],
+            "teacher_latent_reg_coef": predictor_metrics["teacher_latent_reg_coef"],
+            "teacher_latent_reg_row_ratio": predictor_metrics["teacher_latent_reg_row_ratio"],
+            "latent_alignment": latent_alignment_loss,
         }
+        if self._cts_enabled():
+            self.train_metrics["student_group_ratio"] = self.student_group_ratio
         self.train_metrics.update(self._constraint_diagnostic_metrics(projection_state))
 
         self.storage.clear()
@@ -255,7 +297,10 @@ class FPPO(PPO):
             "cost_value_function": mean_cost_value_loss,
             "surrogate": predictor_metrics["mean_surrogate"],
             "entropy": predictor_metrics["mean_entropy"],
-            "reconstruction": predictor_metrics["mean_reconstruction"],
+            "velocity_estimation": predictor_metrics["mean_reconstruction"],
+            "teacher_latent_reg": predictor_metrics["mean_teacher_latent_reg"],
+            "teacher_latent_reg_weighted": predictor_metrics["mean_teacher_latent_reg_weighted"],
+            "latent_alignment": latent_alignment_loss,
         }
 
     def _build_projection_state(
@@ -263,13 +308,52 @@ class FPPO(PPO):
         projection_batch: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         d_limits = projection_batch["d_limits"]
-        j_cost, sigma_j = self._estimate_constraint_cost_stats(projection_batch["cost_terms_rollout"])
-        fisher_diag = self._estimate_fisher_diagonal(projection_batch)
-        a_mat = self._compute_constraint_gradients(
-            projection_batch,
-            advantage_key="cost_terms_adv_raw",
+        j_cost, sigma_j = self._estimate_constraint_cost_stats(
+            projection_batch["cost_terms_rollout"]
         )
-        sigma_a = self._estimate_gradient_uncertainty(projection_batch, a_mat, fisher_diag)
+        num_constraints = int(j_cost.numel())
+        param_count = self._actor_param_vector().numel()
+
+        # Decide which constraints are near binding. Inactive constraints skip
+        # the expensive Fisher / per-constraint gradient computation. Their
+        # rows in ``a_mat`` stay zero so projection ignores them automatically.
+        if num_constraints == 0:
+            active_mask = torch.zeros(0, dtype=torch.bool, device=self.device)
+        elif self.active_constraint_threshold <= 0.0:
+            active_mask = torch.ones(num_constraints, dtype=torch.bool, device=self.device)
+        else:
+            denom = d_limits.clamp_min(self.projection_eps)
+            relevance = (j_cost + self.cost_confidence * sigma_j) / denom
+            active_mask = relevance >= self.active_constraint_threshold
+
+        active_indices = torch.nonzero(active_mask, as_tuple=False).flatten()
+        num_active = int(active_indices.numel())
+
+        a_mat = torch.zeros(param_count, num_constraints, device=self.device)
+        sigma_a = torch.zeros(num_constraints, device=self.device)
+
+        if num_active == 0 or num_constraints == 0:
+            fisher_diag = torch.full(
+                (param_count,), self.fisher_min_diag, device=self.device
+            )
+        else:
+            fisher_diag = self._estimate_fisher_diagonal(projection_batch)
+            a_active = self._compute_constraint_gradients(
+                projection_batch,
+                advantage_key=self.constraint_advantage_key,
+                constraint_columns=active_indices,
+            )
+            if a_active.numel() > 0:
+                a_mat[:, active_indices] = a_active
+            sigma_active = self._estimate_gradient_uncertainty(
+                projection_batch,
+                a_active,
+                fisher_diag,
+                active_indices=active_indices,
+            )
+            if sigma_active.numel() > 0:
+                sigma_a[active_indices] = sigma_active
+
         if self.max_sigma_a is not None:
             sigma_a = torch.clamp(sigma_a, max=self.max_sigma_a)
         margins = self._compute_robust_margin(
@@ -281,9 +365,11 @@ class FPPO(PPO):
         budgets = d_limits - j_cost - margins
         return {
             "a_mat": a_mat,
-            "constraint_grad_norms": torch.linalg.vector_norm(a_mat, dim=0)
-            if a_mat.numel() > 0
-            else torch.zeros(0, device=self.device),
+            "constraint_grad_norms": (
+                torch.linalg.vector_norm(a_mat, dim=0)
+                if a_mat.numel() > 0
+                else torch.zeros(0, device=self.device)
+            ),
             "fisher_diag": fisher_diag,
             "sigma_j": sigma_j,
             "sigma_a": sigma_a,
@@ -291,6 +377,8 @@ class FPPO(PPO):
             "budgets": budgets,
             "j_cost": j_cost,
             "d_limits": d_limits,
+            "active_mask": active_mask,
+            "active_count": float(num_active),
         }
 
     def _compute_robust_margin(
@@ -352,10 +440,14 @@ class FPPO(PPO):
         mean_entropy = 0.0
         mean_kl = 0.0
         mean_reconstruction_loss = 0.0
+        mean_teacher_latent_reg = 0.0
+        mean_teacher_latent_reg_weighted = 0.0
+        mean_teacher_latent_reg_row_ratio = 0.0
         kl_checks = 0
         updates = 0
         planned_updates = max(int(self.num_learning_epochs) * int(self.num_mini_batches), 1)
         stop_triggered = False
+        teacher_latent_reg_coef = self._roa_teacher_reg_coefficient()
 
         generator = self._mini_batch_generator()
         for (
@@ -375,6 +467,7 @@ class FPPO(PPO):
             masks_batch,
             *_extra_batch,
         ) in generator:
+            actor_is_student_batch = _extra_batch[4] if len(_extra_batch) > 4 else None
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
                     advantages_batch = (advantages_batch - advantages_batch.mean()) / (
@@ -403,15 +496,19 @@ class FPPO(PPO):
                 clamp=1.0e2,
             ).clamp_min(1.0e-6)
 
-            self._policy_act(
+            (
+                _current_actions,
+                actions_log_prob_batch,
+                mu_batch,
+                sigma_batch,
+                entropy_batch,
+            ) = self._evaluate_actor_batch(
                 obs_batch,
+                actions=actions_batch,
+                actor_is_student=actor_is_student_batch,
                 masks=masks_batch,
                 hidden_states=hid_states_batch[0],
             )
-            actions_log_prob_batch = self.policy.get_actions_log_prob(actions_batch)
-            entropy_batch = self.policy.entropy
-            mu_batch = self.policy.action_mean
-            sigma_batch = self.policy.action_std
 
             with torch.inference_mode():
                 kl_mean = self._all_reduce_mean(
@@ -422,14 +519,18 @@ class FPPO(PPO):
 
             if self.predictor_adaptive_lr and torch.isfinite(kl_mean).item():
                 if kl_mean.item() > self.predictor_kl_target * 1.5:
-                    self._set_predictor_learning_rate(max(self.predictor_lr_min, self.predictor_lr / 1.5))
+                    self._set_predictor_learning_rate(
+                        max(self.predictor_lr_min, self.predictor_lr / 1.5)
+                    )
                 elif 0.0 < kl_mean.item() < self.predictor_kl_target * 0.5:
                     self._set_predictor_learning_rate(
                         min(self.predictor_lr_max, self.predictor_lr * 1.25)
                     )
 
             if torch.isfinite(kl_mean).item() and kl_mean.item() > self.predictor_kl_hard_limit:
-                self._set_predictor_learning_rate(max(self.predictor_lr_min, self.predictor_lr / 2.0))
+                self._set_predictor_learning_rate(
+                    max(self.predictor_lr_min, self.predictor_lr / 2.0)
+                )
                 stop_triggered = True
                 break
 
@@ -442,12 +543,20 @@ class FPPO(PPO):
             )
             surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
-            reconstruction_loss, weighted_reconstruction_loss = self._history_reconstruction_loss(
+            reconstruction_loss, weighted_reconstruction_loss = self._velocity_estimation_loss(
                 obs_batch, critic_obs_batch
+            )
+            teacher_latent_reg_loss, weighted_teacher_latent_reg_loss, teacher_reg_rows = (
+                self._teacher_latent_regularization_loss(
+                    obs_batch,
+                    actor_is_student_batch,
+                    coefficient=teacher_latent_reg_coef,
+                )
             )
             loss = (
                 surrogate_loss
                 + weighted_reconstruction_loss
+                + weighted_teacher_latent_reg_loss
                 - self.entropy_coef * entropy_batch.mean()
             )
             loss = self._sanitize_tensor(
@@ -471,6 +580,11 @@ class FPPO(PPO):
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy += entropy_batch.mean().item()
             mean_reconstruction_loss += reconstruction_loss.item()
+            mean_teacher_latent_reg += teacher_latent_reg_loss.item()
+            mean_teacher_latent_reg_weighted += weighted_teacher_latent_reg_loss.item()
+            mean_teacher_latent_reg_row_ratio += teacher_reg_rows / float(
+                max(obs_batch.shape[0], 1)
+            )
 
         denom = max(updates, 1)
         skipped_updates = planned_updates - updates
@@ -481,6 +595,10 @@ class FPPO(PPO):
             "mean_entropy": mean_entropy / denom,
             "mean_kl": mean_kl / max(kl_checks, 1),
             "mean_reconstruction": mean_reconstruction_loss / denom,
+            "mean_teacher_latent_reg": mean_teacher_latent_reg / denom,
+            "mean_teacher_latent_reg_weighted": mean_teacher_latent_reg_weighted / denom,
+            "teacher_latent_reg_coef": teacher_latent_reg_coef,
+            "teacher_latent_reg_row_ratio": mean_teacher_latent_reg_row_ratio / denom,
             "updates": float(updates),
             "update_ratio": float(updates / planned_updates),
             "stop_rate": float(skipped_updates / planned_updates),
@@ -652,6 +770,7 @@ class FPPO(PPO):
         cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
         cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
         cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
+        actor_is_student_batch = extra_batch[4] if len(extra_batch) > 4 else None
 
         cost_returns_batch = self._sanitize_tensor(
             cost_returns_batch,
@@ -708,6 +827,7 @@ class FPPO(PPO):
             "old_sigma": old_sigma_batch,
             "masks": masks_batch,
             "hid_actor": hid_states_batch[0],
+            "actor_is_student": actor_is_student_batch,
             "cost_terms_ret": cost_terms_ret,
             "cost_terms_adv_raw": cost_terms_adv_raw,
             "cost_terms_adv_norm": cost_terms_adv_norm,
@@ -763,42 +883,73 @@ class FPPO(PPO):
         projection_batch: dict[str, torch.Tensor],
         indices: torch.Tensor | None = None,
         advantage_key: str = "cost_terms_adv_raw",
+        constraint_columns: torch.Tensor | None = None,
     ) -> torch.Tensor:
         cost_terms_adv = self._select_rows(projection_batch[advantage_key], indices)
         if cost_terms_adv is None or cost_terms_adv.numel() == 0:
             return torch.zeros((self._actor_param_vector().numel(), 0), device=self.device)
+        if constraint_columns is not None:
+            if constraint_columns.numel() == 0:
+                return torch.zeros(
+                    (self._actor_param_vector().numel(), 0), device=self.device
+                )
+            cost_terms_adv = cost_terms_adv.index_select(-1, constraint_columns.to(cost_terms_adv.device))
 
         obs = self._select_rows(projection_batch["obs"], indices)
         actions = self._select_rows(projection_batch["actions"], indices)
         old_logp = self._select_rows(projection_batch["old_logp"], indices)
         masks = self._select_rows(projection_batch["masks"], indices)
-
-        self._policy_act(
-            obs,
-            masks=masks,
-            hidden_states=projection_batch["hid_actor"],
-        )
-        actions_log_prob_batch = self.policy.get_actions_log_prob(actions)
-        ratio = self._safe_ratio(actions_log_prob_batch, old_logp).reshape(-1)
+        actor_is_student = self._select_rows(projection_batch.get("actor_is_student"), indices)
         cost_terms_adv = cost_terms_adv.reshape(-1, cost_terms_adv.shape[-1])
-
-        cost_grad_lists: list[list[torch.Tensor]] = []
         num_constraints = cost_terms_adv.shape[1]
-        for idx in range(num_constraints):
-            cost_surrogate = torch.mean(ratio * cost_terms_adv[:, idx])
-            grads = torch.autograd.grad(
-                cost_surrogate,
-                self._actor_params,
-                retain_graph=idx < (num_constraints - 1),
-                allow_unused=True,
-            )
-            grads = [
-                grad.detach() if grad is not None else torch.zeros_like(param)
-                for grad, param in zip(grads, self._actor_params)
-            ]
-            cost_grad_lists.append(grads)
+        total_count = max(int(cost_terms_adv.shape[0]), 1)
+        grad_accumulator = torch.zeros(
+            self._actor_param_vector().numel(),
+            num_constraints,
+            device=self.device,
+        )
 
-        a_mat = torch.stack([self._flatten_tensors(grads) for grads in cost_grad_lists], dim=1)
+        for chunk_indices in self._constraint_grad_chunks(total_count, cost_terms_adv.device):
+            chunk_obs = obs.index_select(0, chunk_indices)
+            chunk_actions = actions.index_select(0, chunk_indices)
+            chunk_old_logp = old_logp.index_select(0, chunk_indices)
+            chunk_masks = self._select_rows(masks, chunk_indices)
+            chunk_actor_is_student = self._select_rows(actor_is_student, chunk_indices)
+            chunk_cost_terms_adv = cost_terms_adv.index_select(0, chunk_indices)
+            chunk_weight = float(chunk_indices.numel()) / float(total_count)
+
+            (
+                _current_actions,
+                actions_log_prob_batch,
+                _mu,
+                _sigma,
+                _entropy,
+            ) = self._evaluate_actor_batch(
+                chunk_obs,
+                actions=chunk_actions,
+                actor_is_student=chunk_actor_is_student,
+                masks=chunk_masks,
+                hidden_states=projection_batch["hid_actor"],
+            )
+            ratio = self._safe_ratio(actions_log_prob_batch, chunk_old_logp).reshape(-1)
+
+            for idx in range(num_constraints):
+                cost_surrogate = torch.mean(ratio * chunk_cost_terms_adv[:, idx])
+                grads = torch.autograd.grad(
+                    cost_surrogate,
+                    self._actor_params,
+                    retain_graph=idx < (num_constraints - 1),
+                    allow_unused=True,
+                )
+                flat_grads = self._flatten_tensors(
+                    [
+                        grad.detach() if grad is not None else torch.zeros_like(param)
+                        for grad, param in zip(grads, self._actor_params)
+                    ]
+                )
+                grad_accumulator[:, idx] += flat_grads * chunk_weight
+
+        a_mat = grad_accumulator
         if self.is_multi_gpu:
             a_mat = self._all_reduce_mean(a_mat)
         return a_mat
@@ -816,12 +967,24 @@ class FPPO(PPO):
             chunk_obs = obs.index_select(0, indices)
             chunk_actions = actions.index_select(0, indices)
             chunk_masks = self._select_rows(masks, indices)
-            self._policy_act(
+            chunk_actor_is_student = self._select_rows(
+                projection_batch.get("actor_is_student"),
+                indices,
+            )
+            (
+                _current_actions,
+                log_prob_batch,
+                _mu,
+                _sigma,
+                _entropy,
+            ) = self._evaluate_actor_batch(
                 chunk_obs,
+                actions=chunk_actions,
+                actor_is_student=chunk_actor_is_student,
                 masks=chunk_masks,
                 hidden_states=projection_batch["hid_actor"],
             )
-            log_prob = self.policy.get_actions_log_prob(chunk_actions).mean()
+            log_prob = log_prob_batch.mean()
             grads = torch.autograd.grad(
                 log_prob,
                 self._actor_params,
@@ -851,13 +1014,26 @@ class FPPO(PPO):
         projection_batch: dict[str, torch.Tensor],
         a_mat: torch.Tensor,
         fisher_diag: torch.Tensor,
+        active_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if a_mat.numel() == 0 or self.gradient_uncertainty_mode == "disabled":
             return torch.zeros(a_mat.shape[1], device=self.device)
 
-        cache_valid = (
+        # Cache must be invalidated whenever the active constraint set changes,
+        # because shard variances are tracked per active column only.
+        cached_indices = self._sigma_a_active_indices
+        cache_size_match = (
             self._sigma_a_cache is not None and self._sigma_a_cache.numel() == a_mat.shape[1]
         )
+        if active_indices is None:
+            cache_indices_match = cache_size_match
+        else:
+            cache_indices_match = (
+                cached_indices is not None
+                and cached_indices.numel() == active_indices.numel()
+                and torch.equal(cached_indices.to(active_indices.device), active_indices)
+            )
+        cache_valid = cache_size_match and cache_indices_match
         refresh_now = (
             not cache_valid
             or self.gradient_uncertainty_mode != "shards"
@@ -878,7 +1054,8 @@ class FPPO(PPO):
                 self._compute_constraint_gradients(
                     projection_batch,
                     indices=indices,
-                    advantage_key="cost_terms_adv_raw",
+                    advantage_key=self.constraint_advantage_key,
+                    constraint_columns=active_indices,
                 )
             )
         if len(shard_grads) <= 1:
@@ -905,6 +1082,9 @@ class FPPO(PPO):
                 + (1.0 - self.uncertainty_ema_decay) * sigma_current
             )
         self._sigma_a_cache = sigma_current.detach().cpu()
+        self._sigma_a_active_indices = (
+            active_indices.detach().clone().cpu() if active_indices is not None else None
+        )
         self._uncertainty_cache_age = 0
         return sigma_current
 
@@ -929,6 +1109,9 @@ class FPPO(PPO):
 
         accepted_factor = 0.0
         accepted_step = 0
+        accepted_delta = torch.zeros_like(delta_proj)
+        used_projected = False
+        used_predictor_fallback = False
         final_kl = self._evaluate_candidate_kl(projection_batch, theta_anchor)
         for step in range(self.max_backtracks + 1):
             eta = self.backtrack_coeff**step
@@ -938,15 +1121,38 @@ class FPPO(PPO):
                 self._set_actor_param_vector(theta_candidate)
                 accepted_factor = eta
                 accepted_step = step
+                accepted_delta = eta * delta_proj
+                used_projected = True
                 final_kl = kl_value
                 break
+
+        # If the projected (constraint-corrected) step never satisfies the KL
+        # trust region, fall back to the un-projected predictor step. The
+        # predictor itself enforced ``predictor_kl_hard_limit`` during its
+        # update so backtracks here are typically light.
+        if not used_projected:
+            for step in range(self.max_backtracks + 1):
+                eta = self.backtrack_coeff**step
+                theta_candidate = theta_anchor + eta * delta_nom
+                kl_value = self._evaluate_candidate_kl(projection_batch, theta_candidate)
+                if torch.isfinite(kl_value).item() and kl_value.item() <= self._target_kl():
+                    self._set_actor_param_vector(theta_candidate)
+                    accepted_factor = eta
+                    accepted_step = step
+                    accepted_delta = eta * delta_nom
+                    used_predictor_fallback = True
+                    final_kl = kl_value
+                    break
 
         if accepted_factor == 0.0:
             self._set_actor_param_vector(theta_anchor)
             final_kl = self._evaluate_candidate_kl(projection_batch, theta_anchor)
 
+        any_accept = used_projected or used_predictor_fallback
         return {
-            "accept_rate": float(accepted_factor > 0.0),
+            "accept_rate": float(any_accept),
+            "corrector_accept_rate": float(used_projected),
+            "fallback_to_predictor": float(used_predictor_fallback),
             "accepted_backtrack_factor": float(accepted_factor),
             "backtrack_steps": float(accepted_step),
             "final_kl": float(final_kl.item()),
@@ -956,7 +1162,7 @@ class FPPO(PPO):
             "projection_radius_scale": float(projection_radius_scale),
             "nominal_step_norm": float(torch.linalg.vector_norm(delta_nom).item()),
             "projected_step_norm": float(torch.linalg.vector_norm(delta_proj).item()),
-            "accepted_step_norm": float(torch.linalg.vector_norm(accepted_factor * delta_proj).item()),
+            "accepted_step_norm": float(torch.linalg.vector_norm(accepted_delta).item()),
         }
 
     def _project_step(
@@ -1091,13 +1297,19 @@ class FPPO(PPO):
     ) -> torch.Tensor:
         self._set_actor_param_vector(theta_candidate)
         with torch.inference_mode():
-            self._policy_act(
+            (
+                _current_actions,
+                _log_prob,
+                mu_batch,
+                sigma_batch,
+                _entropy,
+            ) = self._evaluate_actor_batch(
                 projection_batch["obs"],
+                actions=projection_batch["actions"],
+                actor_is_student=projection_batch.get("actor_is_student"),
                 masks=projection_batch["masks"],
                 hidden_states=projection_batch["hid_actor"],
             )
-            mu_batch = self.policy.action_mean
-            sigma_batch = self.policy.action_std
             kl = self._all_reduce_mean(
                 torch.mean(
                     self._safe_kl(
@@ -1169,7 +1381,27 @@ class FPPO(PPO):
         if total <= 0:
             return []
         all_indices = torch.arange(total, device=device)
-        return [chunk for chunk in torch.tensor_split(all_indices, min(num_chunks, total)) if chunk.numel() > 0]
+        return [
+            chunk
+            for chunk in torch.tensor_split(all_indices, min(num_chunks, total))
+            if chunk.numel() > 0
+        ]
+
+    def _constraint_grad_chunks(
+        self,
+        total: int,
+        device: torch.device,
+    ) -> list[torch.Tensor]:
+        # Constraint gradients build a full actor autograd graph; chunking them
+        # keeps the CoordConv teacher path from exhausting GPU memory on large
+        # CTS batches while preserving the exact batch-average gradient.
+        target_chunk_size = 4096
+        num_chunks = max(
+            int(math.ceil(float(total) / float(target_chunk_size))),
+            int(getattr(self, "fisher_num_chunks", 1) or 1),
+            1,
+        )
+        return self._chunk_index_tensors(total, num_chunks, device)
 
     def _set_predictor_learning_rate(self, learning_rate: float) -> None:
         self.predictor_lr = float(learning_rate)
@@ -1178,18 +1410,30 @@ class FPPO(PPO):
             param_group["lr"] = self.predictor_lr
 
     def state_dict(self) -> dict:
-        return {
-            "predictor_lr": self.predictor_lr,
-            "sigma_a_cache": (
-                self._sigma_a_cache.detach().clone() if self._sigma_a_cache is not None else None
-            ),
-            "uncertainty_cache_age": self._uncertainty_cache_age,
-            "update_counter": self._update_counter,
-        }
+        state = super().state_dict()
+        state.update(
+            {
+                "predictor_lr": self.predictor_lr,
+                "sigma_a_cache": (
+                    self._sigma_a_cache.detach().clone()
+                    if self._sigma_a_cache is not None
+                    else None
+                ),
+                "sigma_a_active_indices": (
+                    self._sigma_a_active_indices.detach().clone()
+                    if self._sigma_a_active_indices is not None
+                    else None
+                ),
+                "uncertainty_cache_age": self._uncertainty_cache_age,
+                "update_counter": self._update_counter,
+            }
+        )
+        return state
 
     def load_state_dict(self, state_dict: dict) -> None:
         if not state_dict:
             return
+        super().load_state_dict(state_dict)
         predictor_lr = state_dict.get("predictor_lr")
         if predictor_lr is not None:
             self._set_predictor_learning_rate(float(predictor_lr))
@@ -1198,6 +1442,13 @@ class FPPO(PPO):
             if not torch.is_tensor(sigma_a_cache):
                 sigma_a_cache = torch.as_tensor(sigma_a_cache, dtype=torch.float32)
             self._sigma_a_cache = sigma_a_cache.detach().clone().cpu()
+        sigma_a_active_indices = state_dict.get("sigma_a_active_indices")
+        if sigma_a_active_indices is not None:
+            if not torch.is_tensor(sigma_a_active_indices):
+                sigma_a_active_indices = torch.as_tensor(
+                    sigma_a_active_indices, dtype=torch.long
+                )
+            self._sigma_a_active_indices = sigma_a_active_indices.detach().clone().cpu()
         uncertainty_cache_age = state_dict.get("uncertainty_cache_age")
         if uncertainty_cache_age is not None:
             self._uncertainty_cache_age = int(uncertainty_cache_age)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 
 from isaaclab.utils import configclass
+from scripts.rsl_rl.algorithms.registry import get_algorithm_spec
 
 from ..defaults import GalileoDefaults
 from .rsl_rl_cfg import (
@@ -26,6 +27,13 @@ def _filter_supported_cfg_params(cfg_cls, params: dict) -> dict:
         return dict(params)
     allowed = {name for name in sig.parameters if name != "self"}
     return {key: value for key, value in params.items() if key in allowed}
+
+
+_ALGORITHM_CFG_FAMILIES = {
+    "ppo": CRLRslRlPpoAlgorithmCfg,
+    "fppo": CRLRslRlFppoAlgorithmCfg,
+    "cts": CRLRslRlCTSAlgorithmCfg,
+}
 
 
 def build_cts_policy_cfg() -> CRLRslRlPpoActorCriticCfg:
@@ -61,7 +69,9 @@ def build_cts_policy_cfg() -> CRLRslRlPpoActorCriticCfg:
             num_priv_explicit=GalileoDefaults.obs.cts.actor_num_priv_explicit,
             num_priv_latent=GalileoDefaults.obs.cts.actor_num_priv_latent,
             history_latent_dim=GalileoDefaults.obs.cts.actor_history_latent_dim,
-            history_reconstruction_dim=140,
+            history_reconstruction_dim=0,
+            velocity_estimation_dim=3,
+            velocity_estimator_channel_size=64,
             num_hist=GalileoDefaults.obs.cts.actor_num_hist,
             state_history_encoder=CRLRslRlStateHistEncoderCfg(
                 class_name="TCNHistoryEncoder",
@@ -79,20 +89,20 @@ def build_cts_algorithm_cfg(
 ) -> CRLRslRlPpoAlgorithmCfg | CRLRslRlFppoAlgorithmCfg | CRLRslRlCTSAlgorithmCfg:
     algorithm_defaults = GalileoDefaults.algorithm
     selected_algo = (algo_key or getattr(algorithm_defaults, "name", "fppo")).strip().lower()
-    class_name = algorithm_defaults.class_name_map[selected_algo]
+    alg_spec = get_algorithm_spec(selected_algo)
+    cfg_cls = _ALGORITHM_CFG_FAMILIES.get(alg_spec.config_family)
+    if cfg_cls is None:
+        raise ValueError(
+            f"Unsupported CTS config family '{alg_spec.config_family}' for algorithm '{selected_algo}'."
+        )
 
     params: dict = {}
     params.update(getattr(algorithm_defaults, "base", {}))
     params.update(getattr(algorithm_defaults, "per_algo", {}).get(selected_algo, {}))
-
-    if selected_algo == "cts":
-        cfg_cls = CRLRslRlCTSAlgorithmCfg
-    elif selected_algo == "fppo":
-        cfg_cls = CRLRslRlFppoAlgorithmCfg
-    else:
-        cfg_cls = CRLRslRlPpoAlgorithmCfg
-
-    return cfg_cls(class_name=class_name, **_filter_supported_cfg_params(cfg_cls, params))
+    return cfg_cls(
+        class_name=alg_spec.class_name,
+        **_filter_supported_cfg_params(cfg_cls, params),
+    )
 
 
 def build_cts_constraint_adapter_cfg(algo_key: str | None = None) -> CRLConstraintAdapterCfg:
@@ -113,6 +123,7 @@ class GalileoCTSBenchmarkRunnerCfg(CRLRslRlOnPolicyRunnerCfg):
     save_interval = 100
     experiment_name = "galileo_cts"
     empirical_normalization = False
+    framework_type = "cts"
     force_student_history_rollout = True
     policy = build_cts_policy_cfg()
     algorithm = build_cts_algorithm_cfg()

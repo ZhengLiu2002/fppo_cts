@@ -59,6 +59,7 @@ python scripts/rsl_rl/train.py \
   --run_name fppo_main \
   --headless \
   --logger wandb \
+  --max_iterations 20000 \
   --log_project_name galileo_cts
 ```
 
@@ -73,19 +74,62 @@ python scripts/rsl_rl/train.py \
   --run_name ppo_main \
   --headless \
   --logger wandb \
+  --max_iterations 20000 \
+  --log_project_name galileo_cts
+```
+
+FPPO 单独教师对比命令：
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CTS-v0 \
+  --algo fppo \
+  --exp galileo/teacher_only_upper_bound \
+  --run_name teacher_only \
+  --num_envs 2048 \
+  --headless \
+  --logger wandb \
+  --max_iterations 20000 \
   --log_project_name galileo_cts
 ```
 
 说明：
 
-- `CTS` 是统一任务基座，`--algo` 是 CRL 对比轴
+- `CTS` 是统一的 teacher-student 训练框架，`--algo` 只切换优化器 / 投影机制
+- 在 `Isaac-Galileo-CTS-v0` 上切 `ppo`、`fppo`、`ppo_lagrange` 等时，teacher/student rollout、latent 对齐和学生 history encoder 监督保持一致
+- runner 不再按算法名字写死 CTS 分支；算法如需额外 CTS 运行时行为，通过 [contracts.py](/home/lz/Project/IsaacLab/fppo_ts/scripts/rsl_rl/algorithms/contracts.py) 的契约声明
 - 当前默认算法由 [defaults.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/defaults.py) 指定，默认是 `fppo`
 - 支持的主要算法：`ppo`、`fppo`、`np3o`、`ppo_lagrange`、`cpo`、`pcpo`、`focops`
+- 兼容旧配置时，`--algo cts` 会退化为 `ppo` on CTS framework，但新的对比实验建议直接使用真实优化器名
 - 训练结果默认写入 `logs/rsl_rl/<experiment_name>/`
 - 每次训练的最终配置会落到：
   - `params/env.yaml`
   - `params/agent.yaml`
   - `params/experiment.json`
+- 每次训练还会在 run 根目录生成 `policy.yaml`
+  - 这份文件直接来自当次训练的 live 配置，是部署参数的唯一来源
+  - 后续 `play.py --export_only` 只会复制这份 `policy.yaml` 到 `exported_policy/`
+
+命令追加参数：
+
+README 里的训练命令都可以在末尾继续追加 CLI 参数，临时覆盖 preset 或任务默认值。比如把训练轮数改成 `20000`：
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CTS-v0 \
+  --algo fppo \
+  --exp galileo/benchmark/cts_main \
+  --run_name fppo_main \
+  --headless \
+  --max_iterations 20000
+```
+
+常见追加方式：
+
+- `--max_iterations 20000`：覆盖 `agent.max_iterations`
+- `--num_envs 4096`：覆盖 `env.scene.num_envs`
+- `--seed 42`：覆盖随机种子
+- 同时使用 `--exp` 时，CLI 追加参数优先级高于 preset
 
 多卡训练：
 
@@ -147,7 +191,7 @@ python scripts/rsl_rl/play_keyboard.py \
   --task Isaac-Galileo-CTS-Play-v0 \
   --algo fppo \
   --force_gui \
-  --checkpoint 
+  --checkpoint logs/
 ```
 
 PPO 键盘遥控示例：
@@ -172,12 +216,13 @@ python scripts/rsl_rl/play_keyboard.py \
 ## 导出
 
 ```bash
+conda activate isaaclab
 python scripts/rsl_rl/play.py \
   --task Isaac-Galileo-CTS-Play-v0 \
   --num_envs 1 \
   --export_only \
   --headless \
-  --checkpoint 
+  --checkpoint logs/
 ```
 
 默认输出：
@@ -186,6 +231,7 @@ python scripts/rsl_rl/play.py \
 - `exported_policy/policy.yaml`
 
 导出接口面向最终 blind policy，核心输入按 `policy.yaml` 为准。
+`exported_policy/policy.yaml` 由 run 根目录的 `policy.yaml` 直接复制得到，不再回读旧 checkpoint 邻接的冻结配置。
 
 PPO 导出示例：
 

@@ -23,9 +23,9 @@ class GalileoCTSSceneCfg(GalileoBaseSceneCfg):
     robot: ArticulationCfg = build_galileo_robot_cfg()
     height_scanner = RayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base_link",
-        offset=RayCasterCfg.OffsetCfg(pos=(0.375, 0.0, 20.0)),
+        offset=RayCasterCfg.OffsetCfg(pos=(0.15, 0.0, 20.0)),
         ray_alignment="yaw",
-        pattern_cfg=patterns.GridPatternCfg(resolution=0.15, size=[1.65, 1.5]),
+        pattern_cfg=patterns.GridPatternCfg(resolution=0.15, size=[1.95, 1.8]),
         debug_vis=False,
         mesh_prim_paths=["/World"],
     )
@@ -38,8 +38,10 @@ class GalileoCTSSceneCfg(GalileoBaseSceneCfg):
     )
 
     def __post_init__(self):
-        super().__post_init__()
+        # Rebuild a fresh robot cfg before the base scene attaches shared
+        # actuator limits/gains so CTS scene customization cannot clobber them.
         self.robot = build_galileo_robot_cfg()
+        super().__post_init__()
         self.terrain.terrain_generator = copy.deepcopy(GALILEO_ROUGH_TERRAIN_CFG)
         if getattr(GalileoDefaults.terrain, "flat_only_pretrain", False):
             flat_name = getattr(GalileoDefaults.terrain, "flat_subterrain_name", "crl_flat")

@@ -14,6 +14,7 @@ from .defaults import (
     GalileoDefaults,
     build_galileo_robot_cfg,
 )
+from .terrain_profiles import restrict_terrain_generator_to_named_subterrains
 
 
 @configclass
@@ -44,10 +45,11 @@ class GalileoCTSSceneCfg(GalileoBaseSceneCfg):
         super().__post_init__()
         self.terrain.terrain_generator = copy.deepcopy(GALILEO_ROUGH_TERRAIN_CFG)
         if getattr(GalileoDefaults.terrain, "flat_only_pretrain", False):
-            flat_name = getattr(GalileoDefaults.terrain, "flat_subterrain_name", "crl_flat")
-            flat_cfg = copy.deepcopy(self.terrain.terrain_generator.sub_terrains[flat_name])
-            flat_cfg.proportion = 1.0
-            self.terrain.terrain_generator.sub_terrains = {flat_name: flat_cfg}
+            restrict_terrain_generator_to_named_subterrains(
+                self.terrain.terrain_generator,
+                getattr(GalileoDefaults.terrain, "flat_subterrain_names", ("plane_run",)),
+                proportions=getattr(GalileoDefaults.terrain, "flat_subterrain_proportions", None),
+            )
         self.terrain.terrain_generator.size = GalileoDefaults.terrain.size
         self.terrain.terrain_generator.border_width = GalileoDefaults.terrain.border_width
         self.terrain.terrain_generator.num_rows = GalileoDefaults.terrain.num_rows

@@ -118,7 +118,7 @@ def add_rsl_rl_args(parser: argparse.ArgumentParser):
         "--exp",
         type=str,
         default=None,
-        help="Experiment preset name under `experiments/`, e.g. `galileo/fppo_smoke`.",
+        help="Experiment preset name under `experiments/`, e.g. `galileo/debug/fppo_smoke`.",
     )
     arg_group.add_argument(
         "--exp-file",

@@ -8,18 +8,25 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import json
 import math
 import os
+import re
 import select
+import signal
 import sys
 import termios
 import time
+import traceback
 import tty
 import warnings
 import weakref
+from pathlib import Path
 
 try:
     from scripts.rsl_rl.experiment_manager import (
+        ExperimentPreset,
         apply_experiment_preset,
         available_experiment_presets,
         load_experiment_preset,
@@ -32,6 +39,7 @@ try:
     )
 except ImportError:
     from experiment_manager import (  # type: ignore
+        ExperimentPreset,
         apply_experiment_preset,
         available_experiment_presets,
         load_experiment_preset,
@@ -137,6 +145,27 @@ parser.add_argument(
     help="Approximate stair riser count on each side of the teleop tile. Defaults to >5.",
 )
 parser.add_argument(
+    "--terrain-mode",
+    type=str,
+    default="auto",
+    choices=("auto", "stairs", "flat", "rough"),
+    help=(
+        "Teleop terrain mode: auto-match the checkpoint/preset terrain profile, "
+        "use the legacy raised stairs tile, force a pure flat tile, "
+        "or keep the preset rough-terrain generator."
+    ),
+)
+parser.add_argument(
+    "--curriculum-state",
+    type=str,
+    default="run_latest",
+    choices=("initial", "run_latest", "max"),
+    help=(
+        "Command curriculum state for play: keep initial preset ranges, "
+        "restore the latest logged run state, or force max ranges."
+    ),
+)
+parser.add_argument(
     "--debug-keys",
     action="store_true",
     default=False,
@@ -188,6 +217,7 @@ import crl_tasks.tasks.galileo  # noqa: F401
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils import parse_env_cfg
 
+from crl_isaaclab.envs.mdp.curriculums import initialize_domain_randomization_curriculum
 from scripts.rsl_rl.modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
 from scripts.rsl_rl.vecenv_wrapper import CRLRslRlVecEnvWrapper
 from crl_tasks.tasks.galileo.config.agents.rsl_rl_cfg import CRLRslRlOnPolicyRunnerCfg
@@ -226,26 +256,325 @@ def _build_single_step_terrain_cfg(step_height: float, stair_steps: int) -> Terr
     )
 
 
+def _build_flat_terrain_cfg() -> TerrainGeneratorCfg:
+    """Create a large flat tile for pure teleoperation evaluation."""
+    return TerrainGeneratorCfg(
+        size=(18.0, 18.0),
+        border_width=4.0,
+        num_rows=1,
+        num_cols=1,
+        horizontal_scale=0.1,
+        vertical_scale=0.005,
+        slope_threshold=0.75,
+        difficulty_range=(0.0, 0.0),
+        use_cache=False,
+        curriculum=False,
+        sub_terrains={
+            "flat": terrain_gen.MeshPlaneTerrainCfg(
+                proportion=1.0,
+            ),
+        },
+    )
+
+
 def _set_if_present(obj, name: str, value) -> None:
     if hasattr(obj, name):
         setattr(obj, name, value)
 
 
+def _load_checkpoint_experiment_metadata(
+    checkpoint_path: str | os.PathLike[str],
+) -> dict[str, object] | None:
+    checkpoint = Path(checkpoint_path).resolve()
+    run_dir = checkpoint.parent if checkpoint.is_file() else checkpoint
+    metadata_path = run_dir / "params" / "experiment.json"
+    if not metadata_path.is_file():
+        return None
+
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"[WARN] Failed to read checkpoint experiment metadata from {metadata_path}: {exc}")
+        return None
+
+    if not isinstance(metadata, dict):
+        print(f"[WARN] Ignoring malformed checkpoint experiment metadata: {metadata_path}")
+        return None
+    return metadata
+
+
+def _load_checkpoint_experiment_preset(
+    checkpoint_path: str | os.PathLike[str],
+) -> "ExperimentPreset | None":
+    metadata = _load_checkpoint_experiment_metadata(checkpoint_path)
+    if metadata is None:
+        return None
+
+    metadata_overrides = metadata.get("overrides")
+    if isinstance(metadata_overrides, dict):
+        env_overrides = metadata_overrides.get("env", {})
+        agent_overrides = metadata_overrides.get("agent", {})
+        if isinstance(env_overrides, dict) and isinstance(agent_overrides, dict):
+            preset_path = metadata.get("preset_path")
+            source_chain = metadata.get("source_chain", [])
+            try:
+                return ExperimentPreset(
+                    name=str(metadata.get("preset_name") or "checkpoint_snapshot"),
+                    slug=str(metadata.get("preset_slug") or "checkpoint-snapshot"),
+                    path=Path(os.fspath(preset_path)).resolve()
+                    if preset_path
+                    else Path(checkpoint_path).resolve(),
+                    data={
+                        "meta": dict(metadata.get("meta") or {}),
+                        "env": dict(env_overrides),
+                        "agent": dict(agent_overrides),
+                    },
+                    source_chain=tuple(Path(os.fspath(path)).resolve() for path in source_chain),
+                )
+            except Exception as exc:
+                print(
+                    "[WARN] Failed to reconstruct experiment preset snapshot from checkpoint "
+                    f"metadata, falling back to the live preset path: {exc}"
+                )
+
+    preset_path = metadata.get("preset_path")
+    if not preset_path:
+        return None
+
+    try:
+        return load_experiment_preset(file_path=os.fspath(preset_path))
+    except Exception as exc:
+        print(
+            "[WARN] Failed to resolve experiment preset from checkpoint metadata "
+            f"({preset_path}): {exc}"
+        )
+        return None
+
+
+def _same_preset(lhs, rhs) -> bool:
+    if lhs is None or rhs is None:
+        return False
+    return Path(lhs.path).resolve() == Path(rhs.path).resolve()
+
+
+def _interp_command_range(
+    start_range: tuple[float, float] | list[float],
+    max_range: tuple[float, float] | list[float],
+    progress: float,
+) -> tuple[float, float]:
+    progress = min(max(float(progress), 0.0), 1.0)
+    start_min, start_max = start_range
+    max_min, max_max = max_range
+    return (
+        float(start_min + (max_min - start_min) * progress),
+        float(start_max + (max_max - start_max) * progress),
+    )
+
+
+def _apply_command_curriculum_level(
+    command_cfg,
+    *,
+    level_attr: str,
+    max_level_attr: str,
+    range_attr: str,
+    start_range_attr: str,
+    max_range_attr: str,
+    level_value: float,
+) -> float:
+    max_level = max(float(getattr(command_cfg, max_level_attr, 1.0)), 1.0e-6)
+    level = min(max(float(level_value), 0.0), max_level)
+    setattr(command_cfg, level_attr, level)
+
+    ranges = command_cfg.ranges
+    start_range = getattr(ranges, start_range_attr, None)
+    max_range = getattr(ranges, max_range_attr, None)
+    if start_range is not None and max_range is not None:
+        setattr(
+            ranges,
+            range_attr,
+            _interp_command_range(start_range, max_range, level / max_level),
+        )
+    return level
+
+
+def _load_latest_run_curriculum_levels(checkpoint_path: str | os.PathLike[str]) -> dict[str, float]:
+    checkpoint = Path(checkpoint_path)
+    run_dir = checkpoint.parent if checkpoint.is_file() else checkpoint
+    event_files = sorted(run_dir.glob("events.out.tfevents.*"), key=lambda path: path.stat().st_mtime)
+    if not event_files:
+        print(f"[WARN] No TensorBoard event file found beside checkpoint: {checkpoint}")
+        return {}
+
+    try:
+        from tensorboard.backend.event_processing import event_accumulator
+    except Exception as exc:
+        print(f"[WARN] Failed to import TensorBoard event reader: {exc}")
+        return {}
+
+    event_path = event_files[-1]
+    event_reader = event_accumulator.EventAccumulator(
+        str(event_path), size_guidance={"scalars": 0}
+    )
+    event_reader.Reload()
+
+    tag_map = {
+        "Curriculum/lin_vel_x_command_threshold": "lin_x_level",
+        "Curriculum/lin_vel_y_command_threshold": "lin_y_level",
+        "Curriculum/ang_vel_z_command_threshold": "ang_z_level",
+        "Curriculum/terrain_type_progression": "terrain_type_stage",
+    }
+    checkpoint_step = None
+    match = re.fullmatch(r"model_(\d+)", checkpoint.stem)
+    if match is not None:
+        checkpoint_step = int(match.group(1))
+
+    levels: dict[str, float] = {}
+    last_step = None
+    scalar_tags = set(event_reader.Tags().get("scalars", ()))
+    for tag, key in tag_map.items():
+        if tag not in scalar_tags:
+            continue
+        scalars = event_reader.Scalars(tag)
+        if not scalars:
+            continue
+        selected = scalars[-1]
+        if checkpoint_step is not None:
+            eligible = [scalar for scalar in scalars if scalar.step <= checkpoint_step]
+            if eligible:
+                selected = eligible[-1]
+        levels[key] = float(selected.value)
+        last_step = selected.step if last_step is None else max(last_step, selected.step)
+
+    if levels:
+        formatted = ", ".join(f"{key}={value:.2f}" for key, value in sorted(levels.items()))
+        print(
+            "[INFO] Restored logged curriculum state from "
+            f"{run_dir.name} at step {last_step}: {formatted}"
+        )
+    else:
+        print(f"[WARN] No curriculum scalar tags found in event file: {event_path}")
+    return levels
+
+
+def _freeze_progressive_curriculum_for_play(env_cfg) -> None:
+    curriculum_cfg = getattr(env_cfg, "curriculum", None)
+    if curriculum_cfg is None:
+        return
+    for name in (
+        "lin_vel_x_command_threshold",
+        "lin_vel_y_command_threshold",
+        "ang_vel_z_command_threshold",
+        "terrain_type_progression",
+        "domain_randomization_scale",
+    ):
+        _set_if_present(curriculum_cfg, name, None)
+
+
+def _configure_play_curriculum_state(env_cfg, checkpoint_path: str | os.PathLike[str]) -> None:
+    if args_cli.curriculum_state == "initial":
+        return
+
+    command_cfg = env_cfg.commands.base_velocity
+    if args_cli.curriculum_state == "run_latest":
+        level_overrides = _load_latest_run_curriculum_levels(checkpoint_path)
+        if not level_overrides:
+            return
+    else:
+        level_overrides = {
+            "lin_x_level": float(getattr(command_cfg, "max_lin_x_level", 1.0)),
+            "lin_y_level": float(getattr(command_cfg, "max_lin_y_level", 1.0)),
+            "ang_z_level": float(getattr(command_cfg, "max_ang_z_level", 1.0)),
+        }
+
+    mappings = (
+        (
+            "lin_x_level",
+            "max_lin_x_level",
+            "lin_vel_x",
+            "start_curriculum_lin_x",
+            "max_curriculum_lin_x",
+        ),
+        (
+            "lin_y_level",
+            "max_lin_y_level",
+            "lin_vel_y",
+            "start_curriculum_lin_y",
+            "max_curriculum_lin_y",
+        ),
+        (
+            "ang_z_level",
+            "max_ang_z_level",
+            "ang_vel_z",
+            "start_curriculum_ang_z",
+            "max_curriculum_ang_z",
+        ),
+    )
+    applied: list[str] = []
+    for level_attr, max_level_attr, range_attr, start_range_attr, max_range_attr in mappings:
+        if level_attr not in level_overrides:
+            continue
+        level = _apply_command_curriculum_level(
+            command_cfg,
+            level_attr=level_attr,
+            max_level_attr=max_level_attr,
+            range_attr=range_attr,
+            start_range_attr=start_range_attr,
+            max_range_attr=max_range_attr,
+            level_value=level_overrides[level_attr],
+        )
+        applied.append(f"{level_attr}={level:.2f}")
+
+    _freeze_progressive_curriculum_for_play(env_cfg)
+    if applied:
+        ranges = command_cfg.ranges
+        print(
+            "[INFO] Fixed play command envelope: "
+            f"{', '.join(applied)}; "
+            f"vx={tuple(ranges.lin_vel_x)}, vy={tuple(ranges.lin_vel_y)}, wz={tuple(ranges.ang_vel_z)}"
+        )
+
+
 def _configure_keyboard_play_env(env_cfg) -> None:
-    """Shrink the scene to a single teleop robot on a simple stair tile."""
+    """Shrink the scene to a single teleop robot on a simple evaluation tile."""
     env_cfg.scene.num_envs = 1
     env_cfg.scene.env_spacing = 2.0
     env_cfg.episode_length_s = max(float(getattr(env_cfg, "episode_length_s", 60.0)), 300.0)
 
-    terrain_cfg = _build_single_step_terrain_cfg(args_cli.step_height, args_cli.stair_steps)
-    env_cfg.scene.terrain.terrain_generator = terrain_cfg
-    env_cfg.scene.terrain.max_init_terrain_level = 0
-    print(
-        "[INFO] Teleop terrain configured: stairs only, "
-        f"approx_steps_per_side={max(int(args_cli.stair_steps), 6)}, "
-        f"step_height={float(args_cli.step_height):.3f} m, "
-        "single robot scene."
-    )
+    terrain_mode = args_cli.terrain_mode
+    if terrain_mode == "auto":
+        terrain_profile = str(getattr(env_cfg, "terrain_profile", "rough")).strip().lower()
+        terrain_mode = "flat" if terrain_profile == "flat" else "rough"
+        print(
+            "[INFO] Auto-selected teleop terrain mode from environment profile: "
+            f"{terrain_mode} (terrain_profile={terrain_profile})."
+        )
+
+    if terrain_mode == "flat":
+        terrain_cfg = _build_flat_terrain_cfg()
+    elif terrain_mode == "stairs":
+        terrain_cfg = _build_single_step_terrain_cfg(args_cli.step_height, args_cli.stair_steps)
+        env_cfg.scene.terrain.terrain_generator = terrain_cfg
+        env_cfg.scene.terrain.max_init_terrain_level = 0
+    else:
+        terrain_cfg = env_cfg.scene.terrain.terrain_generator
+
+    if terrain_mode == "flat":
+        env_cfg.scene.terrain.terrain_generator = terrain_cfg
+        env_cfg.scene.terrain.max_init_terrain_level = 0
+        print("[INFO] Teleop terrain configured: pure flat tile, single robot scene.")
+    elif terrain_mode == "stairs":
+        print(
+            "[INFO] Teleop terrain configured: stairs only, "
+            f"approx_steps_per_side={max(int(args_cli.stair_steps), 6)}, "
+            f"step_height={float(args_cli.step_height):.3f} m, "
+            "single robot scene. Note: the robot spawns on the raised center platform."
+        )
+    else:
+        terrain_names = ", ".join(getattr(terrain_cfg, "sub_terrains", {}).keys())
+        print(
+            "[INFO] Teleop terrain configured: preset terrain generator, "
+            f"sub_terrains=[{terrain_names}], single robot scene."
+        )
 
     base_velocity = env_cfg.commands.base_velocity
     base_velocity.resampling_time_range = (1.0e9, 1.0e9)
@@ -434,6 +763,9 @@ class KeyboardCommandController:
         self._terminal_fd: int | None = None
         self._terminal_old_attrs = None
         self._terminal_buffer = ""
+        self._closed = False
+        self._restore_registered = False
+        self._signal_handlers: dict[int, object] = {}
 
         self.forward_speed = min(abs(float(args_cli.lin_speed)), max(float(lin_range[1]), 0.0))
         self.backward_speed = min(abs(float(args_cli.lin_speed)), max(-float(lin_range[0]), 0.0))
@@ -479,17 +811,10 @@ class KeyboardCommandController:
             print("  X                 : quit (terminal fallback)")
 
     def __del__(self):
-        if (
-            hasattr(self, "_input")
-            and self._input is not None
-            and hasattr(self, "_keyboard")
-            and self._keyboard is not None
-            and hasattr(self, "_keyboard_sub")
-            and self._keyboard_sub is not None
-        ):
-            self._input.unsubscribe_from_keyboard_events(self._keyboard, self._keyboard_sub)
-            self._keyboard_sub = None
-        self._restore_terminal()
+        try:
+            self.close()
+        except Exception:
+            pass
 
     @staticmethod
     def _motion_keys() -> tuple[str, ...]:
@@ -511,6 +836,10 @@ class KeyboardCommandController:
             self._terminal_fd = sys.stdin.fileno()
             self._terminal_old_attrs = termios.tcgetattr(self._terminal_fd)
             tty.setcbreak(self._terminal_fd)
+            if not self._restore_registered:
+                atexit.register(self._restore_terminal)
+                self._restore_registered = True
+            self._install_signal_restore_handlers()
             print(
                 "[INFO] Terminal keyboard fallback enabled. You can press keys in the launch terminal."
             )
@@ -519,6 +848,38 @@ class KeyboardCommandController:
             self._terminal_old_attrs = None
             print(f"[WARN] Failed to enable terminal keyboard fallback: {exc}")
 
+    def _install_signal_restore_handlers(self) -> None:
+        controller_ref = weakref.ref(self)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            if sig in self._signal_handlers:
+                continue
+            previous_handler = signal.getsignal(sig)
+
+            def _handler(signum, frame, *, previous=previous_handler) -> None:
+                controller = controller_ref()
+                if controller is not None:
+                    controller._restore_terminal()
+
+                if callable(previous):
+                    previous(signum, frame)
+                    return
+                if previous == signal.SIG_IGN:
+                    return
+                if previous == signal.SIG_DFL:
+                    signal.signal(signum, signal.SIG_DFL)
+                    os.kill(os.getpid(), signum)
+
+            signal.signal(sig, _handler)
+            self._signal_handlers[sig] = previous_handler
+
+    def _restore_signal_handlers(self) -> None:
+        for sig, previous_handler in list(self._signal_handlers.items()):
+            try:
+                signal.signal(sig, previous_handler)
+            except Exception:
+                pass
+        self._signal_handlers.clear()
+
     def _restore_terminal(self) -> None:
         if self._terminal_fd is not None and self._terminal_old_attrs is not None:
             try:
@@ -526,6 +887,26 @@ class KeyboardCommandController:
             except Exception:
                 pass
             self._terminal_old_attrs = None
+
+    def close(self) -> None:
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        if (
+            hasattr(self, "_input")
+            and self._input is not None
+            and hasattr(self, "_keyboard")
+            and self._keyboard is not None
+            and hasattr(self, "_keyboard_sub")
+            and self._keyboard_sub is not None
+        ):
+            try:
+                self._input.unsubscribe_from_keyboard_events(self._keyboard, self._keyboard_sub)
+            except Exception:
+                pass
+            self._keyboard_sub = None
+        self._restore_signal_handlers()
+        self._restore_terminal()
 
     @staticmethod
     def _clamp(value: float, lower: float, upper: float) -> float:
@@ -687,6 +1068,9 @@ def main() -> None:
     if "Galileo" not in args_cli.task:
         raise SystemExit("This keyboard teleop helper currently supports Galileo tasks only.")
 
+    env = None
+    keyboard: KeyboardCommandController | None = None
+
     env_cfg = parse_env_cfg(
         args_cli.task,
         device=args_cli.device,
@@ -697,14 +1081,14 @@ def main() -> None:
     experiment_preset = load_experiment_preset(selection=args_cli.exp, file_path=args_cli.exp_file)
     if experiment_preset is not None:
         apply_experiment_preset(env_cfg=env_cfg, agent_cfg=agent_cfg, preset=experiment_preset)
+        if hasattr(env_cfg, "apply_experiment_overrides"):
+            env_cfg.apply_experiment_overrides()
+        if hasattr(env_cfg, "apply_play_runtime_overrides"):
+            env_cfg.apply_play_runtime_overrides()
         agent_cfg = cli_args.reapply_rsl_rl_cli_overrides(agent_cfg, args_cli)
         print(
             f"[INFO] Applied experiment preset: {experiment_preset.name} ({experiment_preset.path})"
         )
-
-    _configure_keyboard_play_env(env_cfg)
-    if args_cli.device is not None:
-        env_cfg.sim.device = args_cli.device
 
     log_root_path = build_log_root_path(agent_cfg.experiment_name)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
@@ -722,57 +1106,107 @@ def main() -> None:
             "A pretrained checkpoint is unavailable for this task and no explicit checkpoint was provided."
         )
 
-    env = gym.make(args_cli.task, cfg=env_cfg)
-    if isinstance(env.unwrapped, DirectMARLEnv):
-        env = multi_agent_to_single_agent(env)
-    env = CRLRslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+    checkpoint_preset = _load_checkpoint_experiment_preset(resume_path)
+    if experiment_preset is None and checkpoint_preset is not None:
+        apply_experiment_preset(env_cfg=env_cfg, agent_cfg=agent_cfg, preset=checkpoint_preset)
+        if hasattr(env_cfg, "apply_experiment_overrides"):
+            env_cfg.apply_experiment_overrides()
+        if hasattr(env_cfg, "apply_play_runtime_overrides"):
+            env_cfg.apply_play_runtime_overrides()
+        agent_cfg = cli_args.reapply_rsl_rl_cli_overrides(agent_cfg, args_cli)
+        experiment_preset = checkpoint_preset
+        print(
+            "[INFO] Auto-applied experiment preset from checkpoint metadata: "
+            f"{checkpoint_preset.name} ({checkpoint_preset.path})"
+        )
+    elif (
+        experiment_preset is not None
+        and checkpoint_preset is not None
+        and not _same_preset(experiment_preset, checkpoint_preset)
+    ):
+        print(
+            "[WARN] Explicit play preset does not match checkpoint training preset: "
+            f"play={experiment_preset.name} ({experiment_preset.path}), "
+            f"checkpoint={checkpoint_preset.name} ({checkpoint_preset.path}). "
+            "This can easily cause odd postures or poor teleoperation response."
+        )
 
-    print(f"[INFO] Loading model checkpoint from: {resume_path}")
-    ppo_runner = OnPolicyRunnerWithExtractor(
-        env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
-    )
-    ppo_runner.load(resume_path)
-    policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
+    _configure_keyboard_play_env(env_cfg)
+    if args_cli.device is not None:
+        env_cfg.sim.device = args_cli.device
 
-    command_cfg = env_cfg.commands.base_velocity.ranges
-    keyboard = KeyboardCommandController(
-        device=env.unwrapped.device,
-        lin_range=tuple(command_cfg.lin_vel_x),
-        lat_range=tuple(command_cfg.lin_vel_y),
-        yaw_range=tuple(command_cfg.ang_vel_z),
-    )
-    injector = ManualCommandInjector(env)
+    _configure_play_curriculum_state(env_cfg, resume_path)
+    try:
+        env = gym.make(args_cli.task, cfg=env_cfg)
+        if isinstance(env.unwrapped, DirectMARLEnv):
+            env = multi_agent_to_single_agent(env)
+        if initialize_domain_randomization_curriculum(env.unwrapped):
+            env.reset()
+            print(
+                "[INFO] Initialized domain-randomization curriculum at its current level "
+                "and reset the environment before keyboard play."
+            )
+        env = CRLRslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    dt = env.unwrapped.step_dt
-    obs, extras = env.reset()
-    keyboard.reset_state()
-    injector.apply(keyboard.step(0.0, force_print=True), obs=obs, extras=extras)
+        print(f"[INFO] Loading model checkpoint from: {resume_path}")
+        ppo_runner = OnPolicyRunnerWithExtractor(
+            env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device
+        )
+        ppo_runner.load(resume_path)
+        policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
 
-    while simulation_app.is_running() and not keyboard.quit_requested:
-        if keyboard.consume_reset_request():
-            obs, extras = env.reset()
-            keyboard.reset_state()
-            injector.apply(keyboard.step(0.0, force_print=True), obs=obs, extras=extras)
-            continue
+        command_cfg = env_cfg.commands.base_velocity.ranges
+        keyboard = KeyboardCommandController(
+            device=env.unwrapped.device,
+            lin_range=tuple(command_cfg.lin_vel_x),
+            lat_range=tuple(command_cfg.lin_vel_y),
+            yaw_range=tuple(command_cfg.ang_vel_z),
+        )
+        injector = ManualCommandInjector(env)
 
-        start_time = time.time()
-        injector.apply(keyboard.step(dt), obs=obs, extras=extras)
-        with torch.inference_mode():
-            actions = policy(obs, hist_encoding=True)
-        obs, _, dones, extras = env.step(actions)
-        if torch.any(dones):
-            print("\n[INFO] Episode finished. Resetting command ramp for the next rollout.")
-            keyboard.reset_state()
-            injector.apply(keyboard.step(0.0, force_print=True), obs=obs, extras=extras)
+        dt = env.unwrapped.step_dt
+        obs, extras = env.reset()
+        keyboard.reset_state()
+        injector.apply(keyboard.step(0.0, force_print=True), obs=obs, extras=extras)
 
-        sleep_time = dt - (time.time() - start_time)
-        if args_cli.real_time and sleep_time > 0:
-            time.sleep(sleep_time)
+        while simulation_app.is_running() and not keyboard.quit_requested:
+            if keyboard.consume_reset_request():
+                obs, extras = env.reset()
+                keyboard.reset_state()
+                injector.apply(keyboard.step(0.0, force_print=True), obs=obs, extras=extras)
+                continue
 
-    print()
-    env.close()
+            start_time = time.time()
+            injector.apply(keyboard.step(dt), obs=obs, extras=extras)
+            with torch.inference_mode():
+                actions = policy(obs, hist_encoding=True)
+            obs, _, dones, extras = env.step(actions)
+            if torch.any(dones):
+                print("\n[INFO] Episode finished. Resetting command ramp for the next rollout.")
+                keyboard.reset_state()
+                injector.apply(keyboard.step(0.0, force_print=True), obs=obs, extras=extras)
+
+            sleep_time = dt - (time.time() - start_time)
+            if args_cli.real_time and sleep_time > 0:
+                time.sleep(sleep_time)
+    except KeyboardInterrupt:
+        print("\n[INFO] Ctrl+C received. Restoring terminal state and exiting teleop.")
+    finally:
+        if keyboard is not None:
+            keyboard.close()
+        if env is not None:
+            print()
+            env.close()
 
 
 if __name__ == "__main__":
-    main()
-    simulation_app.close()
+    pending_exception: BaseException | None = None
+    try:
+        main()
+    except BaseException as exc:
+        pending_exception = exc
+        traceback.print_exc()
+    finally:
+        simulation_app.close()
+    if pending_exception is not None:
+        raise pending_exception

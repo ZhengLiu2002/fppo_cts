@@ -9,6 +9,7 @@ import argparse
 import os
 import shutil
 import sys
+import traceback
 import warnings
 
 try:
@@ -133,6 +134,7 @@ import torch
 
 from scripts.rsl_rl.modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
 
+from crl_isaaclab.envs.mdp.curriculums import initialize_domain_randomization_curriculum
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.dict import print_dict
 from crl_tasks.tasks.galileo.config.agents.rsl_rl_cfg import CRLRslRlOnPolicyRunnerCfg
@@ -189,6 +191,10 @@ def main():
     experiment_preset = load_experiment_preset(selection=args_cli.exp, file_path=args_cli.exp_file)
     if experiment_preset is not None:
         apply_experiment_preset(env_cfg=env_cfg, agent_cfg=agent_cfg, preset=experiment_preset)
+        if hasattr(env_cfg, "apply_experiment_overrides"):
+            env_cfg.apply_experiment_overrides()
+        if hasattr(env_cfg, "apply_play_runtime_overrides"):
+            env_cfg.apply_play_runtime_overrides()
         agent_cfg = cli_args.reapply_rsl_rl_cli_overrides(agent_cfg, args_cli)
         env_cfg.scene.num_envs = args_cli.num_envs
         if args_cli.device is not None:
@@ -244,6 +250,13 @@ def main():
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
         env = multi_agent_to_single_agent(env)
+
+    if initialize_domain_randomization_curriculum(env.unwrapped):
+        env.reset()
+        print(
+            "[INFO] Initialized domain-randomization curriculum at its current level "
+            "and reset the environment before playback."
+        )
 
     # wrap for video recording
     if args_cli.video:
@@ -349,7 +362,13 @@ def main():
 
 
 if __name__ == "__main__":
-    # run the main function
-    main()
-    # close sim app
-    simulation_app.close()
+    pending_exception: BaseException | None = None
+    try:
+        main()
+    except BaseException as exc:
+        pending_exception = exc
+        traceback.print_exc()
+    finally:
+        simulation_app.close()
+    if pending_exception is not None:
+        raise pending_exception

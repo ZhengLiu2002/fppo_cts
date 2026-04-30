@@ -506,8 +506,11 @@ class OnPolicyRunnerWithExtractor(OnPolicyRunner):
         self._cts_student_ratio = 0.0
         self._cts_student_mask = None
         if self.training_type == "cts":
+            configured_student_ratio = self.alg_cfg_full.get("student_group_ratio", 0.25)
+            if configured_student_ratio is None:
+                configured_student_ratio = 0.25
             self._cts_student_ratio = max(
-                min(float(self.alg_cfg_full.get("student_group_ratio", 0.25) or 0.25), 1.0),
+                min(float(configured_student_ratio), 1.0),
                 0.0,
             )
             self._cts_student_mask = self._build_cts_student_mask(

@@ -30,7 +30,7 @@ SAFELOCOMOTION_TERRAINS_CFG = CRLTerrainGeneratorCfg(
         #                 half_valid_width = (0.4,0.8),
         #                 hurdle_height_range= '0.1+0.1*difficulty, 0.15+0.25*difficulty'
         #                 ),
-        # "crl_flat": ExtremeCRLHurdleTerrainCfg(
+        # "flat": ExtremeCRLHurdleTerrainCfg(
         #                 proportion=0.2,
         #                 apply_roughness=True,
         #                 apply_flat=True,

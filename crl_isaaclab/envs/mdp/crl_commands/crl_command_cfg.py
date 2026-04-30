@@ -1,7 +1,9 @@
+from dataclasses import MISSING
+import math
+
 from isaaclab.managers import CommandTermCfg
 from isaaclab.utils import configclass
 
-from dataclasses import MISSING
 from .uniform_crl_command import UniformCRLCommand
 
 
@@ -19,9 +21,13 @@ class CRLCommandCfg(CommandTermCfg):
     lin_x_level: float = 0.0
     max_lin_x_level: float = 1.0
     lin_x_level_step: float = 0.1
+    lin_y_level: float = 0.0
+    max_lin_y_level: float = 1.0
+    lin_y_level_step: float = 0.1
     ang_z_level: float = 0.0
     max_ang_z_level: float = 1.0
     ang_z_level_step: float = 0.1
+    heading_control_stiffness: float = 1.0
     # deployment-facing command limits/scales; keep aligned with the actual
     # training command ranges to avoid export-time ambiguity.
     velocity_x_forward_scale: float = 1.0
@@ -38,10 +44,15 @@ class CRLCommandCfg(CommandTermCfg):
         lin_vel_x: tuple[float, float] = MISSING
         lin_vel_y: tuple[float, float] = (-0.35, 0.35)
         ang_vel_z: tuple[float, float] = (-0.2, 0.2)
+        heading: tuple[float, float] = (-math.pi / 2.0, math.pi / 2.0)
+        heading_command_prob: float = 0.0
+        yaw_command_prob: float = 0.0
         standing_command_prob: float = 0.0
         start_curriculum_lin_x: tuple[float, float] | None = None
+        start_curriculum_lin_y: tuple[float, float] | None = None
         start_curriculum_ang_z: tuple[float, float] | None = None
         max_curriculum_lin_x: tuple[float, float] | None = None
+        max_curriculum_lin_y: tuple[float, float] | None = None
         max_curriculum_ang_z: tuple[float, float] | None = None
 
     @configclass

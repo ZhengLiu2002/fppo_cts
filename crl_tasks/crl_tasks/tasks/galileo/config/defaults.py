@@ -105,7 +105,7 @@ class GalileoBaseSceneCfg(InteractiveSceneCfg):
         prim_path="/World/ground",
         terrain_type="generator",
         terrain_generator=None,
-        max_init_terrain_level=2,
+        max_init_terrain_level=0,
         collision_group=-1,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -158,11 +158,11 @@ VIEWER_CFG = ViewerCfg(
 
 
 # ========== 地形配置 ==========
-# Rough terrain mix used for Galileo FPPO tasks.
+# Rough terrain mix ported from the extreme_load AMP-VAE-VIT recipe.
 GALILEO_ROUGH_TERRAIN_CFG = TerrainGeneratorCfg(
     size=(10.0, 10.0),
     border_width=60.0,
-    num_rows=10,
+    num_rows=15,
     num_cols=20,
     horizontal_scale=0.1,
     vertical_scale=0.005,
@@ -172,47 +172,41 @@ GALILEO_ROUGH_TERRAIN_CFG = TerrainGeneratorCfg(
     curriculum=True,
     sub_terrains={
         "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
-            proportion=0.15,
-            step_height_range=(0.05, 0.2),
-            step_width=0.3,
+            proportion=0.20,
+            step_height_range=(0.05, 0.25),
+            step_width=0.26,
             platform_width=3.0,
             border_width=1.0,
             holes=False,
         ),
         "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
-            proportion=0.15,
-            step_height_range=(0.05, 0.2),
-            step_width=0.3,
+            proportion=0.20,
+            step_height_range=(0.05, 0.25),
+            step_width=0.26,
             platform_width=3.0,
             border_width=1.0,
             holes=False,
         ),
-        "boxes": terrain_gen.MeshRandomGridTerrainCfg(
-            proportion=0.15,
-            grid_width=0.45,
-            grid_height_range=(0.05, 0.2),
-            platform_width=2.0,
-        ),
-        "random_rough": terrain_gen.HfRandomUniformTerrainCfg(
-            proportion=0.15,
-            noise_range=(0.02, 0.10),
-            noise_step=0.02,
-            border_width=0.25,
-        ),
         "hf_pyramid_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
             proportion=0.15,
-            slope_range=(0.0, 0.4),
+            slope_range=(0.0, 0.6109),
             platform_width=2.0,
             border_width=0.25,
         ),
         "hf_pyramid_slope_inv": terrain_gen.HfInvertedPyramidSlopedTerrainCfg(
             proportion=0.15,
-            slope_range=(0.0, 0.4),
+            slope_range=(0.0, 0.6109),
             platform_width=2.0,
             border_width=0.25,
         ),
-        "crl_flat": terrain_gen.MeshPlaneTerrainCfg(
-            proportion=0.10,
+        "plane_run": terrain_gen.MeshPlaneTerrainCfg(
+            proportion=0.15,
+        ),
+        "plane_yaw": terrain_gen.MeshPlaneTerrainCfg(
+            proportion=0.075,
+        ),
+        "plane_stand": terrain_gen.MeshPlaneTerrainCfg(
+            proportion=0.075,
         ),
     },
 )
@@ -225,22 +219,61 @@ class GalileoDefaults:
         render_interval = 8
 
     class curriculum:
-        # Command curriculum uses a gated progression policy:
-        # warmup -> minimum interval between upgrades -> tracking quality gate.
-        # episodes_per_level is retained for backward compatibility with legacy
-        # time-based logic in curriculums.py.
-        episodes_per_level = 15
+        # Reference extreme_load curriculum: terrain rows progress by walked
+        # distance, while vx/wz envelopes widen by one level every
+        # ``env.max_episode_length * command_level_interval_episodes`` steps.
+        episodes_per_level = 8
         terrain_move_up_ratio = 0.5
-        terrain_move_down_ratio = 0.1
-        command_warmup_steps = 4800
-        command_min_progress_steps = 7200
-        command_terrain_gate_level = 4.0
-        command_min_active_ratio = 0.12
-        lin_tracking_error_threshold = 0.22
-        ang_tracking_error_threshold = 0.30
-        lin_eval_min_command_speed = 0.20
-        ang_eval_min_command_speed = 0.16
-        ang_min_lin_x_level = 0.32
+        terrain_move_down_ratio = 0.5
+        command_level_interval_episodes = 8
+        command_warmup_steps = 0
+        command_min_progress_steps = None
+        command_terrain_gate_level = None
+        command_min_active_ratio = 0.0
+        lin_tracking_error_threshold = None
+        lateral_tracking_error_threshold = None
+        ang_tracking_error_threshold = None
+        lin_eval_min_command_speed = 0.0
+        lateral_eval_min_command_speed = 0.0
+        ang_eval_min_command_speed = 0.0
+        lateral_min_lin_x_level = 0.0
+        ang_min_lin_x_level = 0.0
+        terrain_type_warmup_steps = 9600
+        terrain_type_min_progress_steps = 9600
+        terrain_type_level_threshold = None
+        terrain_type_level_thresholds = (None, 0.35, 0.50, 0.50)
+        terrain_type_min_lin_x_level = 0.45
+        terrain_type_min_lin_y_level = 0.25
+        terrain_type_min_ang_z_level = 0.25
+        terrain_type_lin_error_threshold = 0.18
+        terrain_type_lin_error_thresholds = (0.22, 0.18, 0.18, 0.18)
+        terrain_type_ang_error_threshold = 0.24
+        terrain_type_ang_error_thresholds = (0.28, 0.24, 0.24, 0.24)
+        terrain_type_lin_min_command_speed = 0.20
+        terrain_type_ang_min_command_speed = 0.16
+        terrain_type_min_active_ratio = 0.12
+        terrain_type_max_stall_steps = 28800
+        terrain_type_reset_level_on_switch = 0
+        terrain_type_stages = (
+            (
+                "pyramid_stairs",
+                "pyramid_stairs_inv",
+                "hf_pyramid_slope",
+                "hf_pyramid_slope_inv",
+                "plane_run",
+                "plane_yaw",
+                "plane_stand",
+            ),
+        )
+        domain_randomization_warmup_steps = 24000
+        domain_randomization_min_progress_steps = 12000
+        domain_randomization_max_level = 1.0
+        domain_randomization_level_step = 0.05
+        domain_randomization_min_lin_x_level = 0.45
+        domain_randomization_min_lin_y_level = 0.20
+        domain_randomization_min_ang_z_level = 0.30
+        domain_randomization_terrain_gate_level = 1.0
+        domain_randomization_min_terrain_type_stage = len(terrain_type_stages) - 1
 
     class sim:
         dt = 0.0025
@@ -259,7 +292,7 @@ class GalileoDefaults:
             actor_num_priv_explicit = 0
             actor_num_priv_latent = 235
             actor_history_latent_dim = 32
-            actor_num_hist = 10
+            actor_num_hist = 20
 
             critic_num_prop = 48
             critic_num_scan = 182
@@ -268,9 +301,9 @@ class GalileoDefaults:
             critic_num_hist = 0
 
     class terrain:
-        size = (8.0, 8.0)
+        size = (10.0, 10.0)
         border_width = 60.0
-        num_rows = 10
+        num_rows = 15
         num_cols = 20
         horizontal_scale = 0.1
         vertical_scale = 0.005
@@ -280,108 +313,210 @@ class GalileoDefaults:
         # Flat-only pretraining mode keeps the CTS task on plane terrain until
         # FPPO stabilizes, while preserving the rough-terrain generator for later.
         flat_only_pretrain = False
-        flat_subterrain_name = "crl_flat"
+        flat_subterrain_name = "plane_run"
+        flat_subterrain_names = ("plane_run", "plane_yaw", "plane_stand")
+        flat_subterrain_proportions = {
+            "plane_run": 0.5,
+            "plane_yaw": 0.25,
+            "plane_stand": 0.25,
+        }
+
+    class action:
+        scale = 0.25
+        use_default_offset = True
+        action_delay_steps = [1, 1]
+        delay_update_global_steps = 24 * 8000
+        history_length = 8
+        use_delay = True
+        clip = {".*": (-4.8, 4.8)}
 
     class command:
         velocity_x_forward_scale: float = 1.0
-        velocity_x_backward_scale: float = 0.8
-        velocity_y_scale: float = 0.4
+        velocity_x_backward_scale: float = 1.0
+        velocity_y_scale: float = 0.5
         velocity_yaw_scale: float = 1.0
-        max_velocity: tuple[float, float, float] = (1.0, 0.4, 1.5)
-        lin_x_level: float = 0.3
-        max_lin_x_level: float = 1.0
-        ang_z_level: float = 0.3
-        max_ang_z_level: float = 1.0
-        lin_x_level_step: float = 0.01
-        ang_z_level_step: float = 0.01
+        max_velocity: tuple[float, float, float] = (1.2, 0.5, 1.5)
+        lin_x_level: float = 0.0
+        max_lin_x_level: float = 5.0
+        lin_y_level: float = 0.0
+        max_lin_y_level: float = 1.0
+        ang_z_level: float = 0.0
+        max_ang_z_level: float = 5.0
+        lin_x_level_step: float = 1.0
+        lin_y_level_step: float = 0.01
+        ang_z_level_step: float = 1.0
+        heading_control_stiffness: float = 0.5
         min_abs_lin_vel_x: float = 0.0
         min_abs_lin_vel_y: float = 0.0
+        terrain_mode_groups = {
+            "rough_heading": (
+                "pyramid_stairs",
+                "pyramid_stairs_inv",
+                "boxes",
+                "random_rough",
+                "hf_pyramid_slope",
+                "hf_pyramid_slope_inv",
+            ),
+            "plane_run": ("plane_run",),
+            "plane_yaw": ("plane_yaw",),
+            "plane_stand": ("plane_stand",),
+        }
 
         # 默认配置（用于 CommandsCfg 的初始化，不在地形特定配置中）
         class default:
-            standing_command_prob: float = 0.10
-            lin_vel_x = (-0.8, 1.0)
-            lin_vel_y = (-0.4, 0.4)
-            ang_vel_z = (-1.5, 1.5)
-            start_curriculum_lin_x = (-0.15, 0.3)
-            start_curriculum_ang_z = (-0.08, 0.08)
-            max_curriculum_lin_x = (-0.8, 1.0)
-            max_curriculum_ang_z = (-1.5, 1.5)
+            heading_command_prob: float = 0.7
+            yaw_command_prob: float = 0.0
+            standing_command_prob: float = 0.05
+            heading = (-math.pi / 2, math.pi / 2)
+            lin_vel_x = (-0.5, 0.5)
+            lin_vel_y = (-0.5, 0.5)
+            ang_vel_z = (-0.25, 0.25)
+            start_curriculum_lin_x = (-0.5, 0.5)
+            start_curriculum_lin_y = (-0.5, 0.5)
+            start_curriculum_ang_z = (-0.25, 0.25)
+            max_curriculum_lin_x = (-1.0, 1.0)
+            max_curriculum_lin_y = (-0.5, 0.5)
+            max_curriculum_ang_z = (-1.0, 1.0)
 
         ranges = {
             "pyramid_stairs": dict(
-                lin_vel_x=(-0.8, 1.0),
-                lin_vel_y=(-0.4, 0.4),
-                ang_vel_z=(-1.5, 1.5),
-                standing_command_prob=0.10,
-                start_curriculum_lin_x=(-0.15, 0.3),
-                start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.8, 1.0),
-                max_curriculum_ang_z=(-1.5, 1.5),
+                lin_vel_x=(-0.5, 0.5),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.25, 0.25),
+                heading=(-math.pi / 2, math.pi / 2),
+                heading_command_prob=0.7,
+                yaw_command_prob=0.0,
+                standing_command_prob=0.05,
+                start_curriculum_lin_x=(-0.5, 0.5),
+                start_curriculum_lin_y=(-0.5, 0.5),
+                start_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-0.8, 0.8),
+                max_curriculum_lin_y=(-0.5, 0.5),
+                max_curriculum_ang_z=(-1.0, 1.0),
             ),
             "pyramid_stairs_inv": dict(
-                lin_vel_x=(-0.8, 1.0),
-                lin_vel_y=(-0.4, 0.4),
-                ang_vel_z=(-1.5, 1.5),
-                standing_command_prob=0.10,
-                start_curriculum_lin_x=(-0.12, 0.25),
-                start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.8, 1.0),
-                max_curriculum_ang_z=(-1.5, 1.5),
+                lin_vel_x=(0.0, 0.5),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.25, 0.25),
+                heading=(-math.pi / 2, math.pi / 2),
+                heading_command_prob=0.7,
+                yaw_command_prob=0.0,
+                standing_command_prob=0.05,
+                start_curriculum_lin_x=(0.0, 0.5),
+                start_curriculum_lin_y=(-0.5, 0.5),
+                start_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(0.0, 0.8),
+                max_curriculum_lin_y=(-0.5, 0.5),
+                max_curriculum_ang_z=(-1.0, 1.0),
             ),
             "boxes": dict(
-                lin_vel_x=(-0.8, 1.0),
-                lin_vel_y=(-0.4, 0.4),
-                ang_vel_z=(-1.5, 1.5),
-                standing_command_prob=0.10,
-                start_curriculum_lin_x=(-0.15, 0.3),
-                start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.8, 1.0),
-                max_curriculum_ang_z=(-1.5, 1.5),
+                lin_vel_x=(0.0, 0.5),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.25, 0.25),
+                heading=(-math.pi / 2, math.pi / 2),
+                heading_command_prob=0.7,
+                yaw_command_prob=0.0,
+                standing_command_prob=0.05,
+                start_curriculum_lin_x=(0.0, 0.5),
+                start_curriculum_lin_y=(-0.5, 0.5),
+                start_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(0.0, 0.8),
+                max_curriculum_lin_y=(-0.5, 0.5),
+                max_curriculum_ang_z=(-1.0, 1.0),
             ),
             "random_rough": dict(
-                lin_vel_x=(-0.8, 1.0),
-                lin_vel_y=(-0.4, 0.4),
-                ang_vel_z=(-1.5, 1.5),
-                standing_command_prob=0.10,
-                start_curriculum_lin_x=(-0.15, 0.3),
-                start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.8, 1.0),
-                max_curriculum_ang_z=(-1.5, 1.5),
+                lin_vel_x=(-0.5, 0.5),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.25, 0.25),
+                heading=(-math.pi / 2, math.pi / 2),
+                heading_command_prob=0.7,
+                yaw_command_prob=0.0,
+                standing_command_prob=0.05,
+                start_curriculum_lin_x=(-0.5, 0.5),
+                start_curriculum_lin_y=(-0.5, 0.5),
+                start_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-1.0, 1.0),
+                max_curriculum_lin_y=(-0.5, 0.5),
+                max_curriculum_ang_z=(-1.0, 1.0),
             ),
             "hf_pyramid_slope": dict(
-                lin_vel_x=(-0.8, 1.0),
-                lin_vel_y=(-0.4, 0.4),
-                ang_vel_z=(-1.5, 1.5),
-                standing_command_prob=0.10,
-                start_curriculum_lin_x=(-0.15, 0.3),
-                start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.8, 1.0),
-                max_curriculum_ang_z=(-1.5, 1.5),
+                lin_vel_x=(-0.5, 0.5),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.25, 0.25),
+                heading=(-math.pi / 2, math.pi / 2),
+                heading_command_prob=0.7,
+                yaw_command_prob=0.0,
+                standing_command_prob=0.05,
+                start_curriculum_lin_x=(-0.5, 0.5),
+                start_curriculum_lin_y=(-0.5, 0.5),
+                start_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-1.0, 1.0),
+                max_curriculum_lin_y=(-0.5, 0.5),
+                max_curriculum_ang_z=(-1.0, 1.0),
             ),
             "hf_pyramid_slope_inv": dict(
-                lin_vel_x=(-0.8, 1.0),
-                lin_vel_y=(-0.4, 0.4),
-                ang_vel_z=(-1.5, 1.5),
-                standing_command_prob=0.10,
-                start_curriculum_lin_x=(-0.15, 0.3),
-                start_curriculum_ang_z=(-0.08, 0.08),
-                max_curriculum_lin_x=(-0.8, 1.0),
+                lin_vel_x=(-0.5, 0.5),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.25, 0.25),
+                heading=(-math.pi / 2, math.pi / 2),
+                heading_command_prob=0.7,
+                yaw_command_prob=0.0,
+                standing_command_prob=0.05,
+                start_curriculum_lin_x=(-0.5, 0.5),
+                start_curriculum_lin_y=(-0.5, 0.5),
+                start_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-1.0, 1.0),
+                max_curriculum_lin_y=(-0.5, 0.5),
+                max_curriculum_ang_z=(-1.0, 1.0),
+            ),
+            "plane_run": dict(
+                lin_vel_x=(-0.5, 0.5),
+                lin_vel_y=(-0.5, 0.5),
+                ang_vel_z=(-0.25, 0.25),
+                heading=(-math.pi / 2, math.pi / 2),
+                heading_command_prob=0.0,
+                yaw_command_prob=0.5,
+                standing_command_prob=0.05,
+                start_curriculum_lin_x=(-0.5, 0.5),
+                start_curriculum_lin_y=(-0.5, 0.5),
+                start_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(-1.2, 1.2),
+                max_curriculum_lin_y=(-0.5, 0.5),
                 max_curriculum_ang_z=(-1.5, 1.5),
             ),
-            "crl_flat": dict(
-                lin_vel_x=(-0.8, 1.0),
-                lin_vel_y=(-0.4, 0.4),
-                ang_vel_z=(-1.5, 1.5),
-                standing_command_prob=0.10,
-                start_curriculum_lin_x=(-0.2, 0.5),
-                start_curriculum_ang_z=(-0.12, 0.12),
-                max_curriculum_lin_x=(-0.8, 1.0),
+            "plane_yaw": dict(
+                lin_vel_x=(0.0, 0.0),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(-0.25, 0.25),
+                heading=(-math.pi / 2, math.pi / 2),
+                heading_command_prob=0.0,
+                yaw_command_prob=0.05,
+                standing_command_prob=0.0,
+                start_curriculum_lin_x=(0.0, 0.0),
+                start_curriculum_lin_y=(0.0, 0.0),
+                start_curriculum_ang_z=(-0.25, 0.25),
+                max_curriculum_lin_x=(0.0, 0.0),
+                max_curriculum_lin_y=(0.0, 0.0),
                 max_curriculum_ang_z=(-1.5, 1.5),
+            ),
+            "plane_stand": dict(
+                lin_vel_x=(0.0, 0.0),
+                lin_vel_y=(0.0, 0.0),
+                ang_vel_z=(0.0, 0.0),
+                heading=(-math.pi / 2, math.pi / 2),
+                heading_command_prob=0.0,
+                yaw_command_prob=0.05,
+                standing_command_prob=0.0,
+                start_curriculum_lin_x=(0.0, 0.0),
+                start_curriculum_lin_y=(0.0, 0.0),
+                start_curriculum_ang_z=(0.0, 0.0),
+                max_curriculum_lin_x=(0.0, 0.0),
+                max_curriculum_lin_y=(0.0, 0.0),
+                max_curriculum_ang_z=(0.0, 0.0),
             ),
         }
 
-        resampling_time_range = (6.0, 6.0)
+        resampling_time_range = (10.0, 10.0)
         clips = dict(lin_vel_clip=0.1, ang_vel_clip=0.02)
 
     class priv_obs_norm:
@@ -462,6 +597,11 @@ class GalileoDefaults:
             interval_range_s = (8.0, 8.0)
             is_global_time = True
 
+    class termination:
+        """Termination 条件（日志/wandb 用名称与键一致）。"""
+
+        fallen_limit_angle = 1.3
+
     class algorithm:
         """CTS benchmark algorithm profiles.
 
@@ -516,15 +656,9 @@ class GalileoDefaults:
             k_growth=1.0003,
             k_max=1.0,
             # CTS framework shared defaults
-            # P2-3: trim student reconstruction training to one cheaper pass per
-            # update so the velocity estimator no longer overfits each rollout.
             **shared_cts_framework,
         )
 
-        # P1-1: relax prob_joint_torque from 0.04 -> 0.06 since it is the only
-        # binding constraint and was being micro-violated at steady state. The
-        # joint_torques_l2 reward weight in mdp_cfg is bumped in tandem so the
-        # policy still has a soft incentive to stay torque-efficient.
         shared_constraint_limits = dict(
             base_contact_force=0.02,
             contact_velocity=0.025,
@@ -580,18 +714,6 @@ class GalileoDefaults:
                 },
             ),
             # FPPO predictor-corrector with robust margins and diagonal-Fisher projection.
-            # Tuning notes (Galileo CTS, 24K-iter run analysis):
-            # - P0-1: switch projection gradient base to normalized cost
-            #   advantage to suppress per-rollout magnitude spikes.
-            # - P0-3: align predictor KL target with desired_kl so adaptive
-            #   LR no longer collapses to lr_min within the first few k iters.
-            # - P0-4: lift fisher_min_diag two orders of magnitude to bound
-            #   the 1/Fisher amplification of weakly-explored params.
-            # - P1-2 (method B): only invest constraint gradient/Fisher cost
-            #   on constraints whose (cost + sigma) crosses 50% of their limit.
-            # - P2-1: stretch uncertainty refresh and halve shard count.
-            # - P2-2: clip sigma_a so margin spikes do not eat budget headroom.
-            # - P3: widen trust region by 20% for faster reward improvement.
             "fppo": dict(
                 cost_value_loss_coef=1.0,
                 num_learning_epochs=4,

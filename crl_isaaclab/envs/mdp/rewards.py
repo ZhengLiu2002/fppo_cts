@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import math
+import numpy as np
 import torch
 import torch.nn.functional as F
 from isaaclab.assets import Articulation, RigidObject
@@ -21,6 +22,7 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import ContactSensor, RayCaster
 from isaaclab.utils.math import quat_apply, quat_apply_inverse, yaw_quat
 from crl_isaaclab.terrains.runtime import resolve_env_terrain_names
+from .constraints import _foot_heights_relative
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -756,13 +758,22 @@ def _flat_terrain_mask(
     device: torch.device,
     dtype: torch.dtype,
 ) -> torch.Tensor:
+    terrain_names = _env_terrain_names(env)
+    if terrain_names is not None:
+        return torch.as_tensor(terrain_names == flat_terrain_name, device=device, dtype=dtype)
+
+    return torch.zeros(env.num_envs, device=device, dtype=dtype)
+
+
+def _env_terrain_names(env: ManagerBasedRLEnv) -> np.ndarray | None:
+    """Resolve per-environment terrain names from CRL state or terrain buffers."""
     crl_manager = getattr(env, "crl_manager", None)
     if crl_manager is not None:
         try:
             base_crl = crl_manager._terms.get("base_crl")
             terrain_names = getattr(base_crl, "env_per_terrain_name", None)
             if terrain_names is not None:
-                return torch.as_tensor(terrain_names == flat_terrain_name, device=device, dtype=dtype)
+                return np.asarray(terrain_names).reshape(-1).astype(str)
         except Exception:
             pass
 
@@ -771,11 +782,33 @@ def _flat_terrain_mask(
         try:
             env_names = resolve_env_terrain_names(terrain)
             if env_names is not None:
-                return torch.as_tensor(env_names == flat_terrain_name, device=device, dtype=dtype)
+                return np.asarray(env_names).reshape(-1).astype(str)
         except Exception:
             pass
 
-    return torch.zeros(env.num_envs, device=device, dtype=dtype)
+    return None
+
+
+def _terrain_name_scale(
+    env: ManagerBasedRLEnv,
+    terrain_scales: dict[str, float] | None,
+    default_scale: float,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Return a per-environment scale selected by terrain name."""
+    scales = torch.full((env.num_envs,), float(default_scale), device=device, dtype=dtype)
+    if not terrain_scales:
+        return scales
+
+    terrain_names = _env_terrain_names(env)
+    if terrain_names is None:
+        return scales
+
+    for terrain_name, terrain_scale in terrain_scales.items():
+        mask = torch.as_tensor(terrain_names == str(terrain_name), device=device, dtype=torch.bool)
+        scales = torch.where(mask, torch.as_tensor(terrain_scale, device=device, dtype=dtype), scales)
+    return scales
 
 
 def _command_speed_scale(
@@ -811,7 +844,7 @@ def flat_base_height_l2_fix(
     target_height: float,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     sensor_cfg: SceneEntityCfg | None = None,
-    flat_terrain_name: str = "crl_flat",
+    flat_terrain_name: str = "flat",
 ) -> torch.Tensor:
     """Flat-terrain-only variant of ``base_height_l2_fix``."""
     reward = base_height_l2_fix(
@@ -868,15 +901,29 @@ def track_ang_vel_z_exp(
 def flat_orientation_l2(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    flat_terrain_name: str = "crl_flat",
+    flat_terrain_name: str = "flat",
+    terrain_scales: dict[str, float] | None = None,
+    default_scale: float = 0.0,
 ) -> torch.Tensor:
     """Penalize non-flat base orientation using L2 squared kernel.
 
     This is computed by penalizing the xy-components of the projected gravity
-    vector, but only on the configured flat terrain.
+    vector. By default it preserves the legacy flat-terrain-only behavior. When
+    ``terrain_scales`` is provided, the penalty is scaled per environment by the
+    active terrain name.
     """
     asset: RigidObject = env.scene[asset_cfg.name]
     reward = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+    if terrain_scales is not None:
+        terrain_scale = _terrain_name_scale(
+            env,
+            terrain_scales=terrain_scales,
+            default_scale=default_scale,
+            device=reward.device,
+            dtype=reward.dtype,
+        )
+        return reward * terrain_scale
+
     flat_mask = _flat_terrain_mask(env, flat_terrain_name, reward.device, reward.dtype)
     return reward * flat_mask
 
@@ -1048,7 +1095,8 @@ def dof_error_l2(
 def foot_clearance(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot", body_names=".*_foot"),
+    terrain_sensor_cfg: SceneEntityCfg | None = None,
     command_name: str = "base_velocity",
     target_height: float = 0.06,
     low_speed_threshold: float = 0.4,
@@ -1072,7 +1120,38 @@ def foot_clearance(
     )
     swing_mask = ~contacts  # (num_envs, num_feet)
 
-    foot_z = asset.data.body_pos_w[:, sensor_cfg.body_ids, 2]  # (num_envs, num_feet)
+    foot_body_ids = asset_cfg.body_ids
+    sensor_body_ids = sensor_cfg.body_ids
+    sensor_body_count = None
+    if not isinstance(sensor_body_ids, slice):
+        try:
+            sensor_body_count = len(sensor_body_ids)
+        except TypeError:
+            sensor_body_count = None
+
+    if (
+        foot_body_ids is None
+        or isinstance(foot_body_ids, slice)
+        or (isinstance(foot_body_ids, (list, tuple)) and len(foot_body_ids) == 0)
+    ):
+        foot_body_ids = sensor_body_ids
+    elif sensor_body_count is not None:
+        try:
+            if len(foot_body_ids) != sensor_body_count:
+                foot_body_ids = sensor_body_ids
+        except TypeError:
+            foot_body_ids = sensor_body_ids
+
+    if terrain_sensor_cfg is not None and not isinstance(foot_body_ids, slice):
+        foot_z = _foot_heights_relative(
+            env,
+            asset,
+            list(foot_body_ids),
+            terrain_sensor_cfg=terrain_sensor_cfg,
+            height_offset=0.0,
+        )
+    else:
+        foot_z = asset.data.body_pos_w[:, foot_body_ids, 2]  # (num_envs, num_feet)
 
     clearance_reward = torch.tanh(tanh_mult * (foot_z - target_height) / max(target_height, 1e-4))
     clearance_reward = swing_mask.float() * clearance_reward

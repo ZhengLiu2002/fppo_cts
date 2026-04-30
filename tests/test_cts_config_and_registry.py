@@ -47,6 +47,12 @@ RSL_RL_CFG_FILE = (
 MDP_CFG_FILE = (
     REPO_ROOT / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "mdp_cfg.py"
 )
+CTS_ENV_CFG_FILE = (
+    REPO_ROOT / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "cts_env_cfg.py"
+)
+TRAIN_FILE = REPO_ROOT / "scripts" / "rsl_rl" / "train.py"
+EFFECTIVE_PARAMS_FILE = REPO_ROOT / "scripts" / "rsl_rl" / "effective_params.py"
+DUMP_EFFECTIVE_PARAMS_FILE = REPO_ROOT / "scripts" / "rsl_rl" / "dump_effective_params.py"
 
 
 def test_cts_registry_entry_uses_dedicated_training_type() -> None:
@@ -146,17 +152,48 @@ def test_cts_defaults_and_commands_match_policy_template_targets() -> None:
     assert "random_difficulty = False" not in defaults_source
     assert '"FL_hip_joint": 0.0' in defaults_source
     assert '"FL_thigh_joint": 0.8' in defaults_source
-    assert "velocity_x_backward_scale: float = 0.8" in defaults_source
-    assert "velocity_y_scale: float = 0.4" in defaults_source
+    assert "velocity_x_backward_scale: float = 1.0" in defaults_source
+    assert "velocity_y_scale: float = 0.5" in defaults_source
     assert "velocity_yaw_scale: float = 1.0" in defaults_source
-    assert "max_velocity: tuple[float, float, float] = (1.0, 0.4, 1.5)" in defaults_source
-    assert "lin_vel_x = (-0.8, 1.0)" in defaults_source
-    assert "lin_vel_y = (-0.4, 0.4)" in defaults_source
-    assert "ang_vel_z = (-1.5, 1.5)" in defaults_source
+    assert "max_velocity: tuple[float, float, float] = (1.2, 0.5, 1.5)" in defaults_source
+    assert "max_lin_x_level: float = 5.0" in defaults_source
+    assert "max_ang_z_level: float = 5.0" in defaults_source
+    assert "heading_control_stiffness: float = 0.5" in defaults_source
+    assert "lin_vel_x = (-0.5, 0.5)" in defaults_source
+    assert "lin_vel_y = (-0.5, 0.5)" in defaults_source
+    assert "ang_vel_z = (-0.25, 0.25)" in defaults_source
+    assert "standing_command_prob=0.05" in defaults_source
+    assert "heading_command_prob=0.7" in defaults_source
+    assert '"plane_run": dict(' in defaults_source
+    assert "max_curriculum_lin_x=(-1.0, 1.0)" in defaults_source
     assert "velocity_x_backward_scale=GalileoDefaults.command.velocity_x_backward_scale" in mdp_source
     assert "velocity_y_scale=GalileoDefaults.command.velocity_y_scale" in mdp_source
     assert "velocity_yaw_scale=GalileoDefaults.command.velocity_yaw_scale" in mdp_source
     assert "max_velocity=GalileoDefaults.command.max_velocity" in mdp_source
+    assert "heading_control_stiffness=GalileoDefaults.command.heading_control_stiffness" in mdp_source
+
+
+def test_galileo_env_exposes_config_summary_and_effective_param_dump() -> None:
+    defaults_source = DEFAULTS_FILE.read_text(encoding="utf-8")
+    cts_source = CTS_ENV_CFG_FILE.read_text(encoding="utf-8")
+    train_source = TRAIN_FILE.read_text(encoding="utf-8")
+    effective_source = EFFECTIVE_PARAMS_FILE.read_text(encoding="utf-8")
+    dump_source = DUMP_EFFECTIVE_PARAMS_FILE.read_text(encoding="utf-8")
+
+    assert "ConfigSummary = GalileoDefaults" in defaults_source
+    assert "self.config_summary = GalileoDefaults" in cts_source
+    assert 'hasattr(env_cfg, "apply_experiment_overrides")' in train_source
+    assert "env_cfg.apply_experiment_overrides()" in train_source
+    assert "write_effective_config_summary(log_dir, env_cfg, agent_cfg)" in train_source
+    assert 'filename: str = "effective_summary.json"' in effective_source
+    assert "build_effective_config_summary" in effective_source
+    assert '"plane_split": {' in effective_source
+    assert '"terrain_ranges": _to_serializable(ranges)' in effective_source
+    assert '"randomization_ranges": {' in effective_source
+    assert "AppLauncher.add_app_launcher_args(parser)" in dump_source
+    assert "env.reset(seed=args_cli.seed)" in dump_source
+    assert '"config_summary": build_effective_config_summary(unwrapped.cfg, agent_cfg)' in dump_source
+    assert 'choices=["summary", "per_shape", "none"]' in dump_source
 
 
 def test_cts_scene_preserves_shared_robot_actuator_overrides() -> None:

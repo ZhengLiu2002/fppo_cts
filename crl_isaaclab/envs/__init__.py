@@ -4,3 +4,4 @@ from .crl_manager_based_rl_env import CRLManagerBasedRLEnv
 from .crl_manager_based_env import CRLManagerBasedEnv
 from .crl_ui import CRLManagerBasedRLEnvWindow
 from .mdp import *
+from . import mdp as mdp

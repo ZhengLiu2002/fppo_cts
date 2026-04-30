@@ -107,6 +107,9 @@ class CRLViewportCameraController(ViewportCameraController):
         ):
             self._input.unsubscribe_from_keyboard_events(self._keyboard, self._keyboard_sub)
             self._keyboard_sub = None
+        self._unsubscribe_tracking_callback()
+
+    def _unsubscribe_tracking_callback(self) -> None:
         if (
             hasattr(self, "_viewport_camera_update_handle")
             and self._viewport_camera_update_handle is not None
@@ -149,27 +152,33 @@ class CRLViewportCameraController(ViewportCameraController):
                 self.free_cam_trigger = False
 
     def _update_tracking_callback(self, event):
-        if (
-            self.cfg.origin_type == "asset_root"
-            and self.cfg.asset_name is not None
-            and not self.is_free_cam
-        ):
-            self.update_view_to_asset_root(self.cfg.asset_name)
-        if (
-            self.cfg.origin_type == "asset_body"
-            and self.cfg.asset_name is not None
-            and self.cfg.body_name is not None
-            and not self.is_free_cam
-        ):
-            self.update_view_to_asset_body(self.cfg.asset_name, self.cfg.body_name)
-
-        if self.is_free_cam and self.free_cam_trigger:
-            self.free_cam_trigger = False
-            if self.cfg.origin_type == "asset_root" and self.cfg.asset_name is not None:
+        try:
+            if (
+                self.cfg.origin_type == "asset_root"
+                and self.cfg.asset_name is not None
+                and not self.is_free_cam
+            ):
                 self.update_view_to_asset_root(self.cfg.asset_name)
             if (
                 self.cfg.origin_type == "asset_body"
                 and self.cfg.asset_name is not None
                 and self.cfg.body_name is not None
+                and not self.is_free_cam
             ):
                 self.update_view_to_asset_body(self.cfg.asset_name, self.cfg.body_name)
+
+            if self.is_free_cam and self.free_cam_trigger:
+                self.free_cam_trigger = False
+                if self.cfg.origin_type == "asset_root" and self.cfg.asset_name is not None:
+                    self.update_view_to_asset_root(self.cfg.asset_name)
+                if (
+                    self.cfg.origin_type == "asset_body"
+                    and self.cfg.asset_name is not None
+                    and self.cfg.body_name is not None
+                ):
+                    self.update_view_to_asset_body(self.cfg.asset_name, self.cfg.body_name)
+        except ReferenceError:
+            # The tracked PhysX views can disappear during teardown (for example
+            # when the user closes teleop or an external timeout ends the run).
+            # Stop the recurring callback once the scene objects are no longer valid.
+            self._unsubscribe_tracking_callback()

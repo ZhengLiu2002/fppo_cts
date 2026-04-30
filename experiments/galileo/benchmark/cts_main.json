@@ -1,5 +1,5 @@
 {
-  "extends": "galileo/studies/algo_compare_cts_fair",
+  "extends": "galileo/base",
   "meta": {
     "description": "Main CTS benchmark preset for paper-grade constrained RL comparison.",
     "benchmark": "cts_main",
@@ -19,9 +19,15 @@
   },
   "agent": {
     "experiment_name": "galileo_benchmark_cts_main",
-    "num_steps_per_env": 32,
-    "save_interval": 150,
-    "max_iterations": 25000
+    "num_steps_per_env": 48,
+    "save_interval": 100,
+    "max_iterations": 20000
   },
-  "env": {}
+  "env": {
+    "scene": {
+      "terrain": {
+        "max_init_terrain_level": 1
+      }
+    }
+  }
 }

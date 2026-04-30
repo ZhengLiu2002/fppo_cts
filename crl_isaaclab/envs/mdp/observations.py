@@ -20,7 +20,7 @@ from crl_isaaclab.envs.mdp.crl_events import CRLEvent
 from collections.abc import Sequence
 import numpy as np
 import cv2
-import isaaclab.envs.mdp as mdp
+import isaaclab.envs.mdp as _isaaclab_mdp
 
 if TYPE_CHECKING:
     from crl_isaaclab.envs import CRLManagerBasedRLEnv
@@ -75,10 +75,10 @@ class ExtremeCRLObservations(ManagerTermBase):
     ) -> torch.Tensor:
 
         terrain_names = self.crl_event.env_per_terrain_name
-        env_idx_tensor = torch.tensor((terrain_names != "crl_flat")).to(
+        env_idx_tensor = torch.tensor((terrain_names != "flat")).to(
             dtype=torch.bool, device=self.device
         )
-        invert_env_idx_tensor = torch.tensor((terrain_names == "crl_flat")).to(
+        invert_env_idx_tensor = torch.tensor((terrain_names == "flat")).to(
             dtype=torch.bool, device=self.device
         )
         roll, pitch, yaw = euler_xyz_from_quat(self.asset.data.root_quat_w)
@@ -248,19 +248,30 @@ class PolicyHistory(ManagerTermBase):
         prop_terms: list[torch.Tensor] = []
         if include_base_lin_vel:
             prop_terms.append(
-                self._apply_scale(mdp.base_lin_vel(env), scale_cfg.get("base_lin_vel", 1.0))
+                self._apply_scale(
+                    _isaaclab_mdp.base_lin_vel(env), scale_cfg.get("base_lin_vel", 1.0)
+                )
             )
         prop_terms.extend(
             [
-                self._apply_scale(mdp.base_ang_vel(env), scale_cfg.get("base_ang_vel", 1.0)),
                 self._apply_scale(
-                    mdp.projected_gravity(env), scale_cfg.get("projected_gravity", 1.0)
+                    _isaaclab_mdp.base_ang_vel(env), scale_cfg.get("base_ang_vel", 1.0)
                 ),
-                self._apply_scale(mdp.joint_pos_rel(env), scale_cfg.get("joint_pos", 1.0)),
-                self._apply_scale(mdp.joint_vel_rel(env), scale_cfg.get("joint_vel", 1.0)),
-                self._apply_scale(mdp.last_action(env), scale_cfg.get("last_action", 1.0)),
                 self._apply_scale(
-                    mdp.generated_commands(env, command_name=command_name),
+                    _isaaclab_mdp.projected_gravity(env),
+                    scale_cfg.get("projected_gravity", 1.0),
+                ),
+                self._apply_scale(
+                    _isaaclab_mdp.joint_pos_rel(env), scale_cfg.get("joint_pos", 1.0)
+                ),
+                self._apply_scale(
+                    _isaaclab_mdp.joint_vel_rel(env), scale_cfg.get("joint_vel", 1.0)
+                ),
+                self._apply_scale(
+                    _isaaclab_mdp.last_action(env), scale_cfg.get("last_action", 1.0)
+                ),
+                self._apply_scale(
+                    _isaaclab_mdp.generated_commands(env, command_name=command_name),
                     scale_cfg.get("commands", 1.0),
                 ),
             ]

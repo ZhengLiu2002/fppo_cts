@@ -28,6 +28,7 @@ try:
         write_run_manifest,
     )
     from scripts.rsl_rl.exporter import export_inference_cfg
+    from scripts.rsl_rl.effective_params import write_effective_config_summary
 except ImportError:
     from experiment_manager import (  # type: ignore
         apply_experiment_preset,
@@ -47,6 +48,7 @@ except ImportError:
         write_run_manifest,
     )
     from exporter import export_inference_cfg  # type: ignore
+    from effective_params import write_effective_config_summary  # type: ignore
 
 REPO_ROOT = bootstrap_repo_paths(__file__)
 
@@ -149,6 +151,8 @@ def main(
     agent_cfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     if experiment_preset is not None:
         apply_experiment_preset(env_cfg=env_cfg, agent_cfg=agent_cfg, preset=experiment_preset)
+        if hasattr(env_cfg, "apply_experiment_overrides"):
+            env_cfg.apply_experiment_overrides()
         agent_cfg = cli_args.reapply_rsl_rl_cli_overrides(agent_cfg, args_cli)
         print(
             f"[INFO] Applied experiment preset: {experiment_preset.name} ({experiment_preset.path})"
@@ -245,6 +249,7 @@ def main(
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    write_effective_config_summary(log_dir, env_cfg, agent_cfg)
     if experiment_preset is not None:
         write_experiment_metadata(log_dir, experiment_preset, args=args_cli)
     write_run_manifest(

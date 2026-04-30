@@ -95,6 +95,7 @@ from pxr import Gf, Sdf
 from scripts.rsl_rl.modules.on_policy_runner_with_extractor import OnPolicyRunnerWithExtractor
 
 from crl_isaaclab.envs import CRLManagerBasedRLEnv
+from crl_isaaclab.envs.mdp.curriculums import initialize_domain_randomization_curriculum
 from isaaclab.utils.math import quat_apply
 from scripts.rsl_rl.vecenv_wrapper import CRLRslRlVecEnvWrapper
 from crl_tasks.tasks.galileo.config.agents.rsl_rl_cfg import CRLRslRlOnPolicyRunnerCfg
@@ -113,6 +114,10 @@ class GalileoDemoController:
         env_cfg = GalileoCTSCRLEnvCfg_PLAY()
         if experiment_preset is not None:
             apply_experiment_preset(env_cfg=env_cfg, agent_cfg=agent_cfg, preset=experiment_preset)
+            if hasattr(env_cfg, "apply_experiment_overrides"):
+                env_cfg.apply_experiment_overrides()
+            if hasattr(env_cfg, "apply_play_runtime_overrides"):
+                env_cfg.apply_play_runtime_overrides()
             agent_cfg = cli_args.reapply_rsl_rl_cli_overrides(agent_cfg, args_cli)
             print(
                 f"[INFO] Applied experiment preset: {experiment_preset.name} ({experiment_preset.path})"
@@ -141,8 +146,15 @@ class GalileoDemoController:
             env_cfg.sim.device = args_cli.device
         self.env_cfg = env_cfg
         self.agent_cfg = agent_cfg
+        base_env = CRLManagerBasedRLEnv(cfg=env_cfg)
+        if initialize_domain_randomization_curriculum(base_env):
+            base_env.reset()
+            print(
+                "[INFO] Initialized domain-randomization curriculum at its current level "
+                "and reset the environment before demo playback."
+            )
         # wrap around environment for rsl-rl
-        self.env = CRLRslRlVecEnvWrapper(CRLManagerBasedRLEnv(cfg=env_cfg))
+        self.env = CRLRslRlVecEnvWrapper(base_env)
         self.device = self.env.unwrapped.device
         # load previously trained model
         ppo_runner = OnPolicyRunnerWithExtractor(

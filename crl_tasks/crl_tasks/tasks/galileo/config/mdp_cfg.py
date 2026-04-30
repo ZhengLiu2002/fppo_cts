@@ -2,21 +2,9 @@
 
 from __future__ import annotations
 
-import isaaclab.envs.mdp as mdp
-from crl_isaaclab.envs.mdp import (
-    crl_commands,
-    curriculums,
-    events,
-    constraints as mdp_constraints,
-    observations as crl_obs,
-    rewards,
-    terminations,
-)
-from crl_isaaclab.envs.mdp.crl_actions import DelayedJointPositionActionCfg
-from isaaclab.envs.mdp.events import (
-    apply_external_force_torque,
-    randomize_rigid_body_mass,
-)
+from importlib import import_module
+
+mdp = import_module("crl_isaaclab.envs.mdp")
 from isaaclab.managers import (
     CurriculumTermCfg as CurrTerm,
     EventTermCfg as EventTerm,
@@ -57,6 +45,14 @@ BASE_BODY_NAMES = ["base_link"]
 # Joint-position feasibility cost uses the articulation soft limits directly.
 
 
+def _student_height_scan_obs_term() -> ObsTerm:
+    """Optional student-facing terrain scan used by diagnostic probes only."""
+    return ObsTerm(
+        func=mdp.height_scan,
+        params={"sensor_cfg": SceneEntityCfg("height_scanner"), "offset": 0.5},
+    )
+
+
 @configclass
 class CommandsCfg:
     """全向底盘速度指令。
@@ -65,15 +61,19 @@ class CommandsCfg:
     - x/yaw 方向使用 terrain-specific curriculum 扩展范围。
     """
 
-    base_velocity = crl_commands.CRLCommandCfg(
+    base_velocity = mdp.CRLCommandCfg(
         asset_name="robot",
         resampling_time_range=GalileoDefaults.command.resampling_time_range,
         lin_x_level=GalileoDefaults.command.lin_x_level,
         max_lin_x_level=GalileoDefaults.command.max_lin_x_level,
         lin_x_level_step=GalileoDefaults.command.lin_x_level_step,
+        lin_y_level=GalileoDefaults.command.lin_y_level,
+        max_lin_y_level=GalileoDefaults.command.max_lin_y_level,
+        lin_y_level_step=GalileoDefaults.command.lin_y_level_step,
         ang_z_level=GalileoDefaults.command.ang_z_level,
         max_ang_z_level=GalileoDefaults.command.max_ang_z_level,
         ang_z_level_step=GalileoDefaults.command.ang_z_level_step,
+        heading_control_stiffness=GalileoDefaults.command.heading_control_stiffness,
         velocity_x_forward_scale=GalileoDefaults.command.velocity_x_forward_scale,
         velocity_x_backward_scale=GalileoDefaults.command.velocity_x_backward_scale,
         velocity_y_scale=GalileoDefaults.command.velocity_y_scale,
@@ -83,17 +83,22 @@ class CommandsCfg:
         min_abs_lin_vel_y=GalileoDefaults.command.min_abs_lin_vel_y,
         rel_standing_envs=GalileoDefaults.command.default.standing_command_prob,
         terrain_level_range_scaling=False,
-        ranges=crl_commands.CRLCommandCfg.Ranges(
+        ranges=mdp.CRLCommandCfg.Ranges(
             lin_vel_x=GalileoDefaults.command.default.lin_vel_x,
             lin_vel_y=GalileoDefaults.command.default.lin_vel_y,
             ang_vel_z=GalileoDefaults.command.default.ang_vel_z,
+            heading=GalileoDefaults.command.default.heading,
+            heading_command_prob=GalileoDefaults.command.default.heading_command_prob,
+            yaw_command_prob=GalileoDefaults.command.default.yaw_command_prob,
             standing_command_prob=GalileoDefaults.command.default.standing_command_prob,
             start_curriculum_lin_x=GalileoDefaults.command.default.start_curriculum_lin_x,
+            start_curriculum_lin_y=GalileoDefaults.command.default.start_curriculum_lin_y,
             start_curriculum_ang_z=GalileoDefaults.command.default.start_curriculum_ang_z,
             max_curriculum_lin_x=GalileoDefaults.command.default.max_curriculum_lin_x,
+            max_curriculum_lin_y=GalileoDefaults.command.default.max_curriculum_lin_y,
             max_curriculum_ang_z=GalileoDefaults.command.default.max_curriculum_ang_z,
         ),
-        clips=crl_commands.CRLCommandCfg.Clips(
+        clips=mdp.CRLCommandCfg.Clips(
             lin_vel_clip=GalileoDefaults.command.clips["lin_vel_clip"],
             ang_vel_clip=GalileoDefaults.command.clips["ang_vel_clip"],
         ),
@@ -119,7 +124,7 @@ class _PrivilegedObsGroupCfg(ObsGroup):
         params={"sensor_cfg": SceneEntityCfg("height_scanner"), "offset": 0.5},
     )
     base_com = ObsTerm(
-        func=crl_obs.base_com,
+        func=mdp.base_com,
         params={
             "body_name": "base_link",
             "normalize": True,
@@ -127,7 +132,7 @@ class _PrivilegedObsGroupCfg(ObsGroup):
         },
     )
     base_mass = ObsTerm(
-        func=crl_obs.base_mass,
+        func=mdp.base_mass,
         params={
             "body_name": "base_link",
             "normalize": True,
@@ -135,7 +140,7 @@ class _PrivilegedObsGroupCfg(ObsGroup):
         },
     )
     ground_friction = ObsTerm(
-        func=crl_obs.ground_friction,
+        func=mdp.ground_friction,
         params={
             "normalize": True,
             "friction_range": GalileoDefaults.priv_obs_norm.ground_friction_range,
@@ -159,6 +164,7 @@ class CTSObservationsCfg:
             params={"command_name": "base_velocity"},
             scale=(2.0, 2.0, 0.25),
         )
+        student_height_scan = _student_height_scan_obs_term()
         teacher_base_lin_vel = ObsTerm(func=mdp.base_lin_vel)
         teacher_base_ang_vel = ObsTerm(func=mdp.base_ang_vel)
         teacher_projected_gravity = ObsTerm(func=mdp.projected_gravity)
@@ -174,7 +180,7 @@ class CTSObservationsCfg:
             params={"sensor_cfg": SceneEntityCfg("height_scanner"), "offset": 0.5},
         )
         teacher_base_com = ObsTerm(
-            func=crl_obs.base_com,
+            func=mdp.base_com,
             params={
                 "body_name": "base_link",
                 "normalize": True,
@@ -182,7 +188,7 @@ class CTSObservationsCfg:
             },
         )
         teacher_base_mass = ObsTerm(
-            func=crl_obs.base_mass,
+            func=mdp.base_mass,
             params={
                 "body_name": "base_link",
                 "normalize": True,
@@ -190,14 +196,14 @@ class CTSObservationsCfg:
             },
         )
         teacher_ground_friction = ObsTerm(
-            func=crl_obs.ground_friction,
+            func=mdp.ground_friction,
             params={
                 "normalize": True,
                 "friction_range": GalileoDefaults.priv_obs_norm.ground_friction_range,
             },
         )
         proprio_history = ObsTerm(
-            func=crl_obs.PolicyHistory,
+            func=mdp.PolicyHistory,
             params={
                 "history_length": GalileoDefaults.obs.cts.actor_num_hist,
                 "include_base_lin_vel": False,
@@ -227,7 +233,7 @@ class CTSCostsCfg:
     """Constraint terms used by all CTS benchmark algorithms."""
 
     prob_joint_pos = CostTerm(
-        func=mdp_constraints.joint_pos_prob_constraint,
+        func=mdp.joint_pos_prob_constraint,
         weight=1.0,
         params={
             "margin": 0.0,
@@ -236,21 +242,21 @@ class CTSCostsCfg:
         },
     )
     prob_joint_vel = CostTerm(
-        func=mdp_constraints.joint_vel_prob_constraint,
+        func=mdp.joint_vel_prob_constraint,
         weight=1.0,
         params={
             "limit": 15.0,
-            "soft_ratio": 0.8,
+            "soft_ratio": 0.95,
             "cost_limit": 1.0,
             "asset_cfg": LEG_JOINT_CFG,
         },
     )
     prob_joint_torque = CostTerm(
-        func=mdp_constraints.joint_torque_prob_constraint,
+        func=mdp.joint_torque_prob_constraint,
         weight=1.0,
         params={
             "limit": 80.0,
-            "soft_ratio": 0.8,
+            "soft_ratio": 0.95,
             "cost_limit": 1.0,
             "asset_cfg": LEG_JOINT_CFG,
         },
@@ -268,96 +274,116 @@ class CTSRewardsCfg:
     only_positive_rewards: bool = True
 
     track_lin_vel_xy_exp = RewTerm(
-        func=rewards.track_lin_vel_xy_exp,
-        weight=1.0,
+        func=mdp.track_lin_vel_xy_exp,
+        weight=1.5,
         params={
             "command_name": "base_velocity",
             "std": 0.25,
             "min_command_speed": None,
         },
     )
-    # P3: yaw tracking is the bottleneck residual (error_vel_yaw ~0.4 vs xy
-    # ~0.18 at 24K iters). Bumping the angular tracking weight from 0.5 to
-    # 0.75 increases gradient signal for the lagging axis without dwarfing
-    # the linear tracking term.
     track_ang_vel_z_exp = RewTerm(
-        func=rewards.track_ang_vel_z_exp,
-        weight=0.75,
+        func=mdp.track_ang_vel_z_exp,
+        weight=0.7,
         params={
             "command_name": "base_velocity",
-            "std": 0.25,
+            "std": 0.3,
             "min_command_speed": None,
         },
     )
-    # P1-1 soft companion: when the prob_joint_torque hard-constraint limit
-    # is relaxed (0.04 -> 0.06), the l2 torque penalty is doubled (-5e-7 ->
-    # -1e-6) so the policy still has a continuous incentive to keep torques
-    # low rather than only avoiding the new cost ceiling.
     joint_torques_l2 = RewTerm(
-        func=rewards.joint_torque_l2,
-        weight=-1.0e-6,
+        func=mdp.joint_torque_l2,
+        weight=-3.0e-7,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
     joint_acc_l2 = RewTerm(
-        func=rewards.joint_acc_l2,
-        weight=-6.0e-9,
+        func=mdp.joint_acc_l2,
+        weight=-1.0e-9,
     )
-    # P3: dof_error_l2 was overpowering the tracking signal at high command
-    # speeds, locking the policy into a default-pose bias. Reducing the
-    # weight from -0.5 to -0.3 frees the policy to deviate from neutral when
-    # tracking demands it, while keeping standing/low-speed regularization.
     dof_error_l2 = RewTerm(
-        func=rewards.dof_error_l2,
+        func=mdp.dof_error_l2,
         weight=-0.3,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "command_name": "base_velocity",
             "low_speed_threshold": 0.1,
-            "high_speed_threshold": 0.8,
-            "low_speed_scale": 1.5,
-            "high_speed_scale": 0.5,
+            "high_speed_threshold": 0.35,
+            "low_speed_scale": 1.2,
+            "high_speed_scale": 0.15,
         },
     )
     hip_pos_l2 = RewTerm(
-        func=rewards.hip_pos_l2,
-        weight=-0.1,
+        func=mdp.hip_pos_l2,
+        weight=-0.5,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint"),
             "command_name": "base_velocity",
             "low_speed_threshold": 0.1,
-            "high_speed_threshold": 0.8,
+            "high_speed_threshold": 0.35,
             "low_speed_scale": 1.5,
-            "high_speed_scale": 0.5,
+            "high_speed_scale": 0.8,
         },
     )
     action_rate_l2 = RewTerm(
-        func=rewards.action_rate_l2,
+        func=mdp.action_rate_l2,
         weight=-1.0e-3,
     )
-    lin_vel_z_l2 = RewTerm(func=rewards.lin_vel_z_l2, weight=-2.0)
-    ang_vel_xy_l2 = RewTerm(func=rewards.ang_vel_xy_l2, weight=-0.4)
-    flat_orientation_l2 = RewTerm(
-        func=rewards.flat_orientation_l2,
+
+    lin_vel_z_l2 = RewTerm(
+        func=mdp.lin_vel_z_l2,
         weight=-2.0,
+    )
+
+    ang_vel_xy_l2 = RewTerm(
+        func=mdp.ang_vel_xy_l2,
+        weight=-0.25,
+    )
+
+    flat_orientation_l2 = RewTerm(
+        func=mdp.flat_orientation_l2,
+        weight=-3.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
-            "flat_terrain_name": "crl_flat",                                                                                                                                                                
+            "default_scale": 1.5,
+            "terrain_scales": {
+                "plane_run": 1.5,
+                "plane_yaw": 1.5,
+                "plane_stand": 1.5,
+                "random_rough": 1.5,
+                "boxes": 1.2,
+                "pyramid_stairs": 0.25,
+                "pyramid_stairs_inv": 0.25,
+                "hf_pyramid_slope": 0.25,
+                "hf_pyramid_slope_inv": 0.25,
+            },
         },
     )
     feet_air_time = RewTerm(
-        func=rewards.feet_air_time,
+        func=mdp.feet_air_time,
         weight=1.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.5,
-            "low_speed_threshold": 0.1,
+            "threshold": 0.25,
+            "low_speed_threshold": 0.25,
+        },
+    )
+    foot_clearance = RewTerm(
+        func=mdp.foot_clearance,
+        weight=0.1,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+            "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
+            "terrain_sensor_cfg": SceneEntityCfg("height_scanner"),
+            "command_name": "base_velocity",
+            "target_height": 0.06,
+            "low_speed_threshold": 0.4,
         },
     )
     feet_slide = RewTerm(
-        func=rewards.feet_slide,
-        weight=-0.1,
+        func=mdp.feet_slide,
+        weight=-0.35,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
@@ -365,19 +391,18 @@ class CTSRewardsCfg:
         },
     )
     gait_contact_symmetry = RewTerm(
-        func=rewards.gait_contact_symmetry,
-        weight=0.2,
+        func=mdp.gait_contact_symmetry,
+        weight=0.05,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "left_foot_names": LEFT_FOOT_BODY_NAMES,
             "right_foot_names": RIGHT_FOOT_BODY_NAMES,
             "contact_threshold": 5.0,
-            "command_name": "base_velocity",
-            "min_command_speed": 0.1,
+            "command_name": None,
         },
     )
     trot_phase_reward = RewTerm(
-        func=rewards.trot_phase_reward,
+        func=mdp.trot_phase_reward,
         weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
@@ -386,13 +411,13 @@ class CTSRewardsCfg:
             "contact_smoothing": 1.5,
             "ema_decay": 0.9,
             "command_name": "base_velocity",
-            "min_command_speed": 0.2,
-            "low_speed_threshold": 0.45,
-            "max_abs_yaw_cmd": 0.2,
+            "min_command_speed": 0.12,
+            "low_speed_threshold": 0.35,
+            "max_abs_yaw_cmd": 0.3,
         },
     )
     undesired_contacts = RewTerm(
-        func=rewards.undesired_contacts,
+        func=mdp.undesired_contacts,
         weight=-1.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=[".*_thigh", ".*_calf"]),
@@ -403,23 +428,14 @@ class CTSRewardsCfg:
 
 @configclass
 class TerminationsCfg:
-    time_out = DoneTerm(
-        func=terminations.time_out,
-        time_out=True,
-    )
-    bad_orientation = DoneTerm(
-        func=terminations.bad_orientation,
+    """Termination terms for the MDP."""
+
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    fallen = DoneTerm(
+        func=mdp.bad_orientation,
         params={
+            "limit_angle": GalileoDefaults.termination.fallen_limit_angle,
             "asset_cfg": SceneEntityCfg("robot"),
-            "roll_limit": 1.5,
-            "pitch_limit": 1.5,
-        },
-    )
-    body_contact = DoneTerm(
-        func=terminations.body_contact,
-        params={
-            "sensor_cfg": SceneEntityCfg("contact_forces", body_names="base_link"),
-            "threshold": 10.0,
         },
     )
 
@@ -452,7 +468,7 @@ class EventCfg:
     # ========== 一、机身/动力学（reset 时） ==========
     # 机身质量随机化（对 base_link 质量做加性随机）
     randomize_base_mass = EventTerm(
-        func=randomize_rigid_body_mass,
+        func=mdp.randomize_rigid_body_mass,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
@@ -463,7 +479,7 @@ class EventCfg:
 
     # 机身质心随机化（对 base_link 的 CoM 在 body 系下随机偏移）
     randomize_base_com = EventTerm(
-        func=events.randomize_rigid_body_com,
+        func=mdp.randomize_rigid_body_com,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
@@ -477,7 +493,7 @@ class EventCfg:
     # 我们需要使用一个包装函数或者修改 __call__ 签名来接受但不使用这个参数
     # 暂时移除 make_consistent，因为它会导致参数检查失败
     physics_material = EventTerm(
-        func=events.randomize_rigid_body_material,
+        func=mdp.randomize_rigid_body_material,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
@@ -501,7 +517,7 @@ class EventCfg:
     # ========== 三、腿部关节（reset 时） ==========
     # 腿部关节位置随机化（仅对 12 个腿关节）
     reset_leg_joints = EventTerm(
-        func=events.reset_joints_by_offset,
+        func=mdp.reset_joints_by_offset,
         mode="reset",
         params={
             "asset_cfg": LEG_JOINT_CFG,
@@ -513,7 +529,7 @@ class EventCfg:
     # ========== 四、执行器增益（reset 时） ==========
     # Kp/Kd 增益随机化（对腿 + 臂执行器）
     randomize_actuator_kp_kd_gains = EventTerm(
-        func=events.randomize_actuator_gains,
+        func=mdp.randomize_actuator_gains,
         mode="reset",
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=[".*"]),  # 所有关节
@@ -527,7 +543,7 @@ class EventCfg:
     # ========== 五、外力扰动（interval，训练中周期施加） ==========
     # 速度扰动（对基座施加瞬时速度扰动）
     push_robot_vel = EventTerm(
-        func=events.push_by_setting_velocity,
+        func=mdp.push_by_setting_velocity,
         params={
             "asset_cfg": SceneEntityCfg("robot"),  # push_by_setting_velocity 作用于整个 asset
             "velocity_range": GalileoDefaults.event.push_robot_vel.velocity_range,
@@ -539,7 +555,7 @@ class EventCfg:
 
     # 力矩扰动（对 base_link 施加外力矩）
     push_robot_torque = EventTerm(
-        func=apply_external_force_torque,
+        func=mdp.apply_external_force_torque,
         params={
             "asset_cfg": SceneEntityCfg("robot", body_names="base_link"),
             "force_range": GalileoDefaults.event.push_robot_torque.force_range,
@@ -552,7 +568,7 @@ class EventCfg:
 
     # 保留相机随机化（如果需要）
     random_camera_position = EventTerm(
-        func=events.random_camera_position,
+        func=mdp.random_camera_position,
         mode="startup",
         params={
             "sensor_cfg": SceneEntityCfg("depth_camera"),
@@ -564,17 +580,17 @@ class EventCfg:
 
 @configclass
 class CurriculumCfg:
-    # Stage-1 (flat locomotion): keep terrain difficulty fixed and only
-    # ramp command thresholds as the single curriculum source.
+    # Ported from extreme_load: terrain rows progress by distance walked, and
+    # the x/yaw command envelopes widen on a fixed episode-step schedule.
     terrain_levels = CurrTerm(
-        func=curriculums.terrain_levels_vel,
+        func=mdp.terrain_levels_vel,
         params={
             "move_up_ratio": GalileoDefaults.curriculum.terrain_move_up_ratio,
             "move_down_ratio": GalileoDefaults.curriculum.terrain_move_down_ratio,
         },
     )
     lin_vel_x_command_threshold = CurrTerm(
-        func=curriculums.lin_vel_x_command_threshold,
+        func=mdp.lin_vel_x_command_threshold,
         params={
             "episodes_per_level": GalileoDefaults.curriculum.episodes_per_level,
             "warmup_steps": GalileoDefaults.curriculum.command_warmup_steps,
@@ -586,7 +602,7 @@ class CurriculumCfg:
         },
     )
     ang_vel_z_command_threshold = CurrTerm(
-        func=curriculums.ang_vel_z_command_threshold,
+        func=mdp.ang_vel_z_command_threshold,
         params={
             "episodes_per_level": GalileoDefaults.curriculum.episodes_per_level,
             "warmup_steps": GalileoDefaults.curriculum.command_warmup_steps,
@@ -598,6 +614,9 @@ class CurriculumCfg:
             "min_lin_x_level": GalileoDefaults.curriculum.ang_min_lin_x_level,
         },
     )
+    lin_vel_y_command_threshold = None
+    terrain_type_progression = None
+    domain_randomization_scale = None
 
 
 @configclass
@@ -613,15 +632,15 @@ class ActionsCfg:
     - history_length: 叠加历史动作，帮助策略理解真实控制通道。
     """
 
-    joint_pos = DelayedJointPositionActionCfg(
+    joint_pos = mdp.DelayedJointPositionActionCfg(
         asset_name="robot",
         joint_names=LEG_JOINT_NAMES,
         preserve_order=True,
-        scale=0.25,
-        use_default_offset=True,
-        action_delay_steps=[1, 1],
-        delay_update_global_steps=24 * 8000,
-        history_length=1,
-        use_delay=True,
-        clip={".*": (-4.8, 4.8)},
+        scale=GalileoDefaults.action.scale,
+        use_default_offset=GalileoDefaults.action.use_default_offset,
+        action_delay_steps=GalileoDefaults.action.action_delay_steps,
+        delay_update_global_steps=GalileoDefaults.action.delay_update_global_steps,
+        history_length=GalileoDefaults.action.history_length,
+        use_delay=GalileoDefaults.action.use_delay,
+        clip=GalileoDefaults.action.clip,
     )

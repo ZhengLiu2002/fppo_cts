@@ -37,8 +37,8 @@
 
 ## 3. 推荐执行顺序
 
-1. 跑一次 `galileo/fppo_smoke` 验证链路
-2. 跑 `galileo/studies/algo_compare_cts_fair` 做短程算法筛选
+1. 跑一次 `galileo/debug/fppo_smoke` 验证链路
+2. 跑 `galileo/benchmark/cts_main` 做短程算法筛选
 3. 为候选算法补 `galileo/benchmark/cts_main` 的长程训练
 4. 用统一 checkpoint 规则补 3 到 5 个 seed
 5. 对最佳设置做 GUI 回放、键盘遥控和导出检查

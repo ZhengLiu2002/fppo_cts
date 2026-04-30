@@ -4,6 +4,7 @@ import torch
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+import isaaclab.utils.math as math_utils
 import omni.log
 
 from isaaclab.assets import Articulation
@@ -22,6 +23,11 @@ class UniformCRLCommand(CommandTerm):
         super().__init__(cfg, env)
         self.robot: Articulation = env.scene[cfg.asset_name]
         self.vel_command_b = torch.zeros(self.num_envs, 3, device=self.device)
+        self.heading_target = torch.zeros(self.num_envs, device=self.device)
+        self.ang_vel_z_limit_low = torch.zeros(self.num_envs, device=self.device)
+        self.ang_vel_z_limit_high = torch.zeros(self.num_envs, device=self.device)
+        self.is_heading_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.is_yaw_env = torch.zeros_like(self.is_heading_env)
         self.is_standing_env = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
@@ -164,8 +170,18 @@ class UniformCRLCommand(CommandTerm):
             ang_vel_z_base = (
                 self.cfg.ranges.ang_vel_z if use_ang_z_cfg_range else terrain_ranges["ang_vel_z"]
             )
+            heading_range = terrain_ranges.get("heading", self.cfg.ranges.heading)
+            heading_command_prob = terrain_ranges.get(
+                "heading_command_prob", self.cfg.ranges.heading_command_prob
+            )
+            yaw_command_prob = terrain_ranges.get(
+                "yaw_command_prob", self.cfg.ranges.yaw_command_prob
+            )
             standing_command_prob = terrain_ranges.get(
                 "standing_command_prob", self.cfg.ranges.standing_command_prob
+            )
+            start_curriculum_lin_y = terrain_ranges.get(
+                "start_curriculum_lin_y", self.cfg.ranges.start_curriculum_lin_y
             )
             start_curriculum_lin_x = terrain_ranges.get(
                 "start_curriculum_lin_x", self.cfg.ranges.start_curriculum_lin_x
@@ -176,6 +192,9 @@ class UniformCRLCommand(CommandTerm):
             max_curriculum_lin_x = terrain_ranges.get(
                 "max_curriculum_lin_x", self.cfg.ranges.max_curriculum_lin_x
             )
+            max_curriculum_lin_y = terrain_ranges.get(
+                "max_curriculum_lin_y", self.cfg.ranges.max_curriculum_lin_y
+            )
             max_curriculum_ang_z = terrain_ranges.get(
                 "max_curriculum_ang_z", self.cfg.ranges.max_curriculum_ang_z
             )
@@ -184,18 +203,26 @@ class UniformCRLCommand(CommandTerm):
             lin_vel_x_base = self.cfg.ranges.lin_vel_x
             lin_vel_y_base = self.cfg.ranges.lin_vel_y
             ang_vel_z_base = self.cfg.ranges.ang_vel_z
+            heading_range = self.cfg.ranges.heading
+            heading_command_prob = self.cfg.ranges.heading_command_prob
+            yaw_command_prob = self.cfg.ranges.yaw_command_prob
             standing_command_prob = self.cfg.ranges.standing_command_prob
             start_curriculum_lin_x = self.cfg.ranges.start_curriculum_lin_x
+            start_curriculum_lin_y = self.cfg.ranges.start_curriculum_lin_y
             start_curriculum_ang_z = self.cfg.ranges.start_curriculum_ang_z
             max_curriculum_lin_x = self.cfg.ranges.max_curriculum_lin_x
+            max_curriculum_lin_y = self.cfg.ranges.max_curriculum_lin_y
             max_curriculum_ang_z = self.cfg.ranges.max_curriculum_ang_z
 
         # sample velocity commands
         r = torch.empty(len(env_id_tensor), device=self.device)
         lin_x_range = lin_vel_x_base
+        lin_y_range = lin_vel_y_base
         ang_z_range = ang_vel_z_base
         lin_x_level = float(getattr(self.cfg, "lin_x_level", 0.0))
         max_lin_x_level = max(float(getattr(self.cfg, "max_lin_x_level", 1.0)), 1.0e-6)
+        lin_y_level = float(getattr(self.cfg, "lin_y_level", 0.0))
+        max_lin_y_level = max(float(getattr(self.cfg, "max_lin_y_level", 1.0)), 1.0e-6)
         ang_z_level = float(getattr(self.cfg, "ang_z_level", 0.0))
         max_ang_z_level = max(float(getattr(self.cfg, "max_ang_z_level", 1.0)), 1.0e-6)
 
@@ -214,6 +241,19 @@ class UniformCRLCommand(CommandTerm):
                 max_curriculum_lin_x,
                 lin_x_level,
                 max_lin_x_level,
+            )
+
+        if (
+            self.cfg.ranges.start_curriculum_lin_y is not None
+            and self.cfg.ranges.max_curriculum_lin_y is not None
+            and start_curriculum_lin_y is not None
+            and max_curriculum_lin_y is not None
+        ):
+            lin_y_range = _interp_range(
+                start_curriculum_lin_y,
+                max_curriculum_lin_y,
+                lin_y_level,
+                max_lin_y_level,
             )
 
         if use_ang_z_cfg_range and start_curriculum_ang_z is not None and max_curriculum_ang_z is not None:
@@ -262,9 +302,14 @@ class UniformCRLCommand(CommandTerm):
         # -- linear velocity - x direction
         self.vel_command_b[env_id_tensor, 0] = r.uniform_(*lin_x_range)
         # -- linear velocity - y direction
-        self.vel_command_b[env_id_tensor, 1] = r.uniform_(*lin_vel_y_base)
+        self.vel_command_b[env_id_tensor, 1] = r.uniform_(*lin_y_range)
         # -- ang vel yaw - rotation around z
         self.vel_command_b[env_id_tensor, 2] = r.uniform_(*ang_z_range)
+        self.heading_target[env_id_tensor] = r.uniform_(*heading_range)
+        self.ang_vel_z_limit_low[env_id_tensor] = float(ang_z_range[0])
+        self.ang_vel_z_limit_high[env_id_tensor] = float(ang_z_range[1])
+        self.is_heading_env[env_id_tensor] = r.uniform_(0.0, 1.0) <= float(heading_command_prob)
+        self.is_yaw_env[env_id_tensor] = r.uniform_(0.0, 1.0) <= float(yaw_command_prob)
         # update standing envs
         # 使用地形特定的 standing_command_prob，如果存在；否则使用配置中的值
         standing_prob = (
@@ -317,6 +362,21 @@ class UniformCRLCommand(CommandTerm):
             self._resample_command_group(group_env_ids, terrain_name)
 
     def _update_command(self):
+        heading_env_ids = self.is_heading_env.nonzero(as_tuple=False).flatten()
+        if heading_env_ids.numel() > 0:
+            heading_error = math_utils.wrap_to_pi(
+                self.heading_target[heading_env_ids] - self.robot.data.heading_w[heading_env_ids]
+            )
+            self.vel_command_b[heading_env_ids, 2] = torch.clip(
+                self.cfg.heading_control_stiffness * heading_error,
+                min=self.ang_vel_z_limit_low[heading_env_ids],
+                max=self.ang_vel_z_limit_high[heading_env_ids],
+            )
+
+        yaw_env_ids = self.is_yaw_env.nonzero(as_tuple=False).flatten()
+        if yaw_env_ids.numel() > 0:
+            self.vel_command_b[yaw_env_ids, :2] = 0.0
+
         # Optionally zero very small yaw-rate commands, matching lin_vel_clip behavior.
         if self.cfg.small_commands_to_zero:
             self.vel_command_b[:, 2] *= (

@@ -39,6 +39,18 @@ cd /home/lz/Project/IsaacLab/fppo_ts
 
 ## 训练
 
+最低难度盲走调试：
+
+```bash
+python scripts/rsl_rl/train_galileo_min_blind_walk.py \
+  --logger wandb \
+  --log_project_name galileo_cts \
+  --run_name min_blind_walk
+```
+
+该脚本使用 `galileo/debug/blind_walk` preset，在纯平地、窄指令、无域随机化下训练，用于先调奖励、约束和算法参数。
+它保留确定性 reset，不会关闭机器人复位本身。
+
 最小 smoke test：
 
 ```bash
@@ -62,6 +74,19 @@ python scripts/rsl_rl/train.py \
   --max_iterations 20000 \
   --log_project_name galileo_cts
 ```
+
+`galileo/benchmark/cts_main` 现在直接继承 v3.2 验证过的 rough-row bootstrap，但课程骨架进一步参考了 `extreme_load` 的 blind locomotion 实现：`terrain_levels` 仍是主轴，`lin_x / wz` 改成粗粒度 time-based level，`lin_y` 不再单独做 curriculum，而是交给 terrain-specific command table 控制，不同 terrain family 用更贴近地形的命令分布。这样能明显减少多轴 gate 互锁，正式训练从 0 起跑时更稳。
+
+正式训练快捷入口：
+
+```bash
+python scripts/rsl_rl/train_galileo_cts_main.py \
+  --logger wandb \
+  --log_project_name galileo_cts \
+  --run_name cts_main
+```
+
+在当前这版里，更推荐直接从 0 起跑正式训练，而不是从 `galileo/curriculum/rough_mainline` resume。原因是训练入口目前还没有把课程状态和模型状态做成真正的一体恢复；如果只是 warm-start 权重，反而容易把策略丢回不匹配的课程分布里。更快的调试方式，是让这版简化课程自己完整跑通，再看 `terrain_type_progression` 和 `domain_randomization_scale` 的后段表现。
 
 PPO 对比命令：
 
@@ -101,6 +126,8 @@ python scripts/rsl_rl/train.py \
 - 当前默认算法由 [defaults.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/defaults.py) 指定，默认是 `fppo`
 - 支持的主要算法：`ppo`、`fppo`、`np3o`、`ppo_lagrange`、`cpo`、`pcpo`、`focops`
 - 兼容旧配置时，`--algo cts` 会退化为 `ppo` on CTS framework，但新的对比实验建议直接使用真实优化器名
+- 课程设计说明和最近 run 诊断见 [docs/GALILEO_CURRICULUM.md](/home/lz/Project/IsaacLab/fppo_ts/docs/GALILEO_CURRICULUM.md)
+- 当前推荐顺序是：`galileo/debug/blind_walk -> galileo/curriculum/flat_speed -> galileo/curriculum/flat_omni -> galileo/probes/terrain_row / galileo/probes/terrain_perception -> galileo/curriculum/rough_mainline -> galileo/benchmark/cts_main`
 - 训练结果默认写入 `logs/rsl_rl/<experiment_name>/`
 - 每次训练的最终配置会落到：
   - `params/env.yaml`
@@ -192,7 +219,28 @@ python scripts/rsl_rl/play_keyboard.py \
   --algo fppo \
   --force_gui \
   --checkpoint logs/
+
+python scripts/rsl_rl/play_keyboard.py \
+  --task Isaac-Galileo-CTS-Play-v0 \
+  --algo fppo \
+  --force_gui \
+  --terrain-mode flat \
+  --checkpoint logs/
+
+python scripts/rsl_rl/play_keyboard_galileo_cts_main.py \
+  --terrain-mode flat \
+  --checkpoint logs/rsl_rl/galileo_
+
 ```
+
+纯平地评估键盘遥控：
+
+```bash
+python scripts/rsl_rl/play_keyboard_galileo_flat.py \
+  --checkpoint <checkpoint.pt>
+```
+
+这个脚本会把遥控场景切到纯平地，并自动套用 `galileo/curriculum/flat_speed` preset 与匹配的键盘速度幅值，适合手动检查基本 gait、速度响应和姿态稳定性。
 
 PPO 键盘遥控示例：
 
@@ -202,6 +250,14 @@ python scripts/rsl_rl/play_keyboard.py \
   --algo ppo \
   --force_gui \
   --checkpoint 
+
+python scripts/rsl_rl/play_keyboard.py \
+  --task Isaac-Galileo-CTS-Play-v0 \
+  --algo fppo \
+  --force_gui \
+  --terrain-mode flat \
+  --checkpoint <checkpoint.pt>
+
 ```
 
 常用控制：
@@ -255,9 +311,9 @@ python scripts/rsl_rl/train.py --list-exp
 
 推荐起点：
 
-- `galileo/fppo_smoke`
-- `galileo/studies/algo_compare_cts_fair`
+- `galileo/debug/fppo_smoke`
 - `galileo/benchmark/cts_main`
+- `galileo/studies/algo_compare_cts`：历史名称，现兼容到 `galileo/benchmark/cts_main`
 
 ## 开发
 

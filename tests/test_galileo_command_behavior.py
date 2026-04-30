@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-import re
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULTS_FILE = (
     REPO_ROOT / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "defaults.py"
+)
+CTS_ENV_CFG_FILE = (
+    REPO_ROOT / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "cts_env_cfg.py"
+)
+SCENE_CFG_FILE = (
+    REPO_ROOT / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "scene_cfg.py"
+)
+TERRAIN_PROFILES_FILE = (
+    REPO_ROOT / "crl_tasks" / "crl_tasks" / "tasks" / "galileo" / "config" / "terrain_profiles.py"
 )
 COMMAND_CFG_FILE = (
     REPO_ROOT / "crl_isaaclab" / "envs" / "mdp" / "crl_commands" / "crl_command_cfg.py"
@@ -49,15 +57,40 @@ def _source_segment(source: str, node: ast.AST) -> str:
     return segment
 
 
-def test_rough_terrain_ranges_keep_a_nonzero_standing_probability() -> None:
+def test_extreme_load_terrain_ranges_keep_reference_command_modes() -> None:
     module, source = _module_and_source(DEFAULTS_FILE)
     defaults_cls = _class_node(module, "GalileoDefaults")
     command_cls = _class_node(defaults_cls, "command")
     command_assignments = _class_assignments(command_cls)
     ranges_segment = _source_segment(source, command_assignments["ranges"])
 
-    assert ranges_segment.count("standing_command_prob=0.10") == 7
-    assert re.search(r"standing_command_prob=0\\.0(?!\\d)", ranges_segment) is None
+    assert ranges_segment.count("heading_command_prob=0.7") == 6
+    assert "yaw_command_prob=0.5" in ranges_segment
+    assert ranges_segment.count("standing_command_prob=0.05") == 7
+    assert '"plane_run": dict(' in ranges_segment
+    assert '"plane_yaw": dict(' in ranges_segment
+    assert '"plane_stand": dict(' in ranges_segment
+
+
+def test_flat_profile_keeps_extreme_load_plane_command_modes_split() -> None:
+    defaults_source = DEFAULTS_FILE.read_text(encoding="utf-8")
+    scene_source = SCENE_CFG_FILE.read_text(encoding="utf-8")
+    cts_source = CTS_ENV_CFG_FILE.read_text(encoding="utf-8")
+    terrain_profiles_source = TERRAIN_PROFILES_FILE.read_text(encoding="utf-8")
+
+    assert 'flat_subterrain_names = ("plane_run", "plane_yaw", "plane_stand")' in defaults_source
+    assert '"plane_run": 0.5' in defaults_source
+    assert '"plane_yaw": 0.25' in defaults_source
+    assert '"plane_stand": 0.25' in defaults_source
+    assert "terrain_mode_groups = {" in defaults_source
+    assert '"plane_run": ("plane_run",)' in defaults_source
+    assert '"plane_yaw": ("plane_yaw",)' in defaults_source
+    assert '"plane_stand": ("plane_stand",)' in defaults_source
+    assert "restrict_terrain_generator_to_named_subterrains" in scene_source
+    assert "restrict_terrain_generator_to_named_subterrains" in cts_source
+    assert 'f"debug_{terrain_name}"' not in cts_source
+    assert "debug_{terrain_name}" not in cts_source
+    assert "preserving their public names" in terrain_profiles_source
 
 
 def test_training_command_pipeline_keeps_small_command_deadzone_enabled() -> None:

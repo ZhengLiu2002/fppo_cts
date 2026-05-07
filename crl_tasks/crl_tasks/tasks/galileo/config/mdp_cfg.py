@@ -237,7 +237,8 @@ class CTSCostsCfg:
         weight=1.0,
         params={
             "margin": 0.0,
-            "limit": 1.0,
+            "soft_ratio": 0.95,
+            "cost_limit": 1.0,
             "asset_cfg": LEG_JOINT_CFG,
         },
     )
@@ -256,7 +257,7 @@ class CTSCostsCfg:
         weight=1.0,
         params={
             "limit": 80.0,
-            "soft_ratio": 0.95,
+            "soft_ratio": 0.99,
             "cost_limit": 1.0,
             "asset_cfg": LEG_JOINT_CFG,
         },
@@ -275,25 +276,25 @@ class CTSRewardsCfg:
 
     track_lin_vel_xy_exp = RewTerm(
         func=mdp.track_lin_vel_xy_exp,
-        weight=1.5,
+        weight=1.0,
         params={
             "command_name": "base_velocity",
-            "std": 0.25,
+            "std": 0.5,
             "min_command_speed": None,
         },
     )
     track_ang_vel_z_exp = RewTerm(
         func=mdp.track_ang_vel_z_exp,
-        weight=0.7,
+        weight=0.5,
         params={
             "command_name": "base_velocity",
-            "std": 0.3,
+            "std": 0.5,
             "min_command_speed": None,
         },
     )
     joint_torques_l2 = RewTerm(
         func=mdp.joint_torque_l2,
-        weight=-3.0e-7,
+        weight=-6.0e-7,
         params={"asset_cfg": SceneEntityCfg("robot")},
     )
 
@@ -303,19 +304,19 @@ class CTSRewardsCfg:
     )
     dof_error_l2 = RewTerm(
         func=mdp.dof_error_l2,
-        weight=-0.3,
+        weight=-0.1,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "command_name": "base_velocity",
             "low_speed_threshold": 0.1,
             "high_speed_threshold": 0.35,
-            "low_speed_scale": 1.2,
-            "high_speed_scale": 0.15,
+            "low_speed_scale": 1.25,
+            "high_speed_scale": 0.75,
         },
     )
     hip_pos_l2 = RewTerm(
         func=mdp.hip_pos_l2,
-        weight=-0.5,
+        weight=-0.4,
         params={
             "asset_cfg": SceneEntityCfg("robot", joint_names=".*_hip_joint"),
             "command_name": "base_velocity",
@@ -330,32 +331,42 @@ class CTSRewardsCfg:
         weight=-1.0e-3,
     )
 
+    stand_still = RewTerm(
+        func=mdp.stand_still_penalty,
+        weight=-0.2,
+        params={
+            "command_name": "base_velocity",
+            "asset_cfg": LEG_JOINT_CFG,
+            "command_threshold": 0.1,
+        },
+    )
+
     lin_vel_z_l2 = RewTerm(
         func=mdp.lin_vel_z_l2,
-        weight=-2.0,
+        weight=-3.0,
     )
 
     ang_vel_xy_l2 = RewTerm(
         func=mdp.ang_vel_xy_l2,
-        weight=-0.25,
+        weight=-0.3,
     )
 
     flat_orientation_l2 = RewTerm(
         func=mdp.flat_orientation_l2,
-        weight=-3.0,
+        weight=-2.0,
         params={
             "asset_cfg": SceneEntityCfg("robot"),
             "default_scale": 1.5,
             "terrain_scales": {
-                "plane_run": 1.5,
-                "plane_yaw": 1.5,
-                "plane_stand": 1.5,
-                "random_rough": 1.5,
+                "plane_run": 1.25,
+                "plane_yaw": 1.25,
+                "plane_stand": 1.25,
+                "random_rough": 1.25,
                 "boxes": 1.2,
-                "pyramid_stairs": 0.25,
-                "pyramid_stairs_inv": 0.25,
-                "hf_pyramid_slope": 0.25,
-                "hf_pyramid_slope_inv": 0.25,
+                "pyramid_stairs": 0.75,
+                "pyramid_stairs_inv": 0.75,
+                "hf_pyramid_slope": 0.75,
+                "hf_pyramid_slope_inv": 0.75,
             },
         },
     )
@@ -365,13 +376,13 @@ class CTSRewardsCfg:
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "command_name": "base_velocity",
-            "threshold": 0.25,
+            "threshold": 0.5,
             "low_speed_threshold": 0.25,
         },
     )
     foot_clearance = RewTerm(
         func=mdp.foot_clearance,
-        weight=0.1,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
@@ -383,7 +394,7 @@ class CTSRewardsCfg:
     )
     feet_slide = RewTerm(
         func=mdp.feet_slide,
-        weight=-0.35,
+        weight=-0.3,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
             "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
@@ -392,7 +403,7 @@ class CTSRewardsCfg:
     )
     gait_contact_symmetry = RewTerm(
         func=mdp.gait_contact_symmetry,
-        weight=0.05,
+        weight=0.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "left_foot_names": LEFT_FOOT_BODY_NAMES,
@@ -401,9 +412,23 @@ class CTSRewardsCfg:
             "command_name": None,
         },
     )
+    load_sharing = RewTerm(
+        func=mdp.load_sharing,
+        weight=0.2,
+        params={
+            "sensor_cfg": SceneEntityCfg("contact_forces", body_names=".*_foot"),
+            "min_contacts": 2,
+            "force_threshold": 5.0,
+            "var_scale": 1.0,
+            "ema_decay": 0.99,
+            "command_name": "base_velocity",
+            "low_speed_threshold": 0.25,
+            "stand_scale": 0.0,
+        },
+    )
     trot_phase_reward = RewTerm(
         func=mdp.trot_phase_reward,
-        weight=0.0,
+        weight=0.3,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
             "foot_body_names": FOOT_BODY_NAMES,

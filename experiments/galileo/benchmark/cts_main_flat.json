@@ -1,0 +1,19 @@
+{
+  "extends": "galileo/benchmark/cts_main",
+  "meta": {
+    "description": "Flat-only CTS benchmark warm-up preset. Keeps the main benchmark settings but trains on plane terrain only.",
+    "benchmark": "cts_main_flat",
+    "stage": "flat_bootstrap",
+    "tags": [
+      "baseline",
+      "galileo",
+      "flat-only"
+    ]
+  },
+  "agent": {
+    "experiment_name": "galileo_benchmark_cts_main_flat"
+  },
+  "env": {
+    "terrain_profile": "flat"
+  }
+}

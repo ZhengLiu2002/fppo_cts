@@ -53,6 +53,7 @@ CTS_ENV_CFG_FILE = (
 TRAIN_FILE = REPO_ROOT / "scripts" / "rsl_rl" / "train.py"
 EFFECTIVE_PARAMS_FILE = REPO_ROOT / "scripts" / "rsl_rl" / "effective_params.py"
 DUMP_EFFECTIVE_PARAMS_FILE = REPO_ROOT / "scripts" / "rsl_rl" / "dump_effective_params.py"
+CRL_RL_ENV_FILE = REPO_ROOT / "crl_isaaclab" / "envs" / "crl_manager_based_rl_env.py"
 
 
 def test_cts_registry_entry_uses_dedicated_training_type() -> None:
@@ -184,9 +185,14 @@ def test_galileo_env_exposes_config_summary_and_effective_param_dump() -> None:
     assert "self.config_summary = GalileoDefaults" in cts_source
     assert 'hasattr(env_cfg, "apply_experiment_overrides")' in train_source
     assert "env_cfg.apply_experiment_overrides()" in train_source
-    assert "write_effective_config_summary(log_dir, env_cfg, agent_cfg)" in train_source
+    assert "from scripts.rsl_rl.obs_layout import validate_policy_layout" in train_source
+    assert "policy_export_cfg = export_inference_cfg(" in train_source
+    assert "validate_policy_layout(policy_export_cfg, env=env, actor_critic=runner.alg.policy, strict=True)" in train_source
+    assert "write_effective_config_summary(log_dir, env_cfg, agent_cfg, policy_export_cfg)" in train_source
     assert 'filename: str = "effective_summary.json"' in effective_source
     assert "build_effective_config_summary" in effective_source
+    assert '"policy_export": _policy_export_dump(policy_export_cfg)' in effective_source
+    assert '"active_terrain_command_ranges": _active_terrain_command_ranges(env_cfg, config_summary)' in effective_source
     assert '"plane_split": {' in effective_source
     assert '"terrain_ranges": _to_serializable(ranges)' in effective_source
     assert '"randomization_ranges": {' in effective_source
@@ -194,6 +200,16 @@ def test_galileo_env_exposes_config_summary_and_effective_param_dump() -> None:
     assert "env.reset(seed=args_cli.seed)" in dump_source
     assert '"config_summary": build_effective_config_summary(unwrapped.cfg, agent_cfg)' in dump_source
     assert 'choices=["summary", "per_shape", "none"]' in dump_source
+
+
+def test_crl_runtime_exposes_extreme_load_style_diagnostics() -> None:
+    source = CRL_RL_ENV_FILE.read_text(encoding="utf-8")
+
+    assert "CRL_DEBUG_OBS" in source
+    assert "ISAAC_DEBUG_OBS" in source
+    assert "_maybe_debug_print_obs(self.obs_buf)" in source
+    assert "_collect_terrain_command_diagnostics" in source
+    assert "TerrainCommand/" in source
 
 
 def test_cts_scene_preserves_shared_robot_actuator_overrides() -> None:

@@ -10,6 +10,11 @@ import re
 import numpy as np
 import torch
 
+try:
+    from scripts.rsl_rl.obs_layout import add_policy_layout_metadata, validate_policy_layout
+except ImportError:
+    from obs_layout import add_policy_layout_metadata, validate_policy_layout  # type: ignore
+
 
 def _safe_float(value, default=0.0):
     try:
@@ -1236,6 +1241,14 @@ def export_inference_cfg(
     policy_cfg_dict["max_jerk"] = [5.0, 5.0, 30.0]
     policy_cfg_dict["threshold"] = {"limit_lower": 0.0, "limit_upper": 0.0, "damping": 5.0}
     policy_cfg_dict = _synchronize_policy_export_cfg(policy_cfg_dict)
+    policy_cfg_dict = add_policy_layout_metadata(
+        policy_cfg_dict,
+        env=env,
+        env_cfg=live_env_cfg,
+        agent_cfg=agent_cfg,
+        actor_critic=actor_critic,
+    )
+    validate_policy_layout(policy_cfg_dict, env=env, actor_critic=actor_critic, strict=True)
 
     print("joint_names:", policy_cfg_dict["joint_names"])
     print("default_joint_pos:", policy_cfg_dict["default_joint_pos"])
@@ -1259,8 +1272,46 @@ def export_inference_cfg(
     print("max_acceleration:", policy_cfg_dict["max_acceleration"])
     print("max_jerk:", policy_cfg_dict["max_jerk"])
     print("threshold:", policy_cfg_dict["threshold"])
+    print("layout_hash:", policy_cfg_dict["layout_hash"])
+    print("observation_layout_hash:", policy_cfg_dict["observation_layout_hash"])
     export_inference_cfg_to_yaml(policy_cfg_dict, path)
     return policy_cfg_dict
+
+
+def _format_yaml_scalar(value):
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "null"
+    return str(value)
+
+
+def _append_yaml_block(content: str, key: str, value, indent: int = 0) -> str:
+    prefix = " " * indent
+    if isinstance(value, dict):
+        content += f"{prefix}{key}:\n"
+        for child_key, child_value in value.items():
+            content = _append_yaml_block(content, str(child_key), child_value, indent + 2)
+        return content
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return content + f"{prefix}{key}: []\n"
+        if all(not isinstance(item, (dict, list, tuple)) for item in value):
+            items = ", ".join(_format_yaml_scalar(item) for item in value)
+            return content + f"{prefix}{key}: [{items}]\n"
+        content += f"{prefix}{key}:\n"
+        for item in value:
+            if isinstance(item, dict):
+                content += f"{prefix}  -\n"
+                for child_key, child_value in item.items():
+                    content = _append_yaml_block(content, str(child_key), child_value, indent + 4)
+            else:
+                content += f"{prefix}  - {_format_yaml_scalar(item)}\n"
+        return content
+    return content + f"{prefix}{key}: {_format_yaml_scalar(value)}\n"
 
 
 def export_inference_cfg_to_yaml(config_dict, path):
@@ -1354,5 +1405,17 @@ def export_inference_cfg_to_yaml(config_dict, path):
     content += f"  limit_upper: {config_dict['threshold']['limit_upper']}\n"
     content += f"  damping: {config_dict['threshold']['damping']}\n"
     content += f"max_torques: {config_dict['max_torques']}\n"
+    content += f'layout_hash: "{config_dict.get("layout_hash", "")}"\n'
+    content += f'observation_layout_hash: "{config_dict.get("observation_layout_hash", "")}"\n'
+    content = _append_yaml_block(
+        content,
+        "export_input_dims",
+        config_dict.get("export_input_dims", {}),
+    )
+    content = _append_yaml_block(
+        content,
+        "runtime_metadata",
+        config_dict.get("runtime_metadata", {}),
+    )
     with open(readme_file_path, "w", encoding="utf-8") as f:
         f.write(content)

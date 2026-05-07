@@ -29,6 +29,7 @@ try:
     )
     from scripts.rsl_rl.exporter import export_inference_cfg
     from scripts.rsl_rl.effective_params import write_effective_config_summary
+    from scripts.rsl_rl.obs_layout import validate_policy_layout
 except ImportError:
     from experiment_manager import (  # type: ignore
         apply_experiment_preset,
@@ -49,6 +50,7 @@ except ImportError:
     )
     from exporter import export_inference_cfg  # type: ignore
     from effective_params import write_effective_config_summary  # type: ignore
+    from obs_layout import validate_policy_layout  # type: ignore
 
 REPO_ROOT = bootstrap_repo_paths(__file__)
 
@@ -239,17 +241,18 @@ def main(
         print(f"[INFO]: Loading model checkpoint from: {resume_path}")
         # load previously trained model
         runner.load(resume_path)
-    export_inference_cfg(
+    policy_export_cfg = export_inference_cfg(
         env,
         env_cfg,
         log_dir,
         agent_cfg=agent_cfg,
         actor_critic=runner.alg.policy,
     )
+    validate_policy_layout(policy_export_cfg, env=env, actor_critic=runner.alg.policy, strict=True)
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
-    write_effective_config_summary(log_dir, env_cfg, agent_cfg)
+    write_effective_config_summary(log_dir, env_cfg, agent_cfg, policy_export_cfg)
     if experiment_preset is not None:
         write_experiment_metadata(log_dir, experiment_preset, args=args_cli)
     write_run_manifest(

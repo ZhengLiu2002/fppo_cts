@@ -11,7 +11,7 @@
 
 ## 核心位置
 
-- Gym 注册：[crl_tasks/crl_tasks/tasks/galileo/__init__.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/__init__.py)
+- Gym 注册：[crl_tasks/crl_tasks/tasks/galileo/**init**.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/__init__.py)
 - CTS 环境：[crl_tasks/crl_tasks/tasks/galileo/config/cts_env_cfg.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/cts_env_cfg.py)
 - CTS scene：[crl_tasks/crl_tasks/tasks/galileo/config/scene_cfg.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/scene_cfg.py)
 - MDP 配置：[crl_tasks/crl_tasks/tasks/galileo/config/mdp_cfg.py](/home/lz/Project/IsaacLab/fppo_ts/crl_tasks/crl_tasks/tasks/galileo/config/mdp_cfg.py)
@@ -74,6 +74,23 @@ python scripts/rsl_rl/train.py \
   --max_iterations 20000 \
   --log_project_name galileo_cts
 ```
+
+FPPO 平地预训练命令：
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Isaac-Galileo-CTS-v0 \
+  --algo fppo \
+  --exp galileo/benchmark/cts_main_flat \
+  --num_envs 2048 \
+  --run_name fppo_main_flat \
+  --headless \
+  --logger wandb \
+  --max_iterations 20000 \
+  --log_project_name galileo_cts
+```
+
+`galileo/benchmark/cts_main_flat` 直接继承 `galileo/benchmark/cts_main`，除了把训练地形限制为纯平地之外，其余 teacher-student、reward、cost、动作延迟、域随机化和算法参数都保持不变。推荐先用这条 preset 把基本 gait 和 tracking 训稳，再切回 rough benchmark。
 
 `galileo/benchmark/cts_main` 现在直接继承 v3.2 验证过的 rough-row bootstrap，但课程骨架进一步参考了 `extreme_load` 的 blind locomotion 实现：`terrain_levels` 仍是主轴，`lin_x / wz` 改成粗粒度 time-based level，`lin_y` 不再单独做 curriculum，而是交给 terrain-specific command table 控制，不同 terrain family 用更贴近地形的命令分布。这样能明显减少多轴 gate 互锁，正式训练从 0 起跑时更稳。
 
@@ -328,3 +345,4 @@ python scripts/rsl_rl/train.py --list-exp
 ./scripts/run_tests.sh -q
 python -m black scripts/rsl_rl tests
 ```
+

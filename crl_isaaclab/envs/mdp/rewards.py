@@ -136,6 +136,9 @@ def load_sharing(
     force_threshold: float = 1.0,
     var_scale: float = 1.0,
     ema_decay: float = 0.995,
+    command_name: str | None = None,
+    low_speed_threshold: float = 0.25,
+    stand_scale: float = 0.0,
     eps: float = 1.0e-6,
 ) -> torch.Tensor:
     """Reward four-foot participation and balanced support loads.
@@ -144,7 +147,8 @@ def load_sharing(
     currently contacting feet, but additionally tracks an EMA duty factor for
     every foot. The final reward is scaled by the *minimum* per-foot duty
     participation score, so any foot that stays permanently airborne or planted
-    collapses the reward for the whole robot.
+    collapses the reward for the whole robot. If a command is provided, the term
+    can be faded out near zero command to avoid encouraging stepping in place.
     """
     contact_sensor: ContactSensor | None = env.scene.sensors.get(sensor_cfg.name, None)
     if contact_sensor is None:
@@ -196,6 +200,16 @@ def load_sharing(
     duty_participation = 4.0 * duty_ema * (1.0 - duty_ema)
     participation_floor = torch.min(duty_participation, dim=1).values.clamp(min=0.0, max=1.0)
     reward = reward * participation_floor
+    reward = reward * _command_speed_scale(
+        env,
+        command_name=command_name,
+        low_speed_threshold=0.0,
+        high_speed_threshold=low_speed_threshold,
+        low_speed_scale=stand_scale,
+        high_speed_scale=1.0,
+        device=reward.device,
+        dtype=reward.dtype,
+    )
     return reward
 
 
@@ -710,6 +724,44 @@ def action_smoothness_penalty(
         penalty += joint_vel_weight * torch.sum(torch.square(joint_vel), dim=1)
 
     return penalty
+
+
+def _foot_spread_penalty(
+    asset: Articulation,
+    body_ids: list[int] | slice | None,
+    max_spread_x: float,
+    max_spread_y: float,
+) -> torch.Tensor:
+    if body_ids is None or isinstance(body_ids, slice) or len(body_ids) == 0:
+        return torch.zeros(asset.num_instances, device=asset.device)
+
+    foot_pos_w = asset.data.body_pos_w[:, body_ids, :3]
+    rel_foot_pos_w = foot_pos_w - asset.data.root_pos_w[:, None, :3]
+    root_yaw = yaw_quat(asset.data.root_quat_w)[:, None, :].expand(-1, foot_pos_w.shape[1], -1)
+    foot_pos_yaw = quat_apply_inverse(root_yaw, rel_foot_pos_w)
+    foot_xy = foot_pos_yaw[..., :2]
+
+    spread_x = foot_xy[..., 0].max(dim=1).values - foot_xy[..., 0].min(dim=1).values
+    spread_y = foot_xy[..., 1].max(dim=1).values - foot_xy[..., 1].min(dim=1).values
+    excess_x = torch.clamp(spread_x - float(max_spread_x), min=0.0)
+    excess_y = torch.clamp(spread_y - float(max_spread_y), min=0.0)
+    return torch.square(excess_x) + torch.square(excess_y)
+
+
+def stand_still_penalty(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    command_threshold: float = 0.1,
+) -> torch.Tensor:
+    """Penalize joint default-position error only when command is near zero."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    zero_command_mask = torch.norm(command[:, :3], dim=1) < float(command_threshold)
+    joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+    default_joint_pos = asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    joint_default_error = torch.sum(torch.square(joint_pos - default_joint_pos), dim=1)
+    return joint_default_error * zero_command_mask.float()
 
 
 def stand_joint_deviation_l1(

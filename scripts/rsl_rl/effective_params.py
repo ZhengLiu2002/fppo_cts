@@ -187,7 +187,53 @@ def _agent_dump(agent_cfg: Any) -> dict[str, Any]:
     }
 
 
-def build_effective_config_summary(env_cfg: Any, agent_cfg: Any | None = None) -> dict[str, Any]:
+def _policy_export_dump(policy_export_cfg: Any | None) -> dict[str, Any]:
+    if not isinstance(policy_export_cfg, Mapping):
+        return {}
+    keys = (
+        "layout_hash",
+        "observation_layout_hash",
+        "input_names",
+        "input_obs_names_map",
+        "input_obs_scales_map",
+        "input_obs_size_map",
+        "obs_history_length",
+        "export_input_dims",
+        "export_input_order",
+        "joint_names",
+        "observation_layout",
+        "action_scale",
+        "clip_actions",
+        "clip_obs",
+        "runtime_metadata",
+    )
+    return {
+        key: _to_serializable(policy_export_cfg.get(key))
+        for key in keys
+        if key in policy_export_cfg
+    }
+
+
+def _active_terrain_command_ranges(env_cfg: Any, config_summary: Any) -> dict[str, Any]:
+    command_summary = getattr(config_summary, "command", None)
+    ranges = getattr(command_summary, "ranges", {}) or {}
+    terrain = _cfg_attr(_cfg_attr(env_cfg, "scene"), "terrain")
+    terrain_generator = _cfg_attr(terrain, "terrain_generator")
+    sub_terrains = _cfg_attr(terrain_generator, "sub_terrains", {}) or {}
+    active: dict[str, Any] = {}
+    for terrain_name in sub_terrains:
+        active[str(terrain_name)] = {
+            "has_command_range": terrain_name in ranges,
+            "range": _to_serializable(ranges.get(terrain_name)),
+        }
+    return active
+
+
+def build_effective_config_summary(
+    env_cfg: Any,
+    agent_cfg: Any | None = None,
+    policy_export_cfg: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build a compact, JSON-safe summary of the active Galileo configuration."""
 
     config_summary = _cfg_attr(env_cfg, "config_summary")
@@ -240,6 +286,7 @@ def build_effective_config_summary(env_cfg: Any, agent_cfg: Any | None = None) -
             },
         },
         "command": _command_cfg_dump(base_velocity, config_summary),
+        "active_terrain_command_ranges": _active_terrain_command_ranges(env_cfg, config_summary),
         "action": {
             "type": type(joint_pos_action).__name__ if joint_pos_action is not None else None,
             "scale": _cfg_attr(joint_pos_action, "scale"),
@@ -275,6 +322,7 @@ def build_effective_config_summary(env_cfg: Any, agent_cfg: Any | None = None) -
         "rewards": _manager_terms_dump(_cfg_attr(env_cfg, "rewards")),
         "costs": _manager_terms_dump(_cfg_attr(env_cfg, "costs")),
         "agent": _agent_dump(agent_cfg),
+        "policy_export": _policy_export_dump(policy_export_cfg),
     }
     return _to_serializable(summary)
 
@@ -283,6 +331,7 @@ def write_effective_config_summary(
     log_dir: str | Path,
     env_cfg: Any,
     agent_cfg: Any | None = None,
+    policy_export_cfg: Mapping[str, Any] | None = None,
     *,
     filename: str = "effective_summary.json",
 ) -> Path:
@@ -291,7 +340,11 @@ def write_effective_config_summary(
     target_path = Path(log_dir) / "params" / filename
     target_path.parent.mkdir(parents=True, exist_ok=True)
     target_path.write_text(
-        json.dumps(build_effective_config_summary(env_cfg, agent_cfg), indent=2, sort_keys=True),
+        json.dumps(
+            build_effective_config_summary(env_cfg, agent_cfg, policy_export_cfg),
+            indent=2,
+            sort_keys=True,
+        ),
         encoding="utf-8",
     )
     return target_path

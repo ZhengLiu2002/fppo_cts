@@ -15,9 +15,12 @@ from isaaclab.managers import CommandManager, CurriculumManager, TerminationMana
 from isaaclab.envs.common import VecEnvStepReturn
 from collections.abc import Sequence
 from typing import Any, ClassVar
-import math, torch
+import math
+import os
 import numpy as np
+import torch
 from crl_isaaclab.managers.crl_reward_manager import CRLCostManager, CRLRewardManager
+from crl_isaaclab.terrains.runtime import resolve_env_terrain_names
 
 
 class CRLManagerBasedRLEnv(CRLManagerBasedEnv, gym.Env):
@@ -34,11 +37,38 @@ class CRLManagerBasedRLEnv(CRLManagerBasedEnv, gym.Env):
         super().__init__(cfg=cfg)
 
         self.render_mode = render_mode
+        self._configure_debug_obs()
 
         # -- init buffers
         # -- set the framerate of the gym video recorder wrapper so that the playback speed of the produced video matches the simulation
         self.metadata["render_fps"] = 1 / self.step_dt
         print("[INFO]: Completed setting up the environment...")
+
+    def _configure_debug_obs(self) -> None:
+        """Configure opt-in observation diagnostics, following the upstream style."""
+
+        def _get_env_int(name: str, default: int) -> int:
+            try:
+                return int(os.getenv(name, str(default)))
+            except Exception:
+                return default
+
+        debug_flag = os.getenv("CRL_DEBUG_OBS", os.getenv("ISAAC_DEBUG_OBS", "0")).strip().lower()
+        self._debug_obs_enabled = debug_flag not in ("", "0", "false", "off", "no")
+        self._debug_obs_every = max(
+            1,
+            _get_env_int("CRL_DEBUG_OBS_EVERY", _get_env_int("ISAAC_DEBUG_OBS_EVERY", 200)),
+        )
+        self._debug_obs_max = max(
+            1,
+            _get_env_int("CRL_DEBUG_OBS_MAX", _get_env_int("ISAAC_DEBUG_OBS_MAX", 5)),
+        )
+        self._debug_obs_env = max(
+            0,
+            _get_env_int("CRL_DEBUG_OBS_ENV", _get_env_int("ISAAC_DEBUG_OBS_ENV", 0)),
+        )
+        self._debug_obs_count = 0
+        self._debug_obs_step = 0
 
     def load_managers(self):
         # note: this order is important since observation manager needs to know the command and action managers
@@ -161,6 +191,65 @@ class CRLManagerBasedRLEnv(CRLManagerBasedEnv, gym.Env):
 
         return diagnostics
 
+    def _resolve_runtime_terrain_names(self) -> list[str | None]:
+        if not hasattr(self.scene, "terrain"):
+            return [None] * self.num_envs
+        try:
+            env_names = resolve_env_terrain_names(self.scene.terrain)
+            if env_names is not None:
+                return [str(name) for name in env_names]
+        except Exception:
+            pass
+        return [None] * self.num_envs
+
+    def _collect_terrain_command_diagnostics(self) -> dict[str, torch.Tensor | float]:
+        """Log terrain-family command/tracking stats without flooding W&B."""
+        command_term = None
+        try:
+            command_term = self.command_manager.get_term("base_velocity")
+        except Exception:
+            command_term = None
+        if command_term is None or not hasattr(command_term, "command"):
+            return {}
+
+        command = command_term.command
+        if not torch.is_tensor(command) or command.ndim != 2 or command.shape[0] != self.num_envs:
+            return {}
+
+        robot = self.scene["robot"]
+        root_lin_vel = robot.data.root_lin_vel_b
+        root_ang_vel = robot.data.root_ang_vel_b
+        speed = torch.norm(command[:, :2], dim=1)
+        lin_error = torch.norm(command[:, :2] - root_lin_vel[:, :2], dim=1)
+        yaw_error = torch.abs(command[:, 2] - root_ang_vel[:, 2])
+        terrain_names = self._resolve_runtime_terrain_names()
+        diagnostics: dict[str, torch.Tensor | float] = {}
+        unique_names = sorted({name for name in terrain_names if name not in (None, "None")})
+        for terrain_name in unique_names:
+            mask = torch.as_tensor(
+                [name == terrain_name for name in terrain_names],
+                device=self.device,
+                dtype=torch.bool,
+            )
+            if not mask.any():
+                continue
+            prefix = f"TerrainCommand/{terrain_name}"
+            diagnostics[f"{prefix}/env_fraction"] = mask.float().mean()
+            diagnostics[f"{prefix}/active_ratio"] = (speed[mask] > 0.05).float().mean()
+            diagnostics[f"{prefix}/lin_error_mean"] = lin_error[mask].mean()
+            diagnostics[f"{prefix}/yaw_error_mean"] = yaw_error[mask].mean()
+            diagnostics[f"{prefix}/cmd_abs_vx_mean"] = torch.abs(command[mask, 0]).mean()
+            diagnostics[f"{prefix}/cmd_abs_vy_mean"] = torch.abs(command[mask, 1]).mean()
+            diagnostics[f"{prefix}/cmd_abs_wz_mean"] = torch.abs(command[mask, 2]).mean()
+
+        terrain = getattr(self.scene, "terrain", None)
+        terrain_levels = getattr(terrain, "terrain_levels", None)
+        if torch.is_tensor(terrain_levels) and terrain_levels.numel() == self.num_envs:
+            levels = terrain_levels.to(device=self.device, dtype=torch.float32)
+            diagnostics["TerrainCommand/terrain_level_mean"] = levels.mean()
+            diagnostics["TerrainCommand/terrain_level_max"] = levels.max()
+        return diagnostics
+
     def setup_manager_visualizers(self):
         """Creates live visualizers for manager terms."""
         self.manager_visualizers = {
@@ -274,6 +363,11 @@ class CRLManagerBasedRLEnv(CRLManagerBasedEnv, gym.Env):
         constraint_diagnostics = self._collect_constraint_diagnostics()
         if constraint_diagnostics:
             self.extras["log"].update(constraint_diagnostics)
+        terrain_command_diagnostics = self._collect_terrain_command_diagnostics()
+        if terrain_command_diagnostics:
+            self.extras["log"].update(terrain_command_diagnostics)
+        if self._debug_obs_enabled:
+            self._maybe_debug_print_obs(self.obs_buf)
         # note: terrain level hist/mean logging removed to reduce duplicate console/W&B noise
         # return observations, rewards, resets and extras
         return (
@@ -329,6 +423,58 @@ class CRLManagerBasedRLEnv(CRLManagerBasedEnv, gym.Env):
             raise NotImplementedError(
                 f"Render mode '{self.render_mode}' is not supported. Please use: {self.metadata['render_modes']}."
             )
+
+    def _maybe_debug_print_obs(self, obs_dict: dict[str, Any]) -> None:
+        if not self._debug_obs_enabled:
+            return
+        if self._debug_obs_count >= self._debug_obs_max:
+            return
+        self._debug_obs_step += 1
+        if self._debug_obs_step % self._debug_obs_every != 0:
+            return
+        env_id = min(self._debug_obs_env, self.num_envs - 1)
+
+        print(f"[CRL_DEBUG_OBS] step={self.common_step_counter} env={env_id}")
+        for group_name, value in obs_dict.items():
+            if torch.is_tensor(value):
+                sample = value[env_id].detach().cpu().numpy()
+                finite = torch.isfinite(value)
+                nan_count = int(torch.isnan(value).sum().detach().cpu().item())
+                inf_count = int(torch.isinf(value).sum().detach().cpu().item())
+                if finite.any():
+                    finite_values = value[finite]
+                    vmin = float(finite_values.min().detach().cpu().item())
+                    vmax = float(finite_values.max().detach().cpu().item())
+                else:
+                    vmin = float("nan")
+                    vmax = float("nan")
+                formatted = np.array2string(
+                    sample,
+                    precision=6,
+                    separator=",",
+                    suppress_small=False,
+                    max_line_width=160,
+                )
+                print(
+                    f"[CRL_DEBUG_OBS] {group_name}: shape={tuple(value.shape)} "
+                    f"min={vmin:.6g} max={vmax:.6g} nan={nan_count} inf={inf_count}"
+                )
+                print(f"[CRL_DEBUG_OBS] {group_name}[{env_id}]={formatted}")
+            elif isinstance(value, dict):
+                print(f"[CRL_DEBUG_OBS] {group_name}: dict_keys={list(value.keys())}")
+            else:
+                print(f"[CRL_DEBUG_OBS] {group_name}: type={type(value).__name__}")
+
+        obs_mgr = getattr(self, "observation_manager", None)
+        if obs_mgr is not None:
+            for group_name, term_names in getattr(obs_mgr, "active_terms", {}).items():
+                dims = getattr(obs_mgr, "group_obs_term_dim", {}).get(group_name, [])
+                pieces = [
+                    f"{name}:{tuple(dim) if isinstance(dim, (list, tuple)) else dim}"
+                    for name, dim in zip(term_names, dims)
+                ]
+                print(f"[CRL_DEBUG_OBS] {group_name}_terms={pieces}")
+        self._debug_obs_count += 1
 
     def close(self):
         if not self._is_closed:

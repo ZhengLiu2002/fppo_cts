@@ -24,6 +24,25 @@
     "max_iterations": 20000
   },
   "env": {
+    "commands": {
+      "base_velocity": {
+        "lin_x_level_step": 0.5,
+        "lin_y_level_step": 0.005,
+        "ang_z_level_step": 0.5
+      }
+    },
+    "curriculum": {
+      "lin_vel_x_command_threshold": {
+        "params": {
+          "episodes_per_level": 16
+        }
+      },
+      "ang_vel_z_command_threshold": {
+        "params": {
+          "episodes_per_level": 16
+        }
+      }
+    },
     "scene": {
       "terrain": {
         "max_init_terrain_level": 1

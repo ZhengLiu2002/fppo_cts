@@ -222,7 +222,7 @@ class GalileoDefaults:
         # Reference extreme_load curriculum: terrain rows progress by walked
         # distance, while vx/wz envelopes widen by one level every
         # ``env.max_episode_length * command_level_interval_episodes`` steps.
-        episodes_per_level = 8
+        episodes_per_level = 16
         terrain_move_up_ratio = 0.5
         terrain_move_down_ratio = 0.5
         command_level_interval_episodes = 8
@@ -366,7 +366,7 @@ class GalileoDefaults:
         class default:
             heading_command_prob: float = 0.7
             yaw_command_prob: float = 0.0
-            standing_command_prob: float = 0.05
+            standing_command_prob: float = 0.20
             heading = (-math.pi / 2, math.pi / 2)
             lin_vel_x = (-0.5, 0.5)
             lin_vel_y = (-0.5, 0.5)
@@ -386,7 +386,7 @@ class GalileoDefaults:
                 heading=(-math.pi / 2, math.pi / 2),
                 heading_command_prob=0.7,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.20,
                 start_curriculum_lin_x=(-0.5, 0.5),
                 start_curriculum_lin_y=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
@@ -401,7 +401,7 @@ class GalileoDefaults:
                 heading=(-math.pi / 2, math.pi / 2),
                 heading_command_prob=0.7,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.20,
                 start_curriculum_lin_x=(0.0, 0.5),
                 start_curriculum_lin_y=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
@@ -416,7 +416,7 @@ class GalileoDefaults:
                 heading=(-math.pi / 2, math.pi / 2),
                 heading_command_prob=0.7,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.20,
                 start_curriculum_lin_x=(0.0, 0.5),
                 start_curriculum_lin_y=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
@@ -431,7 +431,7 @@ class GalileoDefaults:
                 heading=(-math.pi / 2, math.pi / 2),
                 heading_command_prob=0.7,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.20,
                 start_curriculum_lin_x=(-0.5, 0.5),
                 start_curriculum_lin_y=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
@@ -446,7 +446,7 @@ class GalileoDefaults:
                 heading=(-math.pi / 2, math.pi / 2),
                 heading_command_prob=0.7,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.20,
                 start_curriculum_lin_x=(-0.5, 0.5),
                 start_curriculum_lin_y=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
@@ -461,7 +461,7 @@ class GalileoDefaults:
                 heading=(-math.pi / 2, math.pi / 2),
                 heading_command_prob=0.7,
                 yaw_command_prob=0.0,
-                standing_command_prob=0.05,
+                standing_command_prob=0.20,
                 start_curriculum_lin_x=(-0.5, 0.5),
                 start_curriculum_lin_y=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),
@@ -476,7 +476,7 @@ class GalileoDefaults:
                 heading=(-math.pi / 2, math.pi / 2),
                 heading_command_prob=0.0,
                 yaw_command_prob=0.5,
-                standing_command_prob=0.05,
+                standing_command_prob=0.20,
                 start_curriculum_lin_x=(-0.5, 0.5),
                 start_curriculum_lin_y=(-0.5, 0.5),
                 start_curriculum_ang_z=(-0.25, 0.25),

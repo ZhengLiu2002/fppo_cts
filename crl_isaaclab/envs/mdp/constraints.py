@@ -292,12 +292,15 @@ def _foot_heights_relative(
 def constraint_joint_pos(
     env: ManagerBasedRLEnv,
     margin: float = 0.0,
+    soft_ratio: float = 1.0,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Binary joint-position feasibility cost averaged over selected joints.
+    """Soft joint-position feasibility cost averaged over selected joints.
 
-    Each joint contributes ``0`` if its angle lies within the allowed range and
-    ``1 / n_joints`` otherwise.
+    ``soft_ratio`` controls where penalties start:
+    - ``soft_ratio >= 1.0``: binary violation outside the soft joint limits
+    - ``0 < soft_ratio < 1.0``: linear ramp from the inner ratio of each joint
+      range to the soft joint limit
     """
     asset: Articulation = env.scene[asset_cfg.name]
     joint_ids = _get_joint_slice(asset_cfg)
@@ -349,22 +352,43 @@ def constraint_joint_pos(
     margin_t = torch.as_tensor(margin, device=joint_pos.device, dtype=joint_pos.dtype)
     lower = limits[..., 0] - margin_t
     upper = limits[..., 1] + margin_t
-    violation = (joint_pos < lower) | (joint_pos > upper)
-    return violation.float().mean(dim=1)
+    ratio = float(soft_ratio)
+    if ratio >= 1.0:
+        violation = (joint_pos < lower) | (joint_pos > upper)
+        return violation.float().mean(dim=1)
+
+    ratio = min(max(ratio, 1.0e-6), 0.999999)
+    center = 0.5 * (lower + upper)
+    half_range = torch.clamp(
+        0.5 * (upper - lower),
+        min=torch.finfo(joint_pos.dtype).eps,
+    )
+    normalized_distance = torch.abs(joint_pos - center) / half_range
+    violation = torch.clamp(
+        (normalized_distance - ratio) / (1.0 - ratio),
+        min=0.0,
+        max=1.0,
+    )
+    return violation.mean(dim=1)
 
 
 def joint_pos_prob_constraint(
     env: ManagerBasedRLEnv,
     margin: float = 0.0,
-    limit: float | None = None,
+    soft_ratio: float = 1.0,
+    cost_limit: float | None = None,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    limit: float | None = None,
 ) -> torch.Tensor:
+    if cost_limit is None:
+        cost_limit = limit
     cost = constraint_joint_pos(
         env,
         margin=margin,
+        soft_ratio=soft_ratio,
         asset_cfg=asset_cfg,
     )
-    return _normalize_cost(cost, limit)
+    return _normalize_cost(cost, cost_limit)
 
 
 def joint_vel_prob_constraint(

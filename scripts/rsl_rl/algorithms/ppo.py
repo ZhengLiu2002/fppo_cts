@@ -300,7 +300,7 @@ class PPO:
         return bool(getattr(actor, "num_hist", 0) > 0)
 
     def _cts_enabled(self) -> bool:
-        return self.training_type == "cts"
+        return getattr(self, "training_type", "rl") == "cts"
 
     @staticmethod
     def _student_mask(actor_is_student: torch.Tensor) -> torch.Tensor:
@@ -393,6 +393,58 @@ class PPO:
         teacher_idx = torch.nonzero(~student_mask, as_tuple=False).flatten()
         return teacher_idx, student_idx
 
+    def _cts_group_objective(
+        self,
+        values: torch.Tensor,
+        actor_is_student: torch.Tensor | None,
+    ) -> torch.Tensor:
+        scalar_values = values.ndim == 1
+        flat_values = values.reshape(-1, 1) if scalar_values else values.reshape(-1, values.shape[-1])
+        if not self._cts_enabled() or actor_is_student is None:
+            objective = flat_values.mean(dim=0)
+            return objective.squeeze(0) if scalar_values else objective
+        actor_is_student = self._resolve_actor_is_student_batch(
+            actor_is_student,
+            flat_values.shape[0],
+            values.device,
+        )
+        group_means = []
+        for batch_idx in self._role_indices(actor_is_student):
+            if batch_idx.numel() <= 0:
+                continue
+            group_means.append(flat_values.index_select(0, batch_idx).mean(dim=0))
+        if not group_means:
+            objective = flat_values.mean(dim=0)
+        else:
+            objective = torch.stack(group_means, dim=0).sum(dim=0)
+        return objective.squeeze(0) if scalar_values else objective
+
+    def _normalize_feature_batch(
+        self,
+        values: torch.Tensor,
+        actor_is_student: torch.Tensor | None,
+    ) -> torch.Tensor:
+        flat_values = values.reshape(-1, values.shape[-1])
+        if not self._cts_enabled() or actor_is_student is None:
+            normalized = (flat_values - flat_values.mean(dim=0, keepdim=True)) / (
+                flat_values.std(dim=0, keepdim=True, unbiased=False) + 1.0e-8
+            )
+            return normalized.view_as(values)
+        actor_is_student = self._resolve_actor_is_student_batch(
+            actor_is_student,
+            flat_values.shape[0],
+            values.device,
+        )
+        normalized = flat_values.clone()
+        for batch_idx in self._role_indices(actor_is_student):
+            if batch_idx.numel() <= 0:
+                continue
+            group_values = flat_values.index_select(0, batch_idx)
+            mean = group_values.mean(dim=0, keepdim=True)
+            std = group_values.std(dim=0, keepdim=True, unbiased=False)
+            normalized[batch_idx] = (group_values - mean) / (std + 1.0e-8)
+        return normalized.view_as(values)
+
     def _evaluate_cts_group(
         self,
         obs_batch: torch.Tensor,
@@ -416,19 +468,20 @@ class PPO:
         if actions is None:
             actions = self.policy.distribution.sample()
         log_prob = self.policy.get_actions_log_prob(actions)
+        critic_latent = latent.detach()
         values = self.policy.evaluate(
             critic_obs_batch,
             observations=obs_batch,
             actor_mode=actor_mode,
-            latent=latent,
-            detach_student_encoder=detach_student,
+            latent=critic_latent,
+            detach_student_encoder=True,
         )
         cost_pred = self.policy.evaluate_cost(
             critic_obs_batch,
             observations=obs_batch,
             actor_mode=actor_mode,
-            latent=latent,
-            detach_student_encoder=detach_student,
+            latent=critic_latent,
+            detach_student_encoder=True,
         )
         cost_values, cost_term_values = self._split_cost_value_heads(cost_pred)
         return (
@@ -507,6 +560,74 @@ class PPO:
         if cost_term_values is None:
             cost_term_values = cost_values.clone()
         return batched_actions, log_prob, values, cost_values, cost_term_values, mu, sigma, entropy
+
+    def _evaluate_cts_value_batch(
+        self,
+        obs_batch: torch.Tensor,
+        critic_obs_batch: torch.Tensor,
+        actor_is_student: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        actor_is_student = self._resolve_actor_is_student_batch(
+            actor_is_student,
+            obs_batch.shape[0],
+            obs_batch.device,
+        )
+        batch_size = obs_batch.shape[0]
+        values = torch.zeros(
+            batch_size,
+            1,
+            device=critic_obs_batch.device,
+            dtype=critic_obs_batch.dtype,
+        )
+        cost_term_values = None
+
+        for actor_mode, batch_idx in (
+            ("teacher", self._role_indices(actor_is_student)[0]),
+            ("student", self._role_indices(actor_is_student)[1]),
+        ):
+            if batch_idx.numel() <= 0:
+                continue
+            detach_student = actor_mode == "student" and self.detach_student_encoder_during_rl
+            latent = self.policy.actor_mode_latent(
+                obs_batch[batch_idx],
+                actor_mode,
+                detach_student_encoder=detach_student,
+            ).detach()
+            group_values = self.policy.evaluate(
+                critic_obs_batch[batch_idx],
+                observations=obs_batch[batch_idx],
+                actor_mode=actor_mode,
+                latent=latent,
+                detach_student_encoder=True,
+            )
+            group_cost_pred = self.policy.evaluate_cost(
+                critic_obs_batch[batch_idx],
+                observations=obs_batch[batch_idx],
+                actor_mode=actor_mode,
+                latent=latent,
+                detach_student_encoder=True,
+            )
+            _group_cost_values, group_cost_term_values = self._split_cost_value_heads(
+                group_cost_pred
+            )
+            values[batch_idx] = group_values
+            if cost_term_values is None:
+                cost_term_values = torch.zeros(
+                    batch_size,
+                    group_cost_term_values.shape[-1],
+                    device=group_cost_term_values.device,
+                    dtype=group_cost_term_values.dtype,
+                )
+            cost_term_values[batch_idx] = group_cost_term_values
+
+        if cost_term_values is None:
+            cost_term_values = torch.zeros(
+                batch_size,
+                1,
+                device=critic_obs_batch.device,
+                dtype=critic_obs_batch.dtype,
+            )
+        return values, cost_term_values
 
     def _evaluate_actor_batch(
         self,
@@ -933,11 +1054,12 @@ class PPO:
         self,
         cost_advantages: torch.Tensor,
         ratio: torch.Tensor,
+        actor_is_student: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if cost_advantages.ndim == 1:
             cost_advantages = cost_advantages.unsqueeze(-1)
         ratio = ratio.reshape(-1, 1).to(device=cost_advantages.device, dtype=cost_advantages.dtype)
-        return torch.mean(cost_advantages * ratio, dim=0)
+        return self._cts_group_objective(cost_advantages * ratio, actor_is_student)
 
     def _constraint_weighted_advantages(
         self,
@@ -1187,18 +1309,19 @@ class PPO:
 
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
-                    advantages_batch = (advantages_batch - advantages_batch.mean()) / (
-                        advantages_batch.std() + 1e-8
+                    advantages_batch = self._normalize_feature_batch(
+                        advantages_batch,
+                        actor_is_student_batch,
                     )
                     if self.normalize_cost_advantage:
-                        cost_advantages_batch = (
-                            cost_advantages_batch - cost_advantages_batch.mean()
-                        ) / (cost_advantages_batch.std() + 1e-8)
+                        cost_advantages_batch = self._normalize_feature_batch(
+                            cost_advantages_batch,
+                            actor_is_student_batch,
+                        )
                         if cost_term_advantages_batch is not None:
-                            mean = cost_term_advantages_batch.mean(dim=0, keepdim=True)
-                            std = cost_term_advantages_batch.std(dim=0, keepdim=True)
-                            cost_term_advantages_batch = (cost_term_advantages_batch - mean) / (
-                                std + 1e-8
+                            cost_term_advantages_batch = self._normalize_feature_batch(
+                                cost_term_advantages_batch,
+                                actor_is_student_batch,
                             )
 
             advantages_batch = self._sanitize_tensor(
@@ -1293,13 +1416,20 @@ class PPO:
             surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(
                 ratio, 1.0 - self.clip_param, 1.0 + self.clip_param
             )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            surrogate_loss = self._cts_group_objective(
+                torch.max(surrogate, surrogate_clipped).reshape(-1),
+                actor_is_student_batch,
+            )
             ratio_cost = torch.clamp(
                 ratio,
                 1.0 - self.cost_ratio_clip,
                 1.0 + self.cost_ratio_clip,
             )
-            cost_surrogates = self._constraint_surrogate_terms(cost_terms_adv, ratio_cost)
+            cost_surrogates = self._constraint_surrogate_terms(
+                cost_terms_adv,
+                ratio_cost,
+                actor_is_student_batch,
+            )
             viol_loss = self._positive_cost_penalty_per_constraint(
                 cost_surrogates,
                 constraint_stats["c_hat"],
@@ -1347,6 +1477,10 @@ class PPO:
                 )
             )
 
+            entropy_objective = self._cts_group_objective(
+                entropy_batch.reshape(-1),
+                actor_is_student_batch,
+            )
             loss = (
                 surrogate_loss
                 + viol_loss
@@ -1354,7 +1488,7 @@ class PPO:
                 + self.cost_value_loss_coef * cost_value_loss
                 + weighted_velocity_estimation_loss
                 + weighted_teacher_latent_reg_loss
-                - self.entropy_coef * entropy_batch.mean()
+                - self.entropy_coef * entropy_objective
             )
             loss = self._sanitize_tensor(loss, nan=0.0, posinf=1.0e6, neginf=-1.0e6, clamp=1.0e6)
             if not torch.isfinite(loss):

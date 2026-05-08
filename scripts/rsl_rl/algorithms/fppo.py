@@ -470,8 +470,9 @@ class FPPO(PPO):
             actor_is_student_batch = _extra_batch[4] if len(_extra_batch) > 4 else None
             if self.normalize_advantage_per_mini_batch:
                 with torch.no_grad():
-                    advantages_batch = (advantages_batch - advantages_batch.mean()) / (
-                        advantages_batch.std() + 1.0e-8
+                    advantages_batch = self._normalize_feature_batch(
+                        advantages_batch,
+                        actor_is_student_batch,
                     )
 
             advantages_batch = self._sanitize_tensor(
@@ -541,7 +542,10 @@ class FPPO(PPO):
                 1.0 - self.clip_param,
                 1.0 + self.clip_param,
             )
-            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            surrogate_loss = self._cts_group_objective(
+                torch.max(surrogate, surrogate_clipped),
+                actor_is_student_batch,
+            )
 
             reconstruction_loss, weighted_reconstruction_loss = self._velocity_estimation_loss(
                 obs_batch, critic_obs_batch
@@ -553,11 +557,15 @@ class FPPO(PPO):
                     coefficient=teacher_latent_reg_coef,
                 )
             )
+            entropy_objective = self._cts_group_objective(
+                entropy_batch.reshape(-1),
+                actor_is_student_batch,
+            )
             loss = (
                 surrogate_loss
                 + weighted_reconstruction_loss
                 + weighted_teacher_latent_reg_loss
-                - self.entropy_coef * entropy_batch.mean()
+                - self.entropy_coef * entropy_objective
             )
             loss = self._sanitize_tensor(
                 loss,
@@ -611,7 +619,7 @@ class FPPO(PPO):
         generator = self._mini_batch_generator()
 
         for (
-            _obs_batch,
+            obs_batch,
             critic_obs_batch,
             _actions_batch,
             target_values_batch,
@@ -630,6 +638,7 @@ class FPPO(PPO):
             cost_term_returns_batch = extra_batch[0] if len(extra_batch) > 0 else None
             cost_term_advantages_batch = extra_batch[1] if len(extra_batch) > 1 else None
             cost_term_values_batch = extra_batch[3] if len(extra_batch) > 3 else None
+            actor_is_student_batch = extra_batch[4] if len(extra_batch) > 4 else None
 
             returns_batch = self._sanitize_tensor(
                 returns_batch,
@@ -667,27 +676,34 @@ class FPPO(PPO):
                 cost_term_values_batch=cost_term_values_batch,
             )
 
-            value_batch = self.policy.evaluate(
-                critic_obs_batch,
-                masks=masks_batch,
-                hidden_states=hid_states_batch[1],
-            )
-            cost_value_batch = self.policy.evaluate_cost(
-                critic_obs_batch,
-                masks=masks_batch,
-                hidden_states=hid_states_batch[2],
-            )
-            cost_value_batch = self._sanitize_tensor(
-                cost_value_batch,
-                nan=0.0,
-                posinf=1.0e4,
-                neginf=-1.0e4,
-                clamp=1.0e4,
-            )
-            if cost_value_batch.ndim == 1:
-                cost_value_batch = cost_value_batch.unsqueeze(-1)
-            elif cost_value_batch.ndim > 2:
-                cost_value_batch = cost_value_batch.view(cost_value_batch.shape[0], -1)
+            if self._cts_enabled():
+                value_batch, cost_value_batch = self._evaluate_cts_value_batch(
+                    obs_batch,
+                    critic_obs_batch,
+                    actor_is_student_batch,
+                )
+            else:
+                value_batch = self.policy.evaluate(
+                    critic_obs_batch,
+                    masks=masks_batch,
+                    hidden_states=hid_states_batch[1],
+                )
+                cost_value_batch = self.policy.evaluate_cost(
+                    critic_obs_batch,
+                    masks=masks_batch,
+                    hidden_states=hid_states_batch[2],
+                )
+                cost_value_batch = self._sanitize_tensor(
+                    cost_value_batch,
+                    nan=0.0,
+                    posinf=1.0e4,
+                    neginf=-1.0e4,
+                    clamp=1.0e4,
+                )
+                if cost_value_batch.ndim == 1:
+                    cost_value_batch = cost_value_batch.unsqueeze(-1)
+                elif cost_value_batch.ndim > 2:
+                    cost_value_batch = cost_value_batch.view(cost_value_batch.shape[0], -1)
 
             pred_cost_terms = self._match_cost_heads(cost_value_batch, cost_terms_ret.shape[1])
             old_cost_terms = self._match_cost_heads(cost_terms_val, cost_terms_ret.shape[1])
@@ -1021,7 +1037,7 @@ class FPPO(PPO):
 
         # Cache must be invalidated whenever the active constraint set changes,
         # because shard variances are tracked per active column only.
-        cached_indices = self._sigma_a_active_indices
+        cached_indices = getattr(self, "_sigma_a_active_indices", None)
         cache_size_match = (
             self._sigma_a_cache is not None and self._sigma_a_cache.numel() == a_mat.shape[1]
         )

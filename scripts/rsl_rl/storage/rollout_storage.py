@@ -241,6 +241,30 @@ class RolloutStorage:
     def clear(self):
         self.step = 0
 
+    @staticmethod
+    def _normalize_by_role(values: torch.Tensor, actor_is_student: torch.Tensor) -> torch.Tensor:
+        flat_values = values.reshape(-1, values.shape[-1])
+        flat_roles = actor_is_student.reshape(-1, actor_is_student.shape[-1])[:, 0].bool()
+        normalized = flat_values.clone()
+        for role_mask in (torch.logical_not(flat_roles), flat_roles):
+            if not torch.any(role_mask):
+                continue
+            role_values = flat_values[role_mask]
+            mean = role_values.mean(dim=0, keepdim=True)
+            std = role_values.std(dim=0, keepdim=True, unbiased=False)
+            normalized[role_mask] = (role_values - mean) / (std + 1e-8)
+        return normalized.view_as(values)
+
+    def _normalize_advantages(self, values: torch.Tensor) -> torch.Tensor:
+        if self.training_type == "cts" and self.actor_is_student is not None:
+            return self._normalize_by_role(values, self.actor_is_student)
+        return (values - values.mean()) / (values.std() + 1e-8)
+
+    def _normalize_cost_advantages(self, values: torch.Tensor) -> torch.Tensor:
+        if self.training_type == "cts" and self.actor_is_student is not None:
+            return self._normalize_by_role(values, self.actor_is_student)
+        return (values - values.mean()) / (values.std() + 1e-8)
+
     def compute_returns(
         self,
         last_values,
@@ -320,22 +344,28 @@ class RolloutStorage:
         # Normalize the advantages if flag is set
         # This is to prevent double normalization (i.e. if per minibatch normalization is used)
         if normalize_advantage:
-            self.advantages = (self.advantages - self.advantages.mean()) / (
-                self.advantages.std() + 1e-8
-            )
+            self.advantages = self._normalize_advantages(self.advantages)
 
         if compute_cost:
             self.cost_advantages = self.cost_returns - self.cost_values
             if normalize_cost_advantage:
-                self.cost_advantages = (self.cost_advantages - self.cost_advantages.mean()) / (
-                    self.cost_advantages.std() + 1e-8
-                )
+                self.cost_advantages = self._normalize_cost_advantages(self.cost_advantages)
             if compute_cost_terms and self.cost_term_advantages is not None:
                 self.cost_term_advantages = self.cost_term_returns - self.cost_term_values
                 if normalize_cost_advantage:
-                    mean = self.cost_term_advantages.mean(dim=(0, 1), keepdim=True)
-                    std = self.cost_term_advantages.std(dim=(0, 1), keepdim=True, unbiased=False)
-                    self.cost_term_advantages = (self.cost_term_advantages - mean) / (std + 1e-8)
+                    if self.training_type == "cts" and self.actor_is_student is not None:
+                        self.cost_term_advantages = self._normalize_by_role(
+                            self.cost_term_advantages,
+                            self.actor_is_student,
+                        )
+                    else:
+                        mean = self.cost_term_advantages.mean(dim=(0, 1), keepdim=True)
+                        std = self.cost_term_advantages.std(
+                            dim=(0, 1), keepdim=True, unbiased=False
+                        )
+                        self.cost_term_advantages = (self.cost_term_advantages - mean) / (
+                            std + 1e-8
+                        )
 
     # for reinforcement learning with feedforward networks
     def mini_batch_generator(self, num_mini_batches, num_epochs=8):

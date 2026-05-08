@@ -105,9 +105,9 @@ def test_fppo_cts_config_inherits_shared_cts_algorithm_fields() -> None:
     assert "class CRLRslRlFppoAlgorithmCfg(CRLRslRlPpoAlgorithmCfg):" in source
     assert "student_group_ratio: float = 0.25" in source
     assert "velocity_estimation_loss_coef: float = 0.05" in source
-    assert "reconstruction_learning_rate: float = 3e-4" in source
-    assert "num_reconstruction_epochs: int = 1" in source
-    assert 'roa_teacher_reg_coef_end: float = 0.05' in source
+    assert "reconstruction_learning_rate: float = 1e-3" in source
+    assert "num_reconstruction_epochs: int = 5" in source
+    assert 'roa_teacher_reg_coef_end: float = 0.0' in source
     assert 'roa_teacher_reg_scope: str = "teacher"' in source
 
 
@@ -133,7 +133,7 @@ def test_cts_defaults_keep_auxiliary_supervision_in_shared_profile() -> None:
 
     assert "shared_cts_framework = dict(" in source
     assert source.count("velocity_estimation_loss_coef=0.05") == 1
-    assert source.count("roa_teacher_reg_coef_end=0.05") == 1
+    assert source.count("roa_teacher_reg_coef_end=0.0") == 1
     assert "constraint_adapter_base = dict(" in source
     assert "constraint_adapter_per_algo = {}" in source
 
@@ -163,7 +163,7 @@ def test_cts_defaults_and_commands_match_policy_template_targets() -> None:
     assert "lin_vel_x = (-0.5, 0.5)" in defaults_source
     assert "lin_vel_y = (-0.5, 0.5)" in defaults_source
     assert "ang_vel_z = (-0.25, 0.25)" in defaults_source
-    assert "standing_command_prob=0.05" in defaults_source
+    assert "standing_command_prob=0.20" in defaults_source
     assert "heading_command_prob=0.7" in defaults_source
     assert '"plane_run": dict(' in defaults_source
     assert "max_curriculum_lin_x=(-1.0, 1.0)" in defaults_source

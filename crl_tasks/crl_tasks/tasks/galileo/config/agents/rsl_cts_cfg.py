@@ -55,7 +55,7 @@ def build_cts_policy_cfg() -> CRLRslRlPpoActorCriticCfg:
         critic_hidden_dims=[512, 512, 256, 128],
         cost_critic_hidden_dims=[512, 512, 256, 128],
         encode_scan_for_critic=True,
-        critic_use_latent=False,
+        critic_use_latent=True,
         critic_num_prop=GalileoDefaults.obs.cts.critic_num_prop,
         critic_num_scan=GalileoDefaults.obs.cts.critic_num_scan,
         critic_num_priv_explicit=GalileoDefaults.obs.cts.critic_num_priv_explicit,

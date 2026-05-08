@@ -292,7 +292,7 @@ class GalileoDefaults:
             actor_num_priv_explicit = 0
             actor_num_priv_latent = 235
             actor_history_latent_dim = 32
-            actor_num_hist = 20
+            actor_num_hist = 5
 
             critic_num_prop = 48
             critic_num_scan = 182
@@ -621,12 +621,12 @@ class GalileoDefaults:
         # should live in ``per_algo`` below.
         shared_cts_framework = dict(
             student_group_ratio=0.25,
-            reconstruction_learning_rate=3.0e-4,
-            num_reconstruction_epochs=1,
+            reconstruction_learning_rate=1.0e-3,
+            num_reconstruction_epochs=5,
             detach_student_encoder_during_rl=True,
             velocity_estimation_loss_coef=0.05,
             roa_teacher_reg_coef_start=0.0,
-            roa_teacher_reg_coef_end=0.05,
+            roa_teacher_reg_coef_end=0.0,
             roa_teacher_reg_warmup_updates=5000,
             roa_teacher_reg_ramp_updates=5000,
             roa_teacher_reg_scope="teacher",
@@ -640,7 +640,7 @@ class GalileoDefaults:
             use_clipped_value_loss=True,
             clip_param=0.2,
             entropy_coef=0.01,
-            desired_kl=0.004,
+            desired_kl=0.01,
             num_learning_epochs=5,
             num_mini_batches=4,
             learning_rate=1.0e-3,
@@ -718,7 +718,7 @@ class GalileoDefaults:
                 cost_value_loss_coef=1.0,
                 num_learning_epochs=4,
                 learning_rate=2.0e-4,
-                desired_kl=0.012,
+                desired_kl=0.01,
                 cost_gamma=None,
                 cost_lam=None,
                 backtrack_coeff=0.5,

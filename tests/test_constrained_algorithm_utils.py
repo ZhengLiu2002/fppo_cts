@@ -112,6 +112,18 @@ def test_fppo_constraint_cost_stats_use_env_axis() -> None:
     assert torch.allclose(sigma_j, expected_sigma)
 
 
+def test_cts_group_objective_sums_teacher_and_student_means() -> None:
+    fppo = FPPO.__new__(FPPO)
+    fppo.training_type = "cts"
+
+    values = torch.tensor([1.0, 3.0, 10.0])
+    actor_is_student = torch.tensor([False, False, True])
+
+    objective = FPPO._cts_group_objective(fppo, values, actor_is_student)
+
+    assert torch.allclose(objective, torch.tensor(12.0))
+
+
 def test_fppo_robust_margin_matches_paper_formula() -> None:
     fppo = FPPO.__new__(FPPO)
     fppo.desired_kl = 0.02
@@ -419,6 +431,11 @@ def test_fppo_predictor_hard_limit_stops_and_adapts_lr() -> None:
     assert metrics["updates"] == 1.0
     assert abs(metrics["update_ratio"] - 0.25) < 1.0e-12
     assert abs(metrics["stop_rate"] - 0.75) < 1.0e-12
-    assert abs(metrics["mean_teacher_latent_reg"] - 0.2) < 1.0e-12
-    assert abs(metrics["mean_teacher_latent_reg_weighted"] - 0.1) < 1.0e-12
+    assert math.isclose(metrics["mean_teacher_latent_reg"], 0.2, rel_tol=0.0, abs_tol=1.0e-7)
+    assert math.isclose(
+        metrics["mean_teacher_latent_reg_weighted"],
+        0.1,
+        rel_tol=0.0,
+        abs_tol=1.0e-7,
+    )
     assert fppo.predictor_lr < 1.0e-3

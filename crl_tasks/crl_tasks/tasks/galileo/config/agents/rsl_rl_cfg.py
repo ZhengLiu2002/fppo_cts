@@ -82,11 +82,11 @@ class CRLRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
     velocity_estimation_loss_coef: float = 0.05
     # CTS framework controls shared by all optimizer variants.
     student_group_ratio: float = 0.25
-    reconstruction_learning_rate: float = 3e-4
-    num_reconstruction_epochs: int = 1
+    reconstruction_learning_rate: float = 1e-3
+    num_reconstruction_epochs: int = 5
     detach_student_encoder_during_rl: bool = True
     roa_teacher_reg_coef_start: float = 0.0
-    roa_teacher_reg_coef_end: float = 0.05
+    roa_teacher_reg_coef_end: float = 0.0
     roa_teacher_reg_warmup_updates: int = 5000
     roa_teacher_reg_ramp_updates: int = 5000
     roa_teacher_reg_scope: str = "teacher"
